@@ -1,16 +1,13 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
-  Activity,
-  Cpu,
-  Play,
+  ChevronDown,
+  PanelLeft,
   Plus,
   RefreshCcw,
-  Square,
-  Stethoscope,
-  Terminal,
-  Trash2,
-  WandSparkles,
+  Search,
+  Send,
+  Sparkles,
 } from 'lucide-react';
 import './styles.css';
 
@@ -19,20 +16,11 @@ const API_BASE = import.meta.env.VITE_API_BASE ?? '/api';
 function App() {
   const [vms, setVms] = useState([]);
   const [selectedName, setSelectedName] = useState('');
-  const [includeAll, setIncludeAll] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [createForm, setCreateForm] = useState({
-    name: '',
-    cpus: 2,
-    memory: 2048,
-    replace: true,
-    rebuild_snapshot: false,
-    no_snapshot: false,
-  });
-  const [execCommand, setExecCommand] = useState('pwd');
-  const [codexPrompt, setCodexPrompt] = useState('Reply exactly ok');
-  const [hermesArgs, setHermesArgs] = useState('--help');
-  const [log, setLog] = useState('Ready.');
+  const [showCreate, setShowCreate] = useState(false);
+  const [createForm, setCreateForm] = useState({ userName: '', botName: '' });
+  const [chatInput, setChatInput] = useState('');
+  const [messages, setMessages] = useState([]);
 
   const selectedVm = useMemo(
     () => vms.find((vm) => vm.name === selectedName) ?? vms[0],
@@ -40,8 +28,8 @@ function App() {
   );
 
   useEffect(() => {
-    refresh({ showOutput: true }).catch(() => {});
-  }, [includeAll]);
+    refresh().catch(() => {});
+  }, []);
 
   async function request(path, options = {}) {
     setBusy(true);
@@ -55,16 +43,13 @@ function App() {
         throw data;
       }
       return data;
-    } catch (error) {
-      setLog(formatError(error));
-      throw error;
     } finally {
       setBusy(false);
     }
   }
 
-  async function refresh({ showOutput = true } = {}) {
-    const data = await request(`/vms${includeAll ? '?all=true' : ''}`);
+  async function refresh() {
+    const data = await request('/vms');
     setVms(data.vms);
     if (data.vms.length && !data.vms.some((vm) => vm.name === selectedName)) {
       setSelectedName(data.vms[0].name);
@@ -72,273 +57,207 @@ function App() {
     if (!data.vms.length) {
       setSelectedName('');
     }
-    if (showOutput) {
-      setLog(renderResult(data.raw));
+  }
+
+  async function createWorkspace(event) {
+    event.preventDefault();
+    const name = createForm.botName.trim();
+    if (!name) return;
+
+    await request('/vms', {
+      method: 'POST',
+      body: JSON.stringify({ name, replace: true }),
+    });
+    setCreateForm({ userName: '', botName: '' });
+    setShowCreate(false);
+    setSelectedName(name);
+    setMessages([]);
+    await refresh();
+  }
+
+  async function sendMessage(event) {
+    event.preventDefault();
+    if (!selectedVm) return;
+
+    const prompt = chatInput.trim();
+    if (!prompt) return;
+
+    setChatInput('');
+    setMessages((current) => [...current, { role: 'user', content: prompt }]);
+
+    try {
+      const result = await request(`/vms/${encodeURIComponent(selectedVm.name)}/codex`, {
+        method: 'POST',
+        body: JSON.stringify({ prompt }),
+      });
+      setMessages((current) => [...current, { role: 'assistant', content: renderResult(result) }]);
+      await refresh();
+    } catch (error) {
+      setMessages((current) => [...current, { role: 'assistant', content: formatError(error) }]);
     }
   }
 
-  async function createVm(event) {
-    event.preventDefault();
-    const result = await request('/vms', {
-      method: 'POST',
-      body: JSON.stringify({
-        ...createForm,
-        cpus: Number(createForm.cpus),
-        memory: Number(createForm.memory),
-      }),
-    });
-    setLog(renderResult(result));
-    await refresh({ showOutput: false });
-  }
-
-  async function vmAction(action) {
-    if (!selectedVm) return;
-    const result = await request(`/vms/${encodeURIComponent(selectedVm.name)}/${action}`, {
-      method: 'POST',
-      body: '{}',
-    });
-    setLog(renderResult(result));
-    await refresh({ showOutput: false });
-  }
-
-  async function runCommand(kind) {
-    if (!selectedVm) return;
-    const payloads = {
-      exec: { command: splitArgs(execCommand) },
-      codex: { prompt: codexPrompt },
-      hermes: { command: splitArgs(hermesArgs) },
-      doctor: {},
-    };
-    const result = await request(`/vms/${encodeURIComponent(selectedVm.name)}/${kind}`, {
-      method: 'POST',
-      body: JSON.stringify(payloads[kind]),
-    });
-    setLog(renderResult(result));
-    await refresh({ showOutput: false });
+  function selectWorkspace(name) {
+    setSelectedName(name);
+    setMessages([]);
   }
 
   return (
-    <main className="shell">
-      <header className="topbar">
-        <div>
-          <div className="statusPill">
-            <WandSparkles size={18} />
-            Local manager
-          </div>
-          <h1>Agent Mom</h1>
-          <p>Create and manage isolated agent workspaces.</p>
+    <main className="appShell">
+      <aside className="sidebar">
+        <div className="brandRow">
+          <div className="brandMark">A</div>
+          <button className="brandButton">
+            Agent Mom
+            <ChevronDown size={16} />
+          </button>
         </div>
-        <button className="secondaryButton" onClick={refresh} disabled={busy}>
-          <RefreshCcw size={18} />
-          Refresh
+
+        <button className="createButton" onClick={() => setShowCreate(true)}>
+          <Plus size={18} />
+          Create
         </button>
-      </header>
 
-      <section className="layout">
-        <aside className="sidebar">
-          <div className="sectionHeader">
-            <div>
-              <h2>Workspaces</h2>
-              <p className="sectionNote">Choose a workspace to manage.</p>
-            </div>
-            <label className="toggle">
-              <input
-                type="checkbox"
-                checked={includeAll}
-                onChange={(event) => setIncludeAll(event.target.checked)}
-              />
-              Show unmanaged
-            </label>
-          </div>
+        <button className="sidebarAction">
+          <Search size={18} />
+          Search workspaces
+        </button>
 
-          <div className="vmList">
+        <div className="workspaceSection">
+          <h2>Today</h2>
+          <div className="workspaceList">
             {vms.map((vm) => (
               <button
                 key={vm.name}
-                className={`vmItem ${selectedVm?.name === vm.name ? 'active' : ''}`}
-                onClick={() => setSelectedName(vm.name)}
+                className={`workspaceItem ${selectedVm?.name === vm.name ? 'active' : ''}`}
+                onClick={() => selectWorkspace(vm.name)}
               >
-                <span className={`status ${vm.status.toLowerCase()}`} />
-                <span>
-                  <strong>{vm.name}</strong>
-                  <small>{vm.status}</small>
-                </span>
+                <span>{vm.name}</span>
+                <small>{friendlyStatus(vm.status)}</small>
               </button>
             ))}
-            {!vms.length && <p className="empty">No VMs found.</p>}
+            {!vms.length && <p className="emptyList">No workspaces yet.</p>}
           </div>
+        </div>
 
-          <form className="createForm" onSubmit={createVm}>
+        <div className="sessionBox">
+          <h2>Session</h2>
+          <strong>Local workspace</strong>
+          <span>Signed in on this machine.</span>
+        </div>
+      </aside>
+
+      <section className="chatShell">
+        <header className="chatHeader">
+          <button className="squareButton" title="Toggle sidebar">
+            <PanelLeft size={20} />
+          </button>
+          <div>
+            <h1>{selectedVm?.name ?? 'Agent workspace'}</h1>
+            <p>{selectedVm ? friendlyStatus(selectedVm.status) : 'Create a workspace to begin.'}</p>
+          </div>
+          <button className="refreshButton" onClick={refresh} disabled={busy}>
+            <RefreshCcw size={17} />
+            Refresh
+          </button>
+        </header>
+
+        <div className="chatBody">
+          {messages.length === 0 ? (
+            <div className="emptyChat">
+              <p>Ready when you are.</p>
+              <h2>Ask Agent Mom about your workspace.</h2>
+            </div>
+          ) : (
+            <div className="messageList">
+              {messages.map((message, index) => (
+                <article key={`${message.role}-${index}`} className={`message ${message.role}`}>
+                  <span>{message.role === 'user' ? 'You' : 'Agent Mom'}</span>
+                  <p>{message.content}</p>
+                </article>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <form className="composer" onSubmit={sendMessage}>
+          <button type="button" disabled={!selectedVm || busy} title="Add context">
+            <Plus size={20} />
+          </button>
+          <input
+            value={chatInput}
+            onChange={(event) => setChatInput(event.target.value)}
+            placeholder={
+              selectedVm ? 'Ask Agent Mom anything about this workspace' : 'Create a workspace first'
+            }
+            disabled={!selectedVm || busy}
+          />
+          <button className="sendButton" disabled={!selectedVm || busy || !chatInput.trim()}>
+            {busy ? <Sparkles size={20} /> : <Send size={20} />}
+          </button>
+        </form>
+      </section>
+
+      {showCreate && (
+        <div className="modalBackdrop" role="presentation" onMouseDown={() => setShowCreate(false)}>
+          <form
+            className="createModal"
+            onSubmit={createWorkspace}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
             <div>
-              <h2>New workspace</h2>
-              <p className="sectionNote">Defaults are fine for most agent sessions.</p>
+              <h2>Create your bot</h2>
+              <p>Name the bot you want to chat with.</p>
             </div>
             <label>
-              <span>Workspace name</span>
+              <span>Your name</span>
               <input
-                placeholder="for example: research-box"
-                value={createForm.name}
-                onChange={(event) => setCreateForm({ ...createForm, name: event.target.value })}
+                value={createForm.userName}
+                onChange={(event) =>
+                  setCreateForm((current) => ({ ...current, userName: event.target.value }))
+                }
+                placeholder="Your name"
+                autoFocus
+              />
+            </label>
+            <label>
+              <span>Bot name</span>
+              <input
+                value={createForm.botName}
+                onChange={(event) =>
+                  setCreateForm((current) => ({ ...current, botName: event.target.value }))
+                }
+                placeholder="Bot name"
                 required
               />
             </label>
-            <div className="numberGrid">
-              <label>
-                <span>CPUs</span>
-                <input
-                  type="number"
-                  min="1"
-                  max="16"
-                  value={createForm.cpus}
-                  onChange={(event) => setCreateForm({ ...createForm, cpus: event.target.value })}
-                />
-              </label>
-              <label>
-                <span>Memory</span>
-                <input
-                  type="number"
-                  min="512"
-                  step="256"
-                  value={createForm.memory}
-                  onChange={(event) => setCreateForm({ ...createForm, memory: event.target.value })}
-                />
-              </label>
+            <div className="modalActions">
+              <button type="button" onClick={() => setShowCreate(false)}>
+                Cancel
+              </button>
+              <button className="confirmButton" disabled={busy || !createForm.botName.trim()}>
+                Confirm
+              </button>
             </div>
-            <label className="check">
-              <input
-                type="checkbox"
-                checked={createForm.replace}
-                onChange={(event) => setCreateForm({ ...createForm, replace: event.target.checked })}
-              />
-              Replace if name already exists
-            </label>
-            <label className="check">
-              <input
-                type="checkbox"
-                checked={createForm.rebuild_snapshot}
-                onChange={(event) =>
-                  setCreateForm({ ...createForm, rebuild_snapshot: event.target.checked })
-                }
-              />
-              Rebuild base image first
-            </label>
-            <label className="check">
-              <input
-                type="checkbox"
-                checked={createForm.no_snapshot}
-                onChange={(event) =>
-                  setCreateForm({ ...createForm, no_snapshot: event.target.checked })
-                }
-              />
-              Build directly from Alpine
-            </label>
-            <button className="primary" disabled={busy}>
-              <Plus size={16} />
-              Create workspace
-            </button>
           </form>
-        </aside>
-
-        <section className="workspace">
-          <div className="panel vmPanel">
-            <div>
-              <h2>{selectedVm?.name ?? 'No VM selected'}</h2>
-              <p>{selectedVm ? `Image: ${selectedVm.image}` : 'Create or select a workspace to begin.'}</p>
-            </div>
-            <div className="actions">
-              <button onClick={() => vmAction('start')} disabled={!selectedVm || busy}>
-                <Play size={17} />
-                Start
-              </button>
-              <button onClick={() => vmAction('stop')} disabled={!selectedVm || busy}>
-                <Square size={17} />
-                Stop
-              </button>
-              <button onClick={() => runCommand('doctor')} disabled={!selectedVm || busy}>
-                <Stethoscope size={17} />
-                Check tools
-              </button>
-              <button onClick={() => vmAction('remove')} disabled={!selectedVm || busy}>
-                <Trash2 size={17} />
-                Remove
-              </button>
-            </div>
-          </div>
-
-          <div className="tools">
-            <CommandBox
-              icon={<Terminal size={17} />}
-              label="Run a shell command"
-              value={execCommand}
-              onChange={setExecCommand}
-              onRun={() => runCommand('exec')}
-              disabled={!selectedVm || busy}
-            />
-            <CommandBox
-              icon={<WandSparkles size={17} />}
-              label="Ask Codex"
-              value={codexPrompt}
-              onChange={setCodexPrompt}
-              onRun={() => runCommand('codex')}
-              disabled={!selectedVm || busy}
-            />
-            <CommandBox
-              icon={<Cpu size={17} />}
-              label="Run Hermes"
-              value={hermesArgs}
-              onChange={setHermesArgs}
-              onRun={() => runCommand('hermes')}
-              disabled={!selectedVm || busy}
-            />
-          </div>
-
-          <section className="console">
-            <div className="consoleHeader">
-              <span>
-                <Activity size={16} />
-                Latest output
-              </span>
-              {busy && <b>running</b>}
-            </div>
-            <pre>{log}</pre>
-          </section>
-        </section>
-      </section>
+        </div>
+      )}
     </main>
   );
 }
 
-function CommandBox({ icon, label, value, onChange, onRun, disabled }) {
-  return (
-    <form
-      className="commandBox"
-      onSubmit={(event) => {
-        event.preventDefault();
-        onRun();
-      }}
-    >
-      <label>
-        <span>
-          {icon}
-          {label}
-        </span>
-        <input value={value} onChange={(event) => onChange(event.target.value)} />
-      </label>
-      <button disabled={disabled}>
-        <Play size={16} />
-        Run
-      </button>
-    </form>
-  );
-}
-
-function splitArgs(value) {
-  return value.match(/(?:[^\s"]+|"[^"]*")+/g)?.map((part) => part.replace(/^"|"$/g, '')) ?? [];
+function friendlyStatus(status) {
+  const lower = status.toLowerCase();
+  if (lower === 'running' || lower === 'draining') return 'Ready';
+  if (lower === 'stopped') return 'Paused';
+  if (lower === 'paused') return 'Paused';
+  if (lower === 'crashed') return 'Needs attention';
+  return status;
 }
 
 function renderResult(result) {
   const output = [result.stdout, result.stderr].filter(Boolean).join('\n');
-  return output || `exit ${result.code ?? 0}`;
+  return output || `Done.`;
 }
 
 function formatError(error) {
