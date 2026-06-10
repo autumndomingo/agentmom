@@ -2,7 +2,9 @@ use std::{env, fs, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
-use microsandbox::{Sandbox, sandbox::SandboxStatus};
+use microsandbox::{
+    MicrosandboxError, Sandbox, Snapshot, SnapshotDestination, sandbox::SandboxStatus,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -11,6 +13,7 @@ const LABEL_MANAGED: &str = "hvm.managed";
 const LABEL_VERSION: &str = "hvm.version";
 const GUEST_CODEX_HOME: &str = "/root/.codex";
 const GUEST_HERMES_HOME: &str = "/root/.hermes-agent";
+const BASE_BUILDER_NAME: &str = "hvm-base-builder";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -79,6 +82,12 @@ struct CreateArgs {
     /// Memory in MiB.
     #[arg(long, default_value_t = 2048)]
     memory: u64,
+    /// Rebuild the base snapshot before creating the VM.
+    #[arg(long)]
+    rebuild_snapshot: bool,
+    /// Provision directly from Alpine instead of the base snapshot.
+    #[arg(long)]
+    no_snapshot: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -88,6 +97,8 @@ struct HvmConfig {
     hermes_profile: String,
     #[serde(default = "default_hermes_model")]
     hermes_model: String,
+    #[serde(default = "default_snapshot_name")]
+    snapshot_name: String,
 }
 
 #[tokio::main]
@@ -133,8 +144,11 @@ async fn create(args: CreateArgs) -> Result<()> {
     let config = load_hvm_config()?;
 
     let memory = u32::try_from(args.memory).context("memory must fit in u32 MiB")?;
+    if !args.no_snapshot {
+        ensure_base_snapshot(&config, args.rebuild_snapshot).await?;
+    }
+
     let mut builder = Sandbox::builder(&args.name)
-        .image(IMAGE)
         .cpus(args.cpus)
         .memory(memory)
         .entrypoint(["tail", "-f", "/dev/null"])
@@ -142,57 +156,27 @@ async fn create(args: CreateArgs) -> Result<()> {
         .label(LABEL_MANAGED, "true")
         .label(LABEL_VERSION, env!("CARGO_PKG_VERSION"));
 
+    if args.no_snapshot {
+        builder = builder.image(IMAGE);
+    } else {
+        builder = builder.from_snapshot(&config.snapshot_name);
+    }
+
     if args.replace {
         builder = builder.replace();
     }
-
-    let codex_auth_path = resolve_required_file(&config.codex_auth_path, "codex_auth_path")?;
-    let codex_files = codex_auth_files(&codex_auth_path)?;
-    let hermes_auth = codex_auth_as_hermes_auth(&codex_auth_path)?;
-    let hermes_profile_name = config.hermes_profile.clone();
-    let hermes_model = config.hermes_model.clone();
-
-    builder = builder.patch(move |patch| {
-        let hermes_home = format!("{GUEST_HERMES_HOME}/{hermes_profile_name}");
-        let mut patch = patch
-            .mkdir("/workspace", Some(0o755))
-            .mkdir(GUEST_CODEX_HOME, Some(0o700))
-            .mkdir(GUEST_HERMES_HOME, Some(0o700))
-            .mkdir(&hermes_home, Some(0o700))
-            .mkdir(format!("{hermes_home}/home"), Some(0o700))
-            .text(
-                format!("{hermes_home}/config.yaml"),
-                hermes_config_yaml(&hermes_model),
-                Some(0o600),
-                true,
-            )
-            .text(
-                format!("{hermes_home}/SOUL.md"),
-                hermes_soul_md(),
-                Some(0o600),
-                true,
-            );
-
-        for (host, guest) in codex_files {
-            patch = patch.copy_file(host, guest, Some(0o600), true);
-        }
-
-        patch = patch.text(
-            format!("{hermes_home}/auth.json"),
-            hermes_auth,
-            Some(0o600),
-            true,
-        );
-
-        patch
-    });
 
     let sandbox = builder
         .create()
         .await
         .with_context(|| format!("create sandbox '{}'", args.name))?;
 
-    provision_base(&sandbox, &config.hermes_profile).await?;
+    if args.no_snapshot {
+        provision_base(&sandbox, &config.hermes_profile).await?;
+    } else {
+        configure_guest_profile(&sandbox, &config.hermes_profile).await?;
+    }
+    apply_guest_auth_config(&sandbox, &config).await?;
     doctor(&sandbox).await?;
 
     println!("stopping {} to persist filesystem changes", args.name);
@@ -201,14 +185,165 @@ async fn create(args: CreateArgs) -> Result<()> {
     Ok(())
 }
 
-async fn provision_base(sandbox: &Sandbox, hermes_profile: &str) -> Result<()> {
-    println!("installing Alpine packages, uv, Codex, and Hermes");
-    let hermes_home = format!("{GUEST_HERMES_HOME}/{hermes_profile}");
+async fn apply_guest_auth_config(sandbox: &Sandbox, config: &HvmConfig) -> Result<()> {
+    println!("writing VM auth/config from host config");
+    let codex_auth_path = resolve_required_file(&config.codex_auth_path, "codex_auth_path")?;
+    let codex_auth = fs::read(&codex_auth_path)
+        .with_context(|| format!("read {}", codex_auth_path.display()))?;
+    let hermes_auth = codex_auth_as_hermes_auth(&codex_auth_path)?;
+    let hermes_home = format!("{GUEST_HERMES_HOME}/{}", config.hermes_profile);
+
+    let fs = sandbox.fs();
+    fs.mkdir("/workspace").await?;
+    fs.mkdir(GUEST_CODEX_HOME).await?;
+    fs.mkdir(GUEST_HERMES_HOME).await?;
+    fs.mkdir(&hermes_home).await?;
+    fs.mkdir(&format!("{hermes_home}/home")).await?;
+    fs.write(&format!("{GUEST_CODEX_HOME}/auth.json"), codex_auth)
+        .await?;
+    fs.write(
+        &format!("{hermes_home}/config.yaml"),
+        hermes_config_yaml(&config.hermes_model).as_bytes(),
+    )
+    .await?;
+    fs.write(
+        &format!("{hermes_home}/SOUL.md"),
+        hermes_soul_md().as_bytes(),
+    )
+    .await?;
+    fs.write(&format!("{hermes_home}/auth.json"), hermes_auth.as_bytes())
+        .await?;
+
     let hermes_home_q = shell_quote(&hermes_home);
     checked_shell(
         sandbox,
         &format!(
             r#"
+set -eu
+chmod 700 /root/.codex /root/.hermes-agent {hermes_home_q}
+chmod 600 /root/.codex/auth.json {hermes_home_q}/auth.json {hermes_home_q}/config.yaml {hermes_home_q}/SOUL.md
+ln -sfn {hermes_home_q} /root/.hermes
+sync
+"#
+        ),
+    )
+    .await
+}
+
+async fn ensure_base_snapshot(config: &HvmConfig, rebuild: bool) -> Result<()> {
+    if rebuild {
+        println!("rebuilding base snapshot {}", config.snapshot_name);
+        let _ = Snapshot::remove(&config.snapshot_name, true).await;
+    } else {
+        match Snapshot::open(&config.snapshot_name).await {
+            Ok(snapshot) => {
+                println!(
+                    "using base snapshot {} ({})",
+                    config.snapshot_name,
+                    snapshot.digest()
+                );
+                return Ok(());
+            }
+            Err(MicrosandboxError::SnapshotNotFound(_)) => {
+                println!(
+                    "base snapshot {} not found; building it",
+                    config.snapshot_name
+                );
+            }
+            Err(error) => return Err(error).context("open base snapshot"),
+        }
+    }
+
+    build_base_snapshot(config).await
+}
+
+async fn build_base_snapshot(config: &HvmConfig) -> Result<()> {
+    let codex_auth_path = resolve_required_file(&config.codex_auth_path, "codex_auth_path")?;
+    let codex_files = codex_auth_files(&codex_auth_path)?;
+    let hermes_auth = codex_auth_as_hermes_auth(&codex_auth_path)?;
+    let hermes_profile_name = config.hermes_profile.clone();
+    let hermes_model = config.hermes_model.clone();
+
+    if let Ok(handle) = Sandbox::get(BASE_BUILDER_NAME).await {
+        if handle.status() == SandboxStatus::Running || handle.status() == SandboxStatus::Draining {
+            handle.stop_with_timeout(Duration::from_secs(10)).await?;
+        }
+        Sandbox::remove(BASE_BUILDER_NAME).await?;
+    }
+
+    let builder = Sandbox::builder(BASE_BUILDER_NAME)
+        .image(IMAGE)
+        .replace()
+        .entrypoint(["tail", "-f", "/dev/null"])
+        .shell("/bin/sh")
+        .label(LABEL_MANAGED, "true")
+        .label(LABEL_VERSION, env!("CARGO_PKG_VERSION"))
+        .patch(move |patch| {
+            let hermes_home = format!("{GUEST_HERMES_HOME}/{hermes_profile_name}");
+            let mut patch = patch
+                .mkdir("/workspace", Some(0o755))
+                .mkdir(GUEST_CODEX_HOME, Some(0o700))
+                .mkdir(GUEST_HERMES_HOME, Some(0o700))
+                .mkdir(&hermes_home, Some(0o700))
+                .mkdir(format!("{hermes_home}/home"), Some(0o700))
+                .text(
+                    format!("{hermes_home}/config.yaml"),
+                    hermes_config_yaml(&hermes_model),
+                    Some(0o600),
+                    true,
+                )
+                .text(
+                    format!("{hermes_home}/SOUL.md"),
+                    hermes_soul_md(),
+                    Some(0o600),
+                    true,
+                )
+                .text(
+                    format!("{hermes_home}/auth.json"),
+                    hermes_auth,
+                    Some(0o600),
+                    true,
+                );
+
+            for (host, guest) in codex_files {
+                patch = patch.copy_file(host, guest, Some(0o600), true);
+            }
+
+            patch
+        });
+
+    let sandbox = builder
+        .create()
+        .await
+        .with_context(|| format!("create base builder '{BASE_BUILDER_NAME}'"))?;
+    provision_base(&sandbox, &config.hermes_profile).await?;
+    doctor(&sandbox).await?;
+    checked_shell(&sandbox, "sync").await?;
+
+    println!("stopping {BASE_BUILDER_NAME} before snapshot");
+    sandbox.stop().await?;
+
+    let snapshot = Snapshot::builder(BASE_BUILDER_NAME)
+        .destination(SnapshotDestination::Name(config.snapshot_name.clone()))
+        .force()
+        .create()
+        .await
+        .with_context(|| format!("create snapshot '{}'", config.snapshot_name))?;
+    println!(
+        "created base snapshot {} ({})",
+        config.snapshot_name,
+        snapshot.digest()
+    );
+
+    Sandbox::remove(BASE_BUILDER_NAME).await?;
+    Ok(())
+}
+
+async fn provision_base(sandbox: &Sandbox, hermes_profile: &str) -> Result<()> {
+    println!("installing Alpine packages, uv, Codex, and Hermes");
+    checked_shell(
+        sandbox,
+        r#"
 set -eu
 apk add --no-cache \
   bash \
@@ -230,6 +365,21 @@ ln -sf /root/.local/bin/hermes /usr/local/bin/hermes
 ln -sf /root/.local/bin/hermes-agent /usr/local/bin/hermes-agent
 ln -sf /root/.local/bin/hermes-acp /usr/local/bin/hermes-acp
 mkdir -p /workspace /root/.codex /root/.hermes-agent
+"#,
+    )
+    .await?;
+    configure_guest_profile(sandbox, hermes_profile).await
+}
+
+async fn configure_guest_profile(sandbox: &Sandbox, hermes_profile: &str) -> Result<()> {
+    let hermes_home = format!("{GUEST_HERMES_HOME}/{hermes_profile}");
+    let hermes_home_q = shell_quote(&hermes_home);
+    checked_shell(
+        sandbox,
+        &format!(
+            r#"
+set -eu
+mkdir -p /workspace /root/.codex /root/.hermes-agent {hermes_home_q}
 ln -sfn {hermes_home_q} /root/.hermes
 cat >/etc/profile.d/hvm.sh <<'EOF'
 export HERMES_HOME={hermes_home}
@@ -522,6 +672,10 @@ fn default_hermes_profile() -> String {
 
 fn default_hermes_model() -> String {
     "gpt-5.5".to_string()
+}
+
+fn default_snapshot_name() -> String {
+    "hvm-alpine-agent-base".to_string()
 }
 
 fn hermes_config_yaml(model: &str) -> String {
