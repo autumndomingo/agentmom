@@ -41,7 +41,10 @@ enum Command {
     Stop { name: String },
     /// Remove a VM, stopping it first if needed.
     Rm {
-        name: String,
+        name: Option<String>,
+        /// Remove all hvm-managed VMs.
+        #[arg(long)]
+        all: bool,
         /// Do not ask for confirmation.
         #[arg(short, long)]
         force: bool,
@@ -110,7 +113,7 @@ async fn main() -> Result<()> {
         Command::List { all } => list(all).await,
         Command::Start { name } => start(&name).await,
         Command::Stop { name } => stop(&name).await,
-        Command::Rm { name, force } => remove(&name, force).await,
+        Command::Rm { name, all, force } => remove(name.as_deref(), all, force).await,
         Command::Exec { name, command } => {
             let sandbox = running_sandbox(&name).await?;
             run_guest_command(&sandbox, command).await
@@ -436,11 +439,23 @@ async fn stop(name: &str) -> Result<()> {
     Ok(())
 }
 
-async fn remove(name: &str, force: bool) -> Result<()> {
+async fn remove(name: Option<&str>, all: bool, force: bool) -> Result<()> {
     if !force {
-        bail!("refusing to remove {name} without --force");
+        bail!("refusing to remove without --force");
     }
 
+    if all {
+        if let Some(name) = name {
+            bail!("refusing ambiguous remove: pass either {name} or --all, not both");
+        }
+        return remove_all_managed().await;
+    }
+
+    let name = name.ok_or_else(|| anyhow!("missing VM name; pass a name or --all"))?;
+    remove_one(name).await
+}
+
+async fn remove_one(name: &str) -> Result<()> {
     if let Ok(handle) = Sandbox::get(name).await {
         if handle.status() == SandboxStatus::Running || handle.status() == SandboxStatus::Draining {
             handle.stop_with_timeout(Duration::from_secs(10)).await?;
@@ -449,6 +464,33 @@ async fn remove(name: &str, force: bool) -> Result<()> {
 
     Sandbox::remove(name).await?;
     println!("removed {name}");
+    Ok(())
+}
+
+async fn remove_all_managed() -> Result<()> {
+    let handles = Sandbox::list().await?;
+    let mut removed = 0usize;
+
+    for handle in handles {
+        let config = handle.config()?;
+        let managed = config
+            .labels
+            .get(LABEL_MANAGED)
+            .is_some_and(|value| value == "true");
+        if !managed {
+            continue;
+        }
+
+        let name = handle.name().to_string();
+        if handle.status() == SandboxStatus::Running || handle.status() == SandboxStatus::Draining {
+            handle.stop_with_timeout(Duration::from_secs(10)).await?;
+        }
+        Sandbox::remove(&name).await?;
+        println!("removed {name}");
+        removed += 1;
+    }
+
+    println!("removed {removed} hvm-managed VM(s)");
     Ok(())
 }
 
