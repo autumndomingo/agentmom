@@ -61,10 +61,18 @@
             overlays = [ rust-overlay.overlays.default ];
           };
           rustToolchain = pkgs.rust-bin.stable.latest.default;
+          momDev = pkgs.writeShellApplication {
+            name = "mom";
+            runtimeInputs = [ rustToolchain ];
+            text = ''
+              exec cargo run --bin mom -- "$@"
+            '';
+          };
         in
         {
           default = pkgs.mkShell {
             packages = [
+              momDev
               rustToolchain
               pkgs.cargo-nextest
               pkgs.nodejs
