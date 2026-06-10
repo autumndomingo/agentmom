@@ -73,3 +73,21 @@ or:
 ```sh
 nix build
 ```
+
+## UI
+
+The UI is a React app served by a Rust backend. The backend delegates lifecycle
+actions to the existing `mom` CLI so CLI and UI behavior stay aligned.
+
+```sh
+nix develop
+cargo build --bins
+cd ui
+npm install
+npm run build
+cd ..
+cargo run --bin mom-ui
+```
+
+Open <http://127.0.0.1:8787>. Set `MOM_UI_PORT=9000` to use another port, or
+`MOM_BIN=/path/to/mom` if the backend should call a specific CLI binary.
