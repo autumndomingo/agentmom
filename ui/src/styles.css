@@ -53,22 +53,22 @@ button:disabled {
 
 .shell {
   min-height: 100vh;
-  padding: 32px;
+  padding: 24px;
   display: grid;
   grid-template-rows: auto 1fr;
-  gap: 22px;
+  gap: 18px;
 }
 
 .topbar {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: linear-gradient(180deg, var(--panel) 0%, var(--panel-bottom) 100%);
-  padding: 28px;
+  padding: 22px 24px;
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   justify-content: space-between;
   gap: 18px;
-  box-shadow: 0 24px 90px rgb(0 0 0 / 35%);
+  box-shadow: 0 18px 60px rgb(0 0 0 / 28%);
 }
 
 .statusPill {
@@ -96,35 +96,38 @@ h2 {
 }
 
 .topbar h1 {
-  margin-top: 22px;
-  font-size: clamp(40px, 6vw, 76px);
-  line-height: 1.02;
+  margin-top: 16px;
+  font-size: clamp(34px, 4vw, 52px);
+  line-height: 1.06;
   letter-spacing: 0;
 }
 
 .topbar p {
-  margin-top: 10px;
+  margin-top: 8px;
   color: var(--muted);
-  font-size: clamp(18px, 2vw, 24px);
+  font-size: clamp(16px, 1.6vw, 20px);
   line-height: 1.35;
 }
 
-.iconButton,
-.actions button,
+.secondaryButton,
 .commandBox button {
-  width: 42px;
+  min-width: 0;
   height: 42px;
+  padding: 0 15px;
   border-radius: 8px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 8px;
+  font-weight: 700;
+  white-space: nowrap;
 }
 
 .layout {
   min-height: 0;
   display: grid;
-  grid-template-columns: 340px minmax(0, 1fr);
-  gap: 22px;
+  grid-template-columns: 330px minmax(0, 1fr);
+  gap: 18px;
 }
 
 .sidebar,
@@ -151,9 +154,16 @@ h2 {
 
 h2 {
   color: var(--text);
-  font-size: 17px;
+  font-size: 16px;
   font-weight: 700;
   letter-spacing: 0;
+}
+
+.sectionNote {
+  margin: 5px 0 0;
+  color: var(--dim);
+  font-size: 13px;
+  line-height: 1.4;
 }
 
 .toggle,
@@ -236,6 +246,14 @@ input[type="checkbox"] {
   gap: 12px;
 }
 
+.createForm label:not(.check) {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 650;
+}
+
 .createForm input,
 .commandBox input {
   width: 100%;
@@ -288,7 +306,7 @@ input[type="checkbox"] {
 .workspace {
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
-  gap: 14px;
+  gap: 12px;
   overflow: hidden;
 }
 
@@ -301,11 +319,11 @@ input[type="checkbox"] {
 }
 
 .vmPanel {
-  padding: 18px;
+  padding: 16px;
 }
 
 .vmPanel h2 {
-  font-size: 22px;
+  font-size: 21px;
 }
 
 .vmPanel p {
@@ -314,8 +332,22 @@ input[type="checkbox"] {
 }
 
 .actions {
+  flex-wrap: wrap;
   display: flex;
   gap: 9px;
+}
+
+.actions button {
+  min-width: 0;
+  height: 40px;
+  border-radius: 8px;
+  padding: 0 13px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-weight: 700;
+  white-space: nowrap;
 }
 
 .tools {
@@ -410,7 +442,7 @@ pre {
   }
 
   .topbar h1 {
-    font-size: 42px;
+    font-size: 38px;
   }
 
   .sidebar {
@@ -427,6 +459,10 @@ pre {
   }
 
   .actions button {
-    flex: 1;
+    flex: 1 1 calc(50% - 9px);
+  }
+
+  .secondaryButton {
+    width: 100%;
   }
 }
