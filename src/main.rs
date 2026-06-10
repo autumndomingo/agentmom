@@ -205,6 +205,11 @@ async fn apply_guest_auth_config(sandbox: &Sandbox, config: &HvmConfig) -> Resul
     fs.write(&format!("{GUEST_CODEX_HOME}/auth.json"), codex_auth)
         .await?;
     fs.write(
+        &format!("{GUEST_CODEX_HOME}/config.toml"),
+        codex_config_toml(&config.hermes_model).as_bytes(),
+    )
+    .await?;
+    fs.write(
         &format!("{hermes_home}/config.yaml"),
         hermes_config_yaml(&config.hermes_model).as_bytes(),
     )
@@ -224,7 +229,7 @@ async fn apply_guest_auth_config(sandbox: &Sandbox, config: &HvmConfig) -> Resul
             r#"
 set -eu
 chmod 700 /root/.codex /root/.hermes-agent {hermes_home_q}
-chmod 600 /root/.codex/auth.json {hermes_home_q}/auth.json {hermes_home_q}/config.yaml {hermes_home_q}/SOUL.md
+chmod 600 /root/.codex/auth.json /root/.codex/config.toml {hermes_home_q}/auth.json {hermes_home_q}/config.yaml {hermes_home_q}/SOUL.md
 ln -sfn {hermes_home_q} /root/.hermes
 sync
 "#
@@ -289,6 +294,12 @@ async fn build_base_snapshot(config: &HvmConfig) -> Result<()> {
                 .mkdir(GUEST_HERMES_HOME, Some(0o700))
                 .mkdir(&hermes_home, Some(0o700))
                 .mkdir(format!("{hermes_home}/home"), Some(0o700))
+                .text(
+                    format!("{GUEST_CODEX_HOME}/config.toml"),
+                    codex_config_toml(&hermes_model),
+                    Some(0o600),
+                    true,
+                )
                 .text(
                     format!("{hermes_home}/config.yaml"),
                     hermes_config_yaml(&hermes_model),
@@ -721,7 +732,7 @@ fn default_snapshot_name() -> String {
 }
 
 fn hermes_config_yaml(model: &str) -> String {
-    let model = serde_json::to_string(model).expect("serializing a string cannot fail");
+    let model = config_string(model);
     format!(
         r#"model:
   provider: openai-codex
@@ -738,6 +749,23 @@ toolsets:
   - all
 "#
     )
+}
+
+fn codex_config_toml(model: &str) -> String {
+    let model = config_string(model);
+    format!(
+        r#"model = {model}
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+
+[projects."/workspace"]
+trust_level = "trusted"
+"#
+    )
+}
+
+fn config_string(value: &str) -> String {
+    serde_json::to_string(value).expect("serializing a string cannot fail")
 }
 
 fn hermes_soul_md() -> &'static str {

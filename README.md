@@ -51,6 +51,7 @@ slow direct-Alpine provisioning path.
 Each new VM is then patched with OpenAI/Codex auth and Hermes config:
 
 - `codex_auth_path` -> `/root/.codex/auth.json`
+- a generated `/root/.codex/config.toml` with `approval_policy = "never"` and `sandbox_mode = "danger-full-access"`
 - OpenAI Codex tokens from `codex_auth_path` -> `/root/.hermes-agent/<hermes_profile>/auth.json`
 - a minimal generated Hermes `config.yaml` selecting `openai-codex`
 
