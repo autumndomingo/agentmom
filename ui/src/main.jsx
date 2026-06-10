@@ -123,27 +123,31 @@ function App() {
         <div>
           <div className="statusPill">
             <WandSparkles size={18} />
-            Agent Mom control
+            Local manager
           </div>
           <h1>Agent Mom</h1>
-          <p>Microsandbox VM control panel</p>
+          <p>Create and manage isolated agent workspaces.</p>
         </div>
-        <button className="iconButton" onClick={refresh} disabled={busy} title="Refresh">
+        <button className="secondaryButton" onClick={refresh} disabled={busy}>
           <RefreshCcw size={18} />
+          Refresh
         </button>
       </header>
 
       <section className="layout">
         <aside className="sidebar">
           <div className="sectionHeader">
-            <h2>VMs</h2>
+            <div>
+              <h2>Workspaces</h2>
+              <p className="sectionNote">Choose a workspace to manage.</p>
+            </div>
             <label className="toggle">
               <input
                 type="checkbox"
                 checked={includeAll}
                 onChange={(event) => setIncludeAll(event.target.checked)}
               />
-              all
+              Show unmanaged
             </label>
           </div>
 
@@ -165,13 +169,19 @@ function App() {
           </div>
 
           <form className="createForm" onSubmit={createVm}>
-            <h2>Create VM</h2>
-            <input
-              placeholder="name"
-              value={createForm.name}
-              onChange={(event) => setCreateForm({ ...createForm, name: event.target.value })}
-              required
-            />
+            <div>
+              <h2>New workspace</h2>
+              <p className="sectionNote">Defaults are fine for most agent sessions.</p>
+            </div>
+            <label>
+              <span>Workspace name</span>
+              <input
+                placeholder="for example: research-box"
+                value={createForm.name}
+                onChange={(event) => setCreateForm({ ...createForm, name: event.target.value })}
+                required
+              />
+            </label>
             <div className="numberGrid">
               <label>
                 <span>CPUs</span>
@@ -184,7 +194,7 @@ function App() {
                 />
               </label>
               <label>
-                <span>MiB</span>
+                <span>Memory</span>
                 <input
                   type="number"
                   min="512"
@@ -200,7 +210,7 @@ function App() {
                 checked={createForm.replace}
                 onChange={(event) => setCreateForm({ ...createForm, replace: event.target.checked })}
               />
-              replace existing
+              Replace if name already exists
             </label>
             <label className="check">
               <input
@@ -210,7 +220,7 @@ function App() {
                   setCreateForm({ ...createForm, rebuild_snapshot: event.target.checked })
                 }
               />
-              rebuild snapshot
+              Rebuild base image first
             </label>
             <label className="check">
               <input
@@ -220,11 +230,11 @@ function App() {
                   setCreateForm({ ...createForm, no_snapshot: event.target.checked })
                 }
               />
-              no snapshot
+              Build directly from Alpine
             </label>
             <button className="primary" disabled={busy}>
               <Plus size={16} />
-              Create
+              Create workspace
             </button>
           </form>
         </aside>
@@ -233,20 +243,24 @@ function App() {
           <div className="panel vmPanel">
             <div>
               <h2>{selectedVm?.name ?? 'No VM selected'}</h2>
-              <p>{selectedVm?.image ?? 'Create or select a VM to begin.'}</p>
+              <p>{selectedVm ? `Image: ${selectedVm.image}` : 'Create or select a workspace to begin.'}</p>
             </div>
             <div className="actions">
-              <button onClick={() => vmAction('start')} disabled={!selectedVm || busy} title="Start">
+              <button onClick={() => vmAction('start')} disabled={!selectedVm || busy}>
                 <Play size={17} />
+                Start
               </button>
-              <button onClick={() => vmAction('stop')} disabled={!selectedVm || busy} title="Stop">
+              <button onClick={() => vmAction('stop')} disabled={!selectedVm || busy}>
                 <Square size={17} />
+                Stop
               </button>
-              <button onClick={() => runCommand('doctor')} disabled={!selectedVm || busy} title="Doctor">
+              <button onClick={() => runCommand('doctor')} disabled={!selectedVm || busy}>
                 <Stethoscope size={17} />
+                Check tools
               </button>
-              <button onClick={() => vmAction('remove')} disabled={!selectedVm || busy} title="Remove">
+              <button onClick={() => vmAction('remove')} disabled={!selectedVm || busy}>
                 <Trash2 size={17} />
+                Remove
               </button>
             </div>
           </div>
@@ -254,7 +268,7 @@ function App() {
           <div className="tools">
             <CommandBox
               icon={<Terminal size={17} />}
-              label="Exec"
+              label="Run a shell command"
               value={execCommand}
               onChange={setExecCommand}
               onRun={() => runCommand('exec')}
@@ -262,7 +276,7 @@ function App() {
             />
             <CommandBox
               icon={<WandSparkles size={17} />}
-              label="Codex"
+              label="Ask Codex"
               value={codexPrompt}
               onChange={setCodexPrompt}
               onRun={() => runCommand('codex')}
@@ -270,7 +284,7 @@ function App() {
             />
             <CommandBox
               icon={<Cpu size={17} />}
-              label="Hermes"
+              label="Run Hermes"
               value={hermesArgs}
               onChange={setHermesArgs}
               onRun={() => runCommand('hermes')}
@@ -282,7 +296,7 @@ function App() {
             <div className="consoleHeader">
               <span>
                 <Activity size={16} />
-                Output
+                Latest output
               </span>
               {busy && <b>running</b>}
             </div>
@@ -312,6 +326,7 @@ function CommandBox({ icon, label, value, onChange, onRun, disabled }) {
       </label>
       <button disabled={disabled}>
         <Play size={16} />
+        Run
       </button>
     </form>
   );
