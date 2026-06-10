@@ -1,7 +1,11 @@
 [package]
-name = "hvm"
-version = "0.1.0"
+name = "agent-mom"
+version = "0.1.1"
 edition = "2024"
+
+[[bin]]
+name = "mom"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0"

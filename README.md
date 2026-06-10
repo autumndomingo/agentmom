@@ -1,6 +1,6 @@
-# hvm
+# Agent Mom
 
-`hvm` is a small Rust CLI for managing Alpine microsandbox VMs for Codex and
+`mom` is a small Rust CLI for managing Alpine microsandbox VMs for Codex and
 Hermes.
 
 It uses the microsandbox Rust SDK directly. It does not shell out to
@@ -9,29 +9,29 @@ It uses the microsandbox Rust SDK directly. It does not shell out to
 ## Commands
 
 ```sh
-hvm create mybox --replace
-hvm list
-hvm enter mybox
-hvm exec mybox -- pwd
-hvm codex mybox "Reply exactly ok"
-hvm hermes mybox -- --help
-hvm doctor mybox
-hvm stop mybox
-hvm start mybox
-hvm rm mybox --force
+mom create mybox --replace
+mom list
+mom enter mybox
+mom exec mybox -- pwd
+mom codex mybox "Reply exactly ok"
+mom hermes mybox -- --help
+mom doctor mybox
+mom stop mybox
+mom start mybox
+mom rm mybox --force
 ```
 
 ## Host Config
 
-`hvm create` requires a host config file at `~/.config/hvm/config.json`.
-Set `HVM_CONFIG=/path/to/config.json` to use a different file.
+`mom create` requires a host config file at `~/.config/mom/config.json`.
+Set `MOM_CONFIG=/path/to/config.json` to use a different file.
 
 ```json
 {
   "codex_auth_path": "~/.codex/auth.json",
   "hermes_profile": "main",
   "hermes_model": "gpt-5.5",
-  "snapshot_name": "hvm-alpine-agent-base"
+  "snapshot_name": "mom-alpine-agent-base"
 }
 ```
 
@@ -42,7 +42,7 @@ Required assumptions:
 - `hermes_model` is the default Hermes model for `openai-codex`.
 - `snapshot_name` is the prebuilt microsandbox snapshot to boot new VMs from.
 
-`create` uses `snapshot_name` by default. If the snapshot is missing, hvm builds
+`create` uses `snapshot_name` by default. If the snapshot is missing, Agent Mom builds
 it once from the `alpine` image by installing `nodejs`, `npm`, `python3`, `uv`,
 `@openai/codex`, and `hermes-agent`, then snapshots the stopped builder VM.
 Pass `--rebuild-snapshot` to refresh that base, or `--no-snapshot` to force the
