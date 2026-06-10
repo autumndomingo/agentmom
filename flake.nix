@@ -1,5 +1,5 @@
 {
-  description = "hvm: small Alpine microsandbox VM manager for Codex and Hermes";
+  description = "Agent Mom: small Alpine microsandbox VM manager for Codex and Hermes";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -34,24 +34,23 @@
             strictDeps = true;
             nativeBuildInputs = [ pkgs.pkg-config ];
             buildInputs = nixpkgs.lib.optionals pkgs.stdenv.isDarwin [
-              pkgs.darwin.apple_sdk.frameworks.Security
-              pkgs.darwin.apple_sdk.frameworks.SystemConfiguration
+              pkgs."apple-sdk"
             ];
           };
           cargoArtifacts = craneLib.buildDepsOnly commonArgs;
-          hvm = craneLib.buildPackage (commonArgs // {
+          mom = craneLib.buildPackage (commonArgs // {
             inherit cargoArtifacts;
           });
         in
         {
-          default = hvm;
-          hvm = hvm;
+          default = mom;
+          mom = mom;
         });
 
       apps = eachSystem (system: {
         default = {
           type = "app";
-          program = "${self.packages.${system}.hvm}/bin/hvm";
+          program = "${self.packages.${system}.mom}/bin/mom";
         };
       });
 

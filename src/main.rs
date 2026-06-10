@@ -9,16 +9,16 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 const IMAGE: &str = "alpine";
-const LABEL_MANAGED: &str = "hvm.managed";
-const LABEL_VERSION: &str = "hvm.version";
+const LABEL_MANAGED: &str = "mom.managed";
+const LABEL_VERSION: &str = "mom.version";
 const GUEST_CODEX_HOME: &str = "/root/.codex";
 const GUEST_HERMES_HOME: &str = "/root/.hermes-agent";
-const BASE_BUILDER_NAME: &str = "hvm-base-builder";
+const BASE_BUILDER_NAME: &str = "mom-base-builder";
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "hvm",
-    about = "Small VM manager for Alpine microsandbox agent boxes"
+    name = "mom",
+    about = "Agent Mom: small VM manager for Alpine microsandbox agent boxes"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -29,9 +29,9 @@ struct Cli {
 enum Command {
     /// Create and provision a new Alpine VM.
     Create(CreateArgs),
-    /// List hvm-managed VMs.
+    /// List Agent Mom-managed VMs.
     List {
-        /// Include sandboxes not created by hvm.
+        /// Include sandboxes not created by Agent Mom.
         #[arg(long)]
         all: bool,
     },
@@ -42,7 +42,7 @@ enum Command {
     /// Remove a VM, stopping it first if needed.
     Rm {
         name: Option<String>,
-        /// Remove all hvm-managed VMs.
+        /// Remove all Agent Mom-managed VMs.
         #[arg(long)]
         all: bool,
         /// Do not ask for confirmation.
@@ -94,7 +94,7 @@ struct CreateArgs {
 }
 
 #[derive(Debug, Deserialize)]
-struct HvmConfig {
+struct MomConfig {
     codex_auth_path: PathBuf,
     #[serde(default = "default_hermes_profile")]
     hermes_profile: String,
@@ -144,7 +144,7 @@ async fn main() -> Result<()> {
 
 async fn create(args: CreateArgs) -> Result<()> {
     println!("creating {} from {IMAGE}", args.name);
-    let config = load_hvm_config()?;
+    let config = load_mom_config()?;
 
     let memory = u32::try_from(args.memory).context("memory must fit in u32 MiB")?;
     if !args.no_snapshot {
@@ -188,7 +188,7 @@ async fn create(args: CreateArgs) -> Result<()> {
     Ok(())
 }
 
-async fn apply_guest_auth_config(sandbox: &Sandbox, config: &HvmConfig) -> Result<()> {
+async fn apply_guest_auth_config(sandbox: &Sandbox, config: &MomConfig) -> Result<()> {
     println!("writing VM auth/config from host config");
     let codex_auth_path = resolve_required_file(&config.codex_auth_path, "codex_auth_path")?;
     let codex_auth = fs::read(&codex_auth_path)
@@ -238,7 +238,7 @@ sync
     .await
 }
 
-async fn ensure_base_snapshot(config: &HvmConfig, rebuild: bool) -> Result<()> {
+async fn ensure_base_snapshot(config: &MomConfig, rebuild: bool) -> Result<()> {
     if rebuild {
         println!("rebuilding base snapshot {}", config.snapshot_name);
         let _ = Snapshot::remove(&config.snapshot_name, true).await;
@@ -265,7 +265,7 @@ async fn ensure_base_snapshot(config: &HvmConfig, rebuild: bool) -> Result<()> {
     build_base_snapshot(config).await
 }
 
-async fn build_base_snapshot(config: &HvmConfig) -> Result<()> {
+async fn build_base_snapshot(config: &MomConfig) -> Result<()> {
     let codex_auth_path = resolve_required_file(&config.codex_auth_path, "codex_auth_path")?;
     let codex_files = codex_auth_files(&codex_auth_path)?;
     let hermes_auth = codex_auth_as_hermes_auth(&codex_auth_path)?;
@@ -395,7 +395,7 @@ async fn configure_guest_profile(sandbox: &Sandbox, hermes_profile: &str) -> Res
 set -eu
 mkdir -p /workspace /root/.codex /root/.hermes-agent {hermes_home_q}
 ln -sfn {hermes_home_q} /root/.hermes
-cat >/etc/profile.d/hvm.sh <<'EOF'
+cat >/etc/profile.d/mom.sh <<'EOF'
 export HERMES_HOME={hermes_home}
 export CODEX_HOME=/root/.codex
 EOF
@@ -501,7 +501,7 @@ async fn remove_all_managed() -> Result<()> {
         removed += 1;
     }
 
-    println!("removed {removed} hvm-managed VM(s)");
+    println!("removed {removed} Agent Mom-managed VM(s)");
     Ok(())
 }
 
@@ -526,7 +526,7 @@ async fn run_codex(sandbox: &Sandbox, prompt: &str) -> Result<()> {
     let script = format!(
         r#"
 set -eu
-tmp="$(mktemp -d /root/hvm-codex.XXXXXX)"
+tmp="$(mktemp -d /root/mom-codex.XXXXXX)"
 trap 'rm -rf "$tmp"' EXIT
 cp /root/.codex/auth.json "$tmp/auth.json"
 if [ -f /root/.codex/config.toml ]; then
@@ -556,8 +556,8 @@ node --version
 npm --version
 uv --version
 codex --version
-hermes --help >/tmp/hvm-hermes-help.txt 2>&1 || true
-head -20 /tmp/hvm-hermes-help.txt
+hermes --help >/tmp/mom-hermes-help.txt 2>&1 || true
+head -20 /tmp/mom-hermes-help.txt
 echo "== codex doctor =="
 codex doctor --summary --ascii --no-color || true
 "#,
@@ -684,18 +684,18 @@ fn home_dir() -> Result<PathBuf> {
     dirs::home_dir().ok_or_else(|| anyhow!("could not determine home directory"))
 }
 
-fn load_hvm_config() -> Result<HvmConfig> {
-    let path = match env::var_os("HVM_CONFIG") {
+fn load_mom_config() -> Result<MomConfig> {
+    let path = match env::var_os("MOM_CONFIG") {
         Some(value) => PathBuf::from(value),
-        None => home_dir()?.join(".config").join("hvm").join("config.json"),
+        None => home_dir()?.join(".config").join("mom").join("config.json"),
     };
     let raw = fs::read_to_string(&path).with_context(|| {
         format!(
-            "read hvm config {}; create it or set HVM_CONFIG",
+            "read Agent Mom config {}; create it or set MOM_CONFIG",
             path.display()
         )
     })?;
-    serde_json::from_str(&raw).with_context(|| format!("parse hvm config {}", path.display()))
+    serde_json::from_str(&raw).with_context(|| format!("parse Agent Mom config {}", path.display()))
 }
 
 fn resolve_required_file(path: &PathBuf, key: &str) -> Result<PathBuf> {
@@ -728,7 +728,7 @@ fn default_hermes_model() -> String {
 }
 
 fn default_snapshot_name() -> String {
-    "hvm-alpine-agent-base".to_string()
+    "mom-alpine-agent-base".to_string()
 }
 
 fn hermes_config_yaml(model: &str) -> String {
@@ -769,7 +769,7 @@ fn config_string(value: &str) -> String {
 }
 
 fn hermes_soul_md() -> &'static str {
-    "You are running inside an isolated hvm microsandbox. Work in /workspace.\n"
+    "You are running inside an isolated Agent Mom microsandbox. Work in /workspace.\n"
 }
 
 fn image_label(config: &microsandbox::sandbox::SandboxConfig) -> String {
