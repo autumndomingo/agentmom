@@ -67,6 +67,7 @@
             packages = [
               rustToolchain
               pkgs.cargo-nextest
+              pkgs.nodejs
               pkgs.pkg-config
               pkgs.rust-analyzer
             ];

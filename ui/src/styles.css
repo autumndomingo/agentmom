@@ -1,0 +1,432 @@
+:root {
+  color-scheme: dark;
+  --bg: #050505;
+  --panel: #121214;
+  --panel-bottom: #0d0d0e;
+  --panel-raised: #1b1b1e;
+  --line: #303034;
+  --line-strong: #575761;
+  --text: #f4f4f5;
+  --muted: #a9a9b2;
+  --dim: #777781;
+  --green: #55d681;
+  --danger: #ff7676;
+  --warning: #f2c879;
+  background: var(--bg);
+  color: var(--text);
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 16px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg);
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  border: 1px solid var(--line);
+  background: var(--panel-raised);
+  color: var(--text);
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--line-strong);
+  background: #222226;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.shell {
+  min-height: 100vh;
+  padding: 32px;
+  display: grid;
+  grid-template-rows: auto 1fr;
+  gap: 22px;
+}
+
+.topbar {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: linear-gradient(180deg, var(--panel) 0%, var(--panel-bottom) 100%);
+  padding: 28px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 18px;
+  box-shadow: 0 24px 90px rgb(0 0 0 / 35%);
+}
+
+.statusPill {
+  width: fit-content;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-raised);
+  color: var(--muted);
+  padding: 9px 14px;
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.statusPill svg {
+  color: var(--green);
+}
+
+.topbar h1,
+.topbar p,
+h2 {
+  margin: 0;
+}
+
+.topbar h1 {
+  margin-top: 22px;
+  font-size: clamp(40px, 6vw, 76px);
+  line-height: 1.02;
+  letter-spacing: 0;
+}
+
+.topbar p {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: clamp(18px, 2vw, 24px);
+  line-height: 1.35;
+}
+
+.iconButton,
+.actions button,
+.commandBox button {
+  width: 42px;
+  height: 42px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.layout {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 340px minmax(0, 1fr);
+  gap: 22px;
+}
+
+.sidebar,
+.workspace {
+  min-height: 0;
+}
+
+.sidebar {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: linear-gradient(180deg, var(--panel) 0%, var(--panel-bottom) 100%);
+  padding: 18px;
+  overflow: auto;
+}
+
+.sectionHeader,
+.vmPanel,
+.consoleHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+h2 {
+  color: var(--text);
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.toggle,
+.check {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+input[type="checkbox"] {
+  accent-color: var(--green);
+}
+
+.vmList {
+  margin: 16px 0 24px;
+  display: grid;
+  gap: 9px;
+}
+
+.vmItem {
+  min-height: 62px;
+  padding: 11px 12px;
+  border-radius: 8px;
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  text-align: left;
+}
+
+.vmItem.active {
+  border-color: rgb(85 214 129 / 55%);
+  background: rgb(85 214 129 / 9%);
+}
+
+.vmItem strong,
+.vmItem small {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.vmItem strong {
+  font-weight: 700;
+}
+
+.vmItem small,
+.vmPanel p,
+.empty {
+  color: var(--muted);
+}
+
+.status {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--dim);
+}
+
+.status.running,
+.status.draining {
+  background: var(--green);
+  box-shadow: 0 0 0 4px rgb(85 214 129 / 12%);
+}
+
+.status.stopped,
+.status.paused {
+  background: var(--warning);
+}
+
+.status.crashed {
+  background: var(--danger);
+}
+
+.createForm {
+  display: grid;
+  gap: 12px;
+}
+
+.createForm input,
+.commandBox input {
+  width: 100%;
+  height: 42px;
+  min-width: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: #080809;
+  color: var(--text);
+  padding: 0 13px;
+  outline: none;
+}
+
+.createForm input:focus,
+.commandBox input:focus {
+  border-color: #858591;
+}
+
+.numberGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.numberGrid label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.primary {
+  height: 44px;
+  border: 0;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  background: var(--text);
+  color: #09090a;
+  font-weight: 750;
+}
+
+.primary:hover:not(:disabled) {
+  background: #ffffff;
+}
+
+.workspace {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 14px;
+  overflow: hidden;
+}
+
+.panel,
+.commandBox,
+.console {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: linear-gradient(180deg, var(--panel) 0%, var(--panel-bottom) 100%);
+}
+
+.vmPanel {
+  padding: 18px;
+}
+
+.vmPanel h2 {
+  font-size: 22px;
+}
+
+.vmPanel p {
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.actions {
+  display: flex;
+  gap: 9px;
+}
+
+.tools {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.commandBox {
+  padding: 13px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.commandBox label {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.commandBox label > span,
+.consoleHeader span {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.commandBox label svg,
+.consoleHeader svg {
+  color: var(--green);
+}
+
+.console {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.consoleHeader {
+  min-height: 48px;
+  padding: 0 15px;
+  border-bottom: 1px solid var(--line);
+}
+
+.consoleHeader b {
+  color: var(--green);
+  font-size: 13px;
+}
+
+pre {
+  margin: 0;
+  padding: 16px;
+  overflow: auto;
+  background: #080809;
+  color: #e4e4e7;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 980px) {
+  .shell {
+    padding: 18px;
+  }
+
+  .layout {
+    grid-template-columns: 1fr;
+  }
+
+  .tools {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .shell {
+    padding: 14px;
+  }
+
+  .topbar {
+    padding: 22px;
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .topbar h1 {
+    font-size: 42px;
+  }
+
+  .sidebar {
+    padding: 14px;
+  }
+
+  .vmPanel {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .actions {
+    width: 100%;
+  }
+
+  .actions button {
+    flex: 1;
+  }
+}
