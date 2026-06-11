@@ -53,10 +53,7 @@ function Root() {
     return (
       <main className="landingPage">
         <section className="landingPanel" aria-label="User access">
-          <div className="landingHeader">
-            <div className="brandMark">A</div>
-            <h1>Agent Mom</h1>
-          </div>
+          <BuildersTableBrand />
         </section>
       </main>
     );
@@ -112,10 +109,7 @@ function LandingPage({ onSubmit }) {
   return (
     <main className="landingPage">
       <section className="landingPanel" aria-label="User access">
-        <div className="landingHeader">
-          <div className="brandMark">A</div>
-          <h1>Agent Mom</h1>
-        </div>
+        <BuildersTableBrand />
 
         <form className="landingForm" onSubmit={submitAccess}>
           <input
@@ -145,6 +139,23 @@ function LandingPage({ onSubmit }) {
         </form>
       </section>
     </main>
+  );
+}
+
+function BuildersTableBrand() {
+  return (
+    <div className="landingBrand">
+      <div className="terminalLine">
+        <span>~/builders-table</span>
+        <strong>$ agent-mom --meetup</strong>
+      </div>
+      <p className="meetupDate">// THE BUILDERS' TABLE</p>
+      <h1>
+        <span>Agent Mom</span>
+        <small>brought to you by</small>
+        <strong>the builders' table</strong>
+      </h1>
+    </div>
   );
 }
 
@@ -189,10 +200,7 @@ function SetupPage({ userSession, onSubmit }) {
   return (
     <main className="landingPage">
       <section className="landingPanel setupPanel" aria-label="Create your workspace">
-        <div className="landingHeader">
-          <div className="brandMark">A</div>
-          <h1>Create workspace</h1>
-        </div>
+        <BuildersTableBrand />
 
         <form className="landingForm setupForm" onSubmit={submitSetup}>
           <input

@@ -51,24 +51,60 @@ input:disabled {
 
 .landingPage {
   min-height: 100vh;
-  padding: clamp(24px, 7vw, 96px);
+  padding: clamp(18px, 5vw, 72px);
   display: grid;
   place-items: center;
   background:
-    radial-gradient(circle at 50% 0%, rgb(255 255 255 / 5%), transparent 34%),
+    radial-gradient(circle at 90% 6%, rgb(220 121 55 / 18%), transparent 22%),
+    radial-gradient(circle at 2% 88%, rgb(70 128 148 / 18%), transparent 24%),
+    linear-gradient(rgb(255 255 255 / 3%) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(255 255 255 / 3%) 1px, transparent 1px),
     var(--bg);
+  background-size:
+    auto,
+    auto,
+    56px 56px,
+    56px 56px,
+    auto;
 }
 
 .landingPanel {
-  width: min(910px, 100%);
-  min-height: min(568px, calc(100vh - 72px));
-  padding: clamp(26px, 4.8vw, 68px);
-  border: 1px solid var(--line);
-  border-radius: 18px;
+  position: relative;
+  width: min(1120px, 100%);
+  min-height: min(640px, calc(100vh - 44px));
+  padding: clamp(28px, 5vw, 70px);
+  border: 1px solid #2c2c31;
+  border-radius: 10px;
   display: grid;
-  grid-template-rows: auto 1fr;
-  background: #070707;
-  box-shadow: 0 24px 90px rgb(0 0 0 / 42%);
+  grid-template-columns: minmax(0, 1.1fr) minmax(320px, 0.8fr);
+  align-items: center;
+  gap: clamp(28px, 6vw, 82px);
+  background: rgb(5 6 7 / 72%);
+  box-shadow: 0 30px 100px rgb(0 0 0 / 52%);
+  overflow: hidden;
+}
+
+.landingPanel::before,
+.landingPanel::after {
+  position: absolute;
+  width: 54px;
+  height: 54px;
+  content: "";
+  pointer-events: none;
+}
+
+.landingPanel::before {
+  top: 24px;
+  left: 24px;
+  border-top: 3px solid #e1944e;
+  border-left: 3px solid #e1944e;
+}
+
+.landingPanel::after {
+  right: 24px;
+  bottom: 24px;
+  border-right: 3px solid #e1944e;
+  border-bottom: 3px solid #e1944e;
 }
 
 .landingHeader {
@@ -86,23 +122,104 @@ input:disabled {
   line-height: 1;
 }
 
+.landingBrand {
+  min-width: 0;
+  display: grid;
+  gap: 24px;
+}
+
+.terminalLine {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: #ece8d9;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: clamp(16px, 1.8vw, 22px);
+  line-height: 1.35;
+}
+
+.terminalLine span {
+  color: #80828d;
+}
+
+.terminalLine strong {
+  color: #ece8d9;
+  font-weight: 700;
+}
+
+.terminalLine strong::before {
+  color: #e1944e;
+  content: "$ ";
+}
+
+.meetupDate {
+  margin: 0;
+  color: #a5d7cf;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: clamp(14px, 1.7vw, 20px);
+  font-weight: 750;
+  letter-spacing: 0.12em;
+}
+
+.landingBrand h1 {
+  margin: 0;
+  display: grid;
+  gap: 6px;
+  color: #f3eedf;
+  line-height: 0.92;
+}
+
+.landingBrand h1 span,
+.landingBrand h1 strong {
+  display: block;
+  overflow-wrap: anywhere;
+  font-family: Georgia, "Times New Roman", serif;
+  font-weight: 900;
+  letter-spacing: 0;
+}
+
+.landingBrand h1 span {
+  font-size: clamp(58px, 9vw, 116px);
+}
+
+.landingBrand h1 small {
+  margin-top: 10px;
+  color: #f3eedf;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: clamp(28px, 4.6vw, 56px);
+  font-style: italic;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.landingBrand h1 strong {
+  color: #e1944e;
+  font-size: clamp(46px, 7vw, 92px);
+  text-transform: lowercase;
+}
+
 .landingForm {
-  width: min(470px, 100%);
+  width: min(430px, 100%);
   place-self: center;
   display: grid;
-  gap: 28px;
+  gap: 18px;
+  padding: 22px;
+  border: 1px solid rgb(255 255 255 / 10%);
+  border-radius: 8px;
+  background: rgb(6 6 7 / 72%);
+  box-shadow: 0 20px 80px rgb(0 0 0 / 35%);
 }
 
 .landingForm input {
   width: 100%;
-  height: 72px;
+  height: 60px;
   border: 2px solid #35353a;
-  border-radius: 16px;
+  border-radius: 8px;
   outline: 0;
-  padding: 0 30px;
-  background: #050505;
+  padding: 0 20px;
+  background: #050607;
   color: var(--text);
-  font-size: 25px;
+  font-size: 20px;
   font-weight: 650;
 }
 
@@ -111,7 +228,7 @@ input:disabled {
 }
 
 .landingForm input:focus {
-  border-color: #6f6f79;
+  border-color: #e1944e;
   background: #080809;
 }
 
@@ -123,16 +240,16 @@ input:disabled {
 }
 
 .landingForm button {
-  height: 56px;
-  border-radius: 12px;
-  background: var(--accent);
-  color: #09090a;
+  height: 58px;
+  border-radius: 8px;
+  background: #e1944e;
+  color: #08090a;
   font-size: 17px;
   font-weight: 850;
 }
 
 .landingForm button:hover:not(:disabled) {
-  background: #ffffff;
+  background: #f0aa61;
 }
 
 .sidebar {
@@ -930,6 +1047,25 @@ input:disabled {
 
   .landingPanel {
     min-height: min(540px, calc(100vh - 48px));
+    grid-template-columns: 1fr;
+    align-content: center;
+    gap: 28px;
+  }
+
+  .landingBrand {
+    gap: 16px;
+  }
+
+  .landingBrand h1 span {
+    font-size: clamp(46px, 13vw, 82px);
+  }
+
+  .landingBrand h1 small {
+    font-size: clamp(23px, 7vw, 40px);
+  }
+
+  .landingBrand h1 strong {
+    font-size: clamp(38px, 10vw, 64px);
   }
 
   .adminTableShell {
@@ -976,18 +1112,43 @@ input:disabled {
   .landingPanel {
     min-height: calc(100vh - 32px);
     padding: 22px;
-    border-radius: 16px;
+    border-radius: 10px;
   }
 
   .landingForm {
     gap: 18px;
+    padding: 16px;
   }
 
   .landingForm input {
     height: 60px;
     padding: 0 18px;
-    border-radius: 12px;
-    font-size: 20px;
+    border-radius: 8px;
+    font-size: 18px;
+  }
+
+  .landingPanel::before,
+  .landingPanel::after {
+    width: 38px;
+    height: 38px;
+  }
+
+  .landingPanel::before {
+    top: 14px;
+    left: 14px;
+  }
+
+  .landingPanel::after {
+    right: 14px;
+    bottom: 14px;
+  }
+
+  .terminalLine {
+    font-size: 14px;
+  }
+
+  .meetupDate {
+    font-size: 12px;
   }
 
   .adminPanel {
