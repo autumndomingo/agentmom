@@ -51,12 +51,72 @@ input:disabled {
 
 .sidebar {
   min-height: 100vh;
-  padding: 14px;
+  padding: 22px 22px 18px;
   display: grid;
-  grid-template-rows: auto auto auto 1fr auto;
-  gap: 14px;
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+  gap: 18px;
   background: var(--sidebar);
   border-right: 1px solid var(--line);
+}
+
+.sidebarTopBar {
+  min-height: 58px;
+  display: flex;
+  justify-content: flex-end;
+  align-items: flex-start;
+}
+
+.sidebarIconButton {
+  width: 44px;
+  height: 44px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  background: transparent;
+  color: var(--muted);
+}
+
+.sidebarIconButton:hover {
+  background: var(--panel);
+  color: var(--text);
+}
+
+.sidebarQuickActions {
+  display: grid;
+  gap: 8px;
+}
+
+.newChatButton,
+.launchButton {
+  width: 100%;
+  min-height: 72px;
+  padding: 0 20px;
+  border-radius: 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 24px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  font-size: 28px;
+  font-weight: 650;
+  line-height: 1;
+}
+
+.newChatButton {
+  background: #252525;
+}
+
+.newChatButton:hover:not(:disabled) {
+  background: #303030;
+}
+
+.launchButton:hover {
+  background: #1f1f1f;
+}
+
+.userDropdown {
+  position: relative;
 }
 
 .brandRow {
@@ -77,8 +137,8 @@ input:disabled {
 }
 
 .brandButton,
-.sidebarAction,
-.workspaceItem,
+.userMenuItem,
+.chatHistoryItem,
 .refreshButton,
 .squareButton,
 .createButton,
@@ -87,12 +147,88 @@ input:disabled {
 }
 
 .brandButton {
+  min-width: 0;
   display: inline-flex;
   align-items: center;
   gap: 6px;
   color: var(--text);
   font-size: 17px;
   font-weight: 750;
+}
+
+.chevron {
+  transition: transform 140ms ease;
+}
+
+.chevron.open {
+  transform: rotate(180deg);
+}
+
+.userMenu {
+  position: absolute;
+  z-index: 10;
+  top: calc(100% + 10px);
+  left: 0;
+  right: 0;
+  max-height: min(420px, calc(100vh - 110px));
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  display: grid;
+  gap: 3px;
+  overflow: auto;
+  background: #101012;
+  box-shadow: 0 18px 60px rgb(0 0 0 / 45%);
+}
+
+.userMenuItem {
+  width: 100%;
+  min-height: 48px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  text-align: left;
+}
+
+.userMenuItem.active,
+.userMenuItem:hover {
+  background: var(--panel);
+}
+
+.userMenuItem span:not(.statusDot) {
+  min-width: 0;
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 750;
+  overflow-wrap: anywhere;
+}
+
+.userMenuItem small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.statusDot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #ec5f67;
+}
+
+.statusDot.active {
+  background: #55d681;
+}
+
+.statusDot.stagnant {
+  background: #f2c879;
+}
+
+.statusDot.inactive {
+  background: #ec5f67;
 }
 
 .createButton {
@@ -113,34 +249,12 @@ input:disabled {
 }
 
 .createButton:hover,
-.sidebarAction:hover,
-.workspaceItem:hover,
 .refreshButton:hover:not(:disabled),
 .squareButton:hover,
 .composer button:hover:not(:disabled) {
   background: var(--panel-hover);
 }
 
-.sidebarAction {
-  height: 42px;
-  padding: 0 12px;
-  border-radius: 8px;
-  display: inline-flex;
-  align-items: center;
-  gap: 11px;
-  color: var(--muted);
-  text-align: left;
-  font-size: 15px;
-  font-weight: 650;
-}
-
-.workspaceSection {
-  min-height: 0;
-  overflow: auto;
-  padding-top: 12px;
-}
-
-.workspaceSection h2,
 .sessionBox h2 {
   margin: 0 0 10px;
   color: var(--dim);
@@ -150,36 +264,56 @@ input:disabled {
   text-transform: uppercase;
 }
 
-.workspaceList {
-  display: grid;
-  gap: 3px;
+.chatHistory {
+  min-height: 0;
+  overflow: auto;
+  padding-top: 18px;
 }
 
-.workspaceItem {
-  width: 100%;
-  min-height: 46px;
-  padding: 8px 12px;
-  border-radius: 8px;
+.chatHistory h2 {
+  margin: 0 0 14px;
+  color: var(--dim);
+  font-size: 24px;
+  font-weight: 750;
+  letter-spacing: 0;
+}
+
+.chatHistoryGroup {
+  margin-bottom: 34px;
+}
+
+.chatHistoryList {
   display: grid;
-  gap: 2px;
+  gap: 18px;
+}
+
+.chatHistoryItem {
+  width: 100%;
+  min-height: 40px;
+  padding: 0;
+  border-radius: 4px;
+  display: block;
+  color: #a7a7aa;
   text-align: left;
 }
 
-.workspaceItem.active {
-  background: var(--panel);
-}
-
-.workspaceItem span {
+.chatHistoryItem:hover,
+.chatHistoryItem.active {
+  background: transparent;
   color: var(--text);
-  font-size: 15px;
-  font-weight: 700;
-  overflow-wrap: anywhere;
 }
 
-.workspaceItem small {
-  color: var(--muted);
-  font-size: 13px;
-  font-weight: 650;
+.chatHistoryItem span {
+  display: block;
+  color: inherit;
+  font-size: 27px;
+  font-weight: 500;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
 }
 
 .emptyList {
