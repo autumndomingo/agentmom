@@ -115,6 +115,23 @@ function App() {
     }
   }
 
+  async function launchHermes() {
+    if (!selectedVm) return;
+
+    try {
+      const result = await request(`/vms/${encodeURIComponent(selectedVm.name)}/hermes-ui`, {
+        method: 'POST',
+      });
+      const url = result.stdout.trim().split(/\s+/).at(-1);
+      if (url) {
+        window.open(url, '_blank', 'noopener,noreferrer');
+      }
+      await refresh();
+    } catch (error) {
+      setMessages((current) => [...current, { role: 'assistant', content: formatError(error) }]);
+    }
+  }
+
   function selectWorkspace(name) {
     setSelectedName(name);
     setMessages([]);
@@ -186,6 +203,10 @@ function App() {
             >
               <ExternalLink size={17} />
               OpenCode
+            </button>
+            <button className="refreshButton" onClick={launchHermes} disabled={!selectedVm || busy}>
+              <ExternalLink size={17} />
+              Hermes
             </button>
           </div>
         </header>

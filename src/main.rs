@@ -404,19 +404,24 @@ async fn provision_base(sandbox: &Sandbox, hermes_profile: &str) -> Result<()> {
 set -eu
 apk add --no-cache \
   bash \
+  build-base \
   ca-certificates \
+  clang \
+  compiler-rt \
   curl \
   git \
+  libffi-dev \
   nodejs \
   npm \
-  python3
+  python3 \
+  python3-dev
 if ! command -v uv >/dev/null 2>&1; then
   curl -LsSf https://astral.sh/uv/install.sh | sh
 fi
 export PATH="/root/.local/bin:$PATH"
 npm install -g @openai/codex
 npm install -g opencode-ai
-UV_LINK_MODE=copy uv tool install --python 3.13 --force hermes-agent
+CC=clang UV_LINK_MODE=copy uv tool install --python 3.13 --force 'hermes-agent[all,messaging]'
 ln -sf /root/.local/bin/uv /usr/local/bin/uv
 ln -sf /root/.local/bin/uvx /usr/local/bin/uvx
 ln -sf /root/.local/bin/hermes /usr/local/bin/hermes
