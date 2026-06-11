@@ -16,7 +16,7 @@ anyhow = "1.0"
 axum = "0.8"
 clap = { version = "4.5", features = ["derive"] }
 dirs = "6.0"
-microsandbox = { git = "https://github.com/superradcompany/microsandbox", rev = "8059c966c586685271fbf2781b5d6dbb112ace36" }
+microsandbox = { git = "https://github.com/superradcompany/microsandbox", rev = "8059c966c586685271fbf2781b5d6dbb112ace36", features = ["ssh"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.48", features = ["macros", "process", "rt-multi-thread", "signal"] }

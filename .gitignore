@@ -1,3 +1,4 @@
 /target/
+/.direnv/
 /ui/dist/
 /ui/node_modules/

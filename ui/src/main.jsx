@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   ChevronDown,
+  ExternalLink,
   PanelLeft,
   Plus,
   RefreshCcw,
@@ -97,6 +98,23 @@ function App() {
     }
   }
 
+  async function launchOpencode() {
+    if (!selectedVm) return;
+
+    try {
+      const result = await request(`/vms/${encodeURIComponent(selectedVm.name)}/opencode`, {
+        method: 'POST',
+      });
+      const url = result.stdout.trim().split(/\s+/).at(-1);
+      if (url) {
+        window.open(url, '_blank', 'noopener,noreferrer');
+      }
+      await refresh();
+    } catch (error) {
+      setMessages((current) => [...current, { role: 'assistant', content: formatError(error) }]);
+    }
+  }
+
   function selectWorkspace(name) {
     setSelectedName(name);
     setMessages([]);
@@ -156,10 +174,20 @@ function App() {
             <h1>{selectedVm?.name ?? 'Agent workspace'}</h1>
             <p>{selectedVm ? friendlyStatus(selectedVm.status) : 'Create a workspace to begin.'}</p>
           </div>
-          <button className="refreshButton" onClick={refresh} disabled={busy}>
-            <RefreshCcw size={17} />
-            Refresh
-          </button>
+          <div className="headerActions">
+            <button className="refreshButton" onClick={refresh} disabled={busy}>
+              <RefreshCcw size={17} />
+              Refresh
+            </button>
+            <button
+              className="refreshButton"
+              onClick={launchOpencode}
+              disabled={!selectedVm || busy}
+            >
+              <ExternalLink size={17} />
+              OpenCode
+            </button>
+          </div>
         </header>
 
         <div className="chatBody">

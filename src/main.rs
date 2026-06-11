@@ -13,6 +13,9 @@ const LABEL_MANAGED: &str = "mom.managed";
 const LABEL_VERSION: &str = "mom.version";
 const GUEST_CODEX_HOME: &str = "/root/.codex";
 const GUEST_HERMES_HOME: &str = "/root/.hermes-agent";
+const GUEST_OPENCODE_DATA_HOME: &str = "/root/.local/share/opencode";
+const GUEST_OPENCODE_CONFIG_HOME: &str = "/root/.config/opencode";
+const OPENCODE_GUEST_PORT: u16 = 4096;
 const BASE_BUILDER_NAME: &str = "mom-base-builder";
 
 #[derive(Debug, Parser)]
@@ -96,6 +99,8 @@ struct CreateArgs {
 #[derive(Debug, Deserialize)]
 struct MomConfig {
     codex_auth_path: PathBuf,
+    #[serde(default = "default_opencode_auth_path")]
+    opencode_auth_path: PathBuf,
     #[serde(default = "default_hermes_profile")]
     hermes_profile: String,
     #[serde(default = "default_hermes_model")]
@@ -194,12 +199,20 @@ async fn apply_guest_auth_config(sandbox: &Sandbox, config: &MomConfig) -> Resul
     let codex_auth = fs::read(&codex_auth_path)
         .with_context(|| format!("read {}", codex_auth_path.display()))?;
     let hermes_auth = codex_auth_as_hermes_auth(&codex_auth_path)?;
+    let opencode_auth_path =
+        resolve_required_file(&config.opencode_auth_path, "opencode_auth_path")?;
+    let opencode_auth = opencode_auth_from_file(&opencode_auth_path)?;
     let hermes_home = format!("{GUEST_HERMES_HOME}/{}", config.hermes_profile);
 
     let fs = sandbox.fs();
     fs.mkdir("/workspace").await?;
     fs.mkdir(GUEST_CODEX_HOME).await?;
     fs.mkdir(GUEST_HERMES_HOME).await?;
+    fs.mkdir("/root/.local").await?;
+    fs.mkdir("/root/.local/share").await?;
+    fs.mkdir(GUEST_OPENCODE_DATA_HOME).await?;
+    fs.mkdir("/root/.config").await?;
+    fs.mkdir(GUEST_OPENCODE_CONFIG_HOME).await?;
     fs.mkdir(&hermes_home).await?;
     fs.mkdir(&format!("{hermes_home}/home")).await?;
     fs.write(&format!("{GUEST_CODEX_HOME}/auth.json"), codex_auth)
@@ -221,6 +234,16 @@ async fn apply_guest_auth_config(sandbox: &Sandbox, config: &MomConfig) -> Resul
     .await?;
     fs.write(&format!("{hermes_home}/auth.json"), hermes_auth.as_bytes())
         .await?;
+    fs.write(
+        &format!("{GUEST_OPENCODE_DATA_HOME}/auth.json"),
+        opencode_auth.as_bytes(),
+    )
+    .await?;
+    fs.write(
+        &format!("{GUEST_OPENCODE_CONFIG_HOME}/opencode.json"),
+        opencode_config_json(&config.hermes_model).as_bytes(),
+    )
+    .await?;
 
     let hermes_home_q = shell_quote(&hermes_home);
     checked_shell(
@@ -228,8 +251,8 @@ async fn apply_guest_auth_config(sandbox: &Sandbox, config: &MomConfig) -> Resul
         &format!(
             r#"
 set -eu
-chmod 700 /root/.codex /root/.hermes-agent {hermes_home_q}
-chmod 600 /root/.codex/auth.json /root/.codex/config.toml {hermes_home_q}/auth.json {hermes_home_q}/config.yaml {hermes_home_q}/SOUL.md
+chmod 700 /root/.codex /root/.hermes-agent /root/.local /root/.local/share /root/.local/share/opencode /root/.config /root/.config/opencode {hermes_home_q}
+chmod 600 /root/.codex/auth.json /root/.codex/config.toml {hermes_home_q}/auth.json {hermes_home_q}/config.yaml {hermes_home_q}/SOUL.md /root/.local/share/opencode/auth.json /root/.config/opencode/opencode.json
 ln -sfn {hermes_home_q} /root/.hermes
 sync
 "#
@@ -269,6 +292,9 @@ async fn build_base_snapshot(config: &MomConfig) -> Result<()> {
     let codex_auth_path = resolve_required_file(&config.codex_auth_path, "codex_auth_path")?;
     let codex_files = codex_auth_files(&codex_auth_path)?;
     let hermes_auth = codex_auth_as_hermes_auth(&codex_auth_path)?;
+    let opencode_auth_path =
+        resolve_required_file(&config.opencode_auth_path, "opencode_auth_path")?;
+    let opencode_auth = opencode_auth_from_file(&opencode_auth_path)?;
     let hermes_profile_name = config.hermes_profile.clone();
     let hermes_model = config.hermes_model.clone();
 
@@ -292,6 +318,11 @@ async fn build_base_snapshot(config: &MomConfig) -> Result<()> {
                 .mkdir("/workspace", Some(0o755))
                 .mkdir(GUEST_CODEX_HOME, Some(0o700))
                 .mkdir(GUEST_HERMES_HOME, Some(0o700))
+                .mkdir("/root/.local", Some(0o700))
+                .mkdir("/root/.local/share", Some(0o700))
+                .mkdir(GUEST_OPENCODE_DATA_HOME, Some(0o700))
+                .mkdir("/root/.config", Some(0o700))
+                .mkdir(GUEST_OPENCODE_CONFIG_HOME, Some(0o700))
                 .mkdir(&hermes_home, Some(0o700))
                 .mkdir(format!("{hermes_home}/home"), Some(0o700))
                 .text(
@@ -315,6 +346,18 @@ async fn build_base_snapshot(config: &MomConfig) -> Result<()> {
                 .text(
                     format!("{hermes_home}/auth.json"),
                     hermes_auth,
+                    Some(0o600),
+                    true,
+                )
+                .text(
+                    format!("{GUEST_OPENCODE_DATA_HOME}/auth.json"),
+                    opencode_auth,
+                    Some(0o600),
+                    true,
+                )
+                .text(
+                    format!("{GUEST_OPENCODE_CONFIG_HOME}/opencode.json"),
+                    opencode_config_json(&hermes_model),
                     Some(0o600),
                     true,
                 );
@@ -354,7 +397,7 @@ async fn build_base_snapshot(config: &MomConfig) -> Result<()> {
 }
 
 async fn provision_base(sandbox: &Sandbox, hermes_profile: &str) -> Result<()> {
-    println!("installing Alpine packages, uv, Codex, and Hermes");
+    println!("installing Alpine packages, uv, Codex, Hermes, and OpenCode");
     checked_shell(
         sandbox,
         r#"
@@ -372,13 +415,14 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 export PATH="/root/.local/bin:$PATH"
 npm install -g @openai/codex
+npm install -g opencode-ai
 UV_LINK_MODE=copy uv tool install --python 3.13 --force hermes-agent
 ln -sf /root/.local/bin/uv /usr/local/bin/uv
 ln -sf /root/.local/bin/uvx /usr/local/bin/uvx
 ln -sf /root/.local/bin/hermes /usr/local/bin/hermes
 ln -sf /root/.local/bin/hermes-agent /usr/local/bin/hermes-agent
 ln -sf /root/.local/bin/hermes-acp /usr/local/bin/hermes-acp
-mkdir -p /workspace /root/.codex /root/.hermes-agent
+mkdir -p /workspace /root/.codex /root/.hermes-agent /root/.local/share/opencode /root/.config/opencode
 "#,
     )
     .await?;
@@ -393,7 +437,7 @@ async fn configure_guest_profile(sandbox: &Sandbox, hermes_profile: &str) -> Res
         &format!(
             r#"
 set -eu
-mkdir -p /workspace /root/.codex /root/.hermes-agent {hermes_home_q}
+mkdir -p /workspace /root/.codex /root/.hermes-agent /root/.local/share/opencode /root/.config/opencode {hermes_home_q}
 ln -sfn {hermes_home_q} /root/.hermes
 cat >/etc/profile.d/mom.sh <<'EOF'
 export HERMES_HOME={hermes_home}
@@ -556,6 +600,7 @@ node --version
 npm --version
 uv --version
 codex --version
+opencode --version
 hermes --help >/tmp/mom-hermes-help.txt 2>&1 || true
 head -20 /tmp/mom-hermes-help.txt
 echo "== codex doctor =="
@@ -684,6 +729,48 @@ fn home_dir() -> Result<PathBuf> {
     dirs::home_dir().ok_or_else(|| anyhow!("could not determine home directory"))
 }
 
+fn opencode_auth_from_file(auth_path: &PathBuf) -> Result<String> {
+    let raw =
+        fs::read_to_string(auth_path).with_context(|| format!("read {}", auth_path.display()))?;
+    let auth: Value =
+        serde_json::from_str(&raw).with_context(|| format!("parse {}", auth_path.display()))?;
+    let openai = auth
+        .get("openai")
+        .cloned()
+        .ok_or_else(|| anyhow!("{} is missing an openai auth entry", auth_path.display()))?;
+    let kind = openai
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("{}.openai is missing type", auth_path.display()))?;
+
+    match kind {
+        "oauth" => {
+            for field in ["refresh", "access", "expires"] {
+                if openai.get(field).is_none() {
+                    return Err(anyhow!("{}.openai is missing {field}", auth_path.display()));
+                }
+            }
+        }
+        "api" => {
+            if openai.get("key").is_none() {
+                return Err(anyhow!("{}.openai is missing key", auth_path.display()));
+            }
+        }
+        other => {
+            return Err(anyhow!(
+                "{}.openai has unsupported auth type {other}",
+                auth_path.display()
+            ));
+        }
+    }
+
+    println!(
+        "will seed OpenCode OpenAI auth from {}",
+        auth_path.display()
+    );
+    Ok(serde_json::to_string_pretty(&json!({ "openai": openai }))?)
+}
+
 fn load_mom_config() -> Result<MomConfig> {
     let path = match env::var_os("MOM_CONFIG") {
         Some(value) => PathBuf::from(value),
@@ -723,6 +810,15 @@ fn default_hermes_profile() -> String {
     "main".to_string()
 }
 
+fn default_opencode_auth_path() -> PathBuf {
+    home_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join(".local")
+        .join("share")
+        .join("opencode")
+        .join("auth.json")
+}
+
 fn default_hermes_model() -> String {
     "gpt-5.5".to_string()
 }
@@ -760,6 +856,21 @@ sandbox_mode = "danger-full-access"
 
 [projects."/workspace"]
 trust_level = "trusted"
+"#
+    )
+}
+
+fn opencode_config_json(model: &str) -> String {
+    let model = config_string(&format!("openai/{model}"));
+    format!(
+        r#"{{
+  "$schema": "https://opencode.ai/config.json",
+  "model": {model},
+  "server": {{
+    "hostname": "0.0.0.0",
+    "port": {OPENCODE_GUEST_PORT}
+  }}
+}}
 "#
     )
 }
