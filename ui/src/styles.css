@@ -255,6 +255,13 @@ input:disabled {
   font-weight: 700;
 }
 
+.headerActions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .chatBody {
   min-height: 0;
   display: grid;
@@ -478,8 +485,13 @@ input:disabled {
     grid-template-columns: auto minmax(0, 1fr);
   }
 
-  .refreshButton {
+  .headerActions {
     grid-column: 1 / -1;
+    justify-content: stretch;
+  }
+
+  .headerActions .refreshButton {
+    flex: 1;
     justify-content: center;
   }
 

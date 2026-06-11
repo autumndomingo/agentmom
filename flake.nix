@@ -75,6 +75,7 @@
               momDev
               rustToolchain
               pkgs.cargo-nextest
+              pkgs.just
               pkgs.nodejs
               pkgs.pkg-config
               pkgs.rust-analyzer
