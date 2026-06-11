@@ -140,22 +140,21 @@ nix build
 
 ## UI
 
-The UI is a React app served by a Rust backend. The backend delegates lifecycle
-actions to the existing `mom` CLI so CLI and UI behavior stay aligned.
+The UI is a React app served by `mom api`. The browser uses same-origin `/api`
+routes, so the public service can be a single `agentmom-api` process.
 
 ```sh
 nix develop
-cargo build --bins
 cd ui
 npm install
 npm run build
 cd ..
-cargo run --bin mom-ui
+MOM_UI_DIST=ui/dist cargo run --bin mom -- api --bind 127.0.0.1:8080
 ```
 
-Open <http://127.0.0.1:8787>. Set `MOM_UI_PORT=9000` to use another port.
-`mom-ui` always talks to the Agent Mom API. Set `MOM_API_URL` to override the
-default `http://127.0.0.1:8080`.
+Open <http://127.0.0.1:8080>. Hermes/OpenCode launch requests are routed from
+the API to the workspace's assigned worker over that worker's private
+`worker.url`.
 
 ## NixOS Service
 
@@ -199,8 +198,13 @@ services.agentmom = {
   worker = {
     enable = true;
     apiUrl = "http://127.0.0.1:8080";
+    bind = "127.0.0.1:9090";
+    url = "http://127.0.0.1:9090";
     intervalSeconds = 5;
   };
+
+  ui.enable = true;
+
   workerTokenFile = /run/secrets/agentmom-worker-token;
 
   capacity = {
@@ -216,6 +220,12 @@ services.agentmom = {
 Workers keep using host-local microsandbox volumes and claim jobs through
 `POST /worker/claim`; `GET /worker/events?node_id=...` is only a low-latency
 wake signal.
+
+Workers also expose private control endpoints, such as
+`POST /worker/services/{service}/open`, used by the API to open Hermes/OpenCode
+tunnels on the host that owns the workspace VM. Bind these endpoints to
+localhost for single-host deployments or to a Tailscale/private address for
+multi-host deployments.
 
 If `workerTokenFile` or `MOM_WORKER_TOKEN` is set, worker endpoints require a
 bearer token. Keep the API bound to localhost or a private network unless worker

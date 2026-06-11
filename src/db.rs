@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS workspaces (
     user_id TEXT NOT NULL,
     sandbox_name TEXT NOT NULL UNIQUE,
     volume_name TEXT NOT NULL UNIQUE,
+    node_id TEXT,
     desired_state TEXT NOT NULL,
     cpus INTEGER NOT NULL,
     memory_mib INTEGER NOT NULL,
@@ -52,6 +53,7 @@ ON workspace_backups (workspace_name, created_at);
 
 CREATE TABLE IF NOT EXISTS nodes (
     node_id TEXT PRIMARY KEY,
+    worker_url TEXT,
     cpus INTEGER NOT NULL,
     memory_mib INTEGER NOT NULL,
     max_active_workspaces INTEGER NOT NULL,
@@ -78,6 +80,8 @@ CREATE INDEX IF NOT EXISTS idx_jobs_claim
 ON jobs (status, node_id, created_at);
 "#,
     )?;
+    add_column_if_missing(&db, "workspaces", "node_id", "TEXT")?;
+    add_column_if_missing(&db, "nodes", "worker_url", "TEXT")?;
     Ok(())
 }
 
@@ -86,6 +90,7 @@ pub(crate) fn workspace_upsert_pending(
     user_id: &str,
     sandbox_name: &str,
     volume_name: &str,
+    assigned_node_id: Option<&str>,
     cpus: u8,
     memory_mib: u32,
     volume_quota_mib: u32,
@@ -98,14 +103,15 @@ pub(crate) fn workspace_upsert_pending(
     db.execute(
         r#"
 INSERT INTO workspaces (
-    name, user_id, sandbox_name, volume_name, desired_state, cpus, memory_mib,
+    name, user_id, sandbox_name, volume_name, node_id, desired_state, cpus, memory_mib,
     volume_quota_mib, status, idle_timeout_secs, backup_interval_secs,
     last_used_at, last_backup_at, created_at, updated_at
-) VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?6, ?7, 'creating', ?8, ?9, ?10, NULL, ?10, ?10)
+) VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7, ?8, 'creating', ?9, ?10, ?11, NULL, ?11, ?11)
 ON CONFLICT(name) DO UPDATE SET
     user_id = excluded.user_id,
     sandbox_name = excluded.sandbox_name,
     volume_name = excluded.volume_name,
+    node_id = excluded.node_id,
     desired_state = excluded.desired_state,
     cpus = excluded.cpus,
     memory_mib = excluded.memory_mib,
@@ -120,6 +126,7 @@ ON CONFLICT(name) DO UPDATE SET
             user_id,
             sandbox_name,
             volume_name,
+            assigned_node_id,
             i64::from(cpus),
             i64::from(memory_mib),
             i64::from(volume_quota_mib),
@@ -137,7 +144,7 @@ pub(crate) fn workspace_get(name: &str) -> Result<WorkspaceRecord> {
     db.query_row(
         r#"
 SELECT name, user_id, sandbox_name, volume_name, desired_state, cpus, memory_mib,
-       status, volume_quota_mib, idle_timeout_secs, backup_interval_secs, last_used_at, last_backup_at
+       node_id, status, volume_quota_mib, idle_timeout_secs, backup_interval_secs, last_used_at, last_backup_at
 FROM workspaces
 WHERE name = ?1
 "#,
@@ -154,7 +161,7 @@ pub(crate) fn workspace_all() -> Result<Vec<WorkspaceRecord>> {
     let mut stmt = db.prepare(
         r#"
 SELECT name, user_id, sandbox_name, volume_name, desired_state, cpus, memory_mib,
-       status, volume_quota_mib, idle_timeout_secs, backup_interval_secs, last_used_at, last_backup_at
+       node_id, status, volume_quota_mib, idle_timeout_secs, backup_interval_secs, last_used_at, last_backup_at
 FROM workspaces
 ORDER BY name
 "#,
@@ -168,23 +175,24 @@ ORDER BY name
 pub(crate) fn workspace_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkspaceRecord> {
     let cpus: i64 = row.get(5)?;
     let memory_mib: i64 = row.get(6)?;
-    let volume_quota_mib: i64 = row.get(8)?;
-    let idle_timeout_secs: i64 = row.get(9)?;
-    let backup_interval_secs: i64 = row.get(10)?;
+    let volume_quota_mib: i64 = row.get(9)?;
+    let idle_timeout_secs: i64 = row.get(10)?;
+    let backup_interval_secs: i64 = row.get(11)?;
     Ok(WorkspaceRecord {
         name: row.get(0)?,
         user_id: row.get(1)?,
         sandbox_name: row.get(2)?,
         volume_name: row.get(3)?,
         desired_state: row.get(4)?,
-        status: row.get(7)?,
+        node_id: row.get(7)?,
+        status: row.get(8)?,
         cpus: cpus as u8,
         memory_mib: memory_mib as u32,
         volume_quota_mib: volume_quota_mib as u32,
         idle_timeout_secs: idle_timeout_secs as u64,
         backup_interval_secs: backup_interval_secs as u64,
-        last_used_at: row.get(11)?,
-        last_backup_at: row.get(12)?,
+        last_used_at: row.get(12)?,
+        last_backup_at: row.get(13)?,
     })
 }
 
@@ -494,15 +502,20 @@ WHERE id = ?1 AND claimed_by = ?2 AND status IN ('claimed', 'running')
     job_get(id)
 }
 
-pub(crate) fn register_node(node: &str, capacity: &NodeCapacity) -> Result<()> {
+pub(crate) fn register_node(
+    node: &str,
+    capacity: &NodeCapacity,
+    worker_url: Option<&str>,
+) -> Result<()> {
     ensure_fleet_schema()?;
     let db = fleet_db()?;
     db.execute(
         r#"
 INSERT INTO nodes (
-    node_id, cpus, memory_mib, max_active_workspaces, disk_reserve_mib, last_seen_at, status
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'ready')
+    node_id, worker_url, cpus, memory_mib, max_active_workspaces, disk_reserve_mib, last_seen_at, status
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'ready')
 ON CONFLICT(node_id) DO UPDATE SET
+    worker_url = COALESCE(excluded.worker_url, nodes.worker_url),
     cpus = excluded.cpus,
     memory_mib = excluded.memory_mib,
     max_active_workspaces = excluded.max_active_workspaces,
@@ -512,6 +525,7 @@ ON CONFLICT(node_id) DO UPDATE SET
 "#,
         params![
             node,
+            worker_url,
             i64::from(capacity.cpus),
             i64::try_from(capacity.memory_mib).context("memory capacity too large")?,
             i64::from(capacity.max_active_workspaces),
@@ -520,6 +534,18 @@ ON CONFLICT(node_id) DO UPDATE SET
         ],
     )?;
     Ok(())
+}
+
+pub(crate) fn node_worker_url(node: &str) -> Result<Option<String>> {
+    ensure_fleet_schema()?;
+    let db = fleet_db()?;
+    db.query_row(
+        "SELECT worker_url FROM nodes WHERE node_id = ?1",
+        params![node],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 pub(crate) fn job_counts() -> Result<Vec<(String, i64)>> {
@@ -574,6 +600,27 @@ pub(crate) fn fleet_db() -> Result<Connection> {
     db.pragma_update(None, "journal_mode", "WAL")?;
     db.pragma_update(None, "foreign_keys", "ON")?;
     Ok(db)
+}
+
+fn add_column_if_missing(
+    db: &Connection,
+    table: &str,
+    column: &str,
+    column_type: &str,
+) -> Result<()> {
+    let mut stmt = db.prepare(&format!("PRAGMA table_info({table})"))?;
+    let exists = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .any(|name| name == column);
+    if !exists {
+        db.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {column_type}"),
+            [],
+        )?;
+    }
+    Ok(())
 }
 
 pub(crate) fn fleet_state_dir() -> Result<PathBuf> {

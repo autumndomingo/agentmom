@@ -222,21 +222,45 @@ in
         default = 5;
         description = "Fallback polling interval for mom worker.";
       };
+
+      bind = lib.mkOption {
+        type = lib.types.str;
+        default = "127.0.0.1:9090";
+        description = "Private HTTP bind address for worker-local control endpoints.";
+      };
+
+      url = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "URL the central API should use to reach this worker. Set to a Tailscale/private URL for multi-host deployments.";
+      };
+
+      serviceTunnelBindHost = lib.mkOption {
+        type = lib.types.str;
+        default = "127.0.0.1";
+        description = "Host address used for Hermes/OpenCode service tunnels created by this worker.";
+      };
+
+      serviceTunnelBaseUrl = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Browser-visible base URL for worker service tunnels, without the port.";
+      };
     };
 
     ui = {
-      enable = lib.mkEnableOption "Agent Mom web UI service";
+      enable = lib.mkEnableOption "serving the Agent Mom web UI from agentmom-api";
 
       bind = lib.mkOption {
         type = lib.types.str;
         default = "127.0.0.1:8787";
-        description = "HTTP bind address for mom-ui.";
+        description = "Deprecated. The UI is now served by agentmom-api.";
       };
 
       apiUrl = lib.mkOption {
         type = lib.types.str;
         default = "http://127.0.0.1:8080";
-        description = "Agent Mom API URL used by mom-ui.";
+        description = "Deprecated. The browser uses same-origin /api routes.";
       };
     };
 
@@ -387,8 +411,8 @@ in
         message = "services.agentmom.worker.apiUrl is required when services.agentmom.worker.enable is true.";
       }
       {
-        assertion = !cfg.ui.enable || cfg.ui.apiUrl != null || (!cfg.api.enable && !cfg.worker.enable);
-        message = "services.agentmom.ui.apiUrl is required when services.agentmom.ui.enable is true with API/worker mode.";
+        assertion = !cfg.ui.enable || cfg.api.enable;
+        message = "services.agentmom.api.enable is required when services.agentmom.ui.enable is true.";
       }
       {
         assertion = !cfg.credentialProxy.enable || cfg.credentialProxy.package != null;
@@ -420,7 +444,9 @@ in
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
       path = commonPath;
-      environment = commonEnvironment;
+      environment = commonEnvironment // lib.optionalAttrs cfg.ui.enable {
+        MOM_UI_DIST = "${cfg.package}/share/agentmom/ui";
+      };
       serviceConfig = {
         Type = "simple";
         User = cfg.user;
@@ -440,34 +466,18 @@ in
       path = commonPath;
       environment = commonEnvironment // {
         MOM_API_URL = cfg.worker.apiUrl;
+        MOM_WORKER_BIND = cfg.worker.bind;
+        MOM_SERVICE_TUNNEL_BIND_HOST = cfg.worker.serviceTunnelBindHost;
+      } // lib.optionalAttrs (cfg.worker.url != null) {
+        MOM_WORKER_URL = cfg.worker.url;
+      } // lib.optionalAttrs (cfg.worker.serviceTunnelBaseUrl != null) {
+        MOM_SERVICE_TUNNEL_BASE_URL = cfg.worker.serviceTunnelBaseUrl;
       };
       serviceConfig = {
         Type = "simple";
         User = cfg.user;
         Group = cfg.group;
         ExecStart = "${cfg.package}/bin/mom worker --interval ${toString cfg.worker.intervalSeconds}";
-        Restart = "always";
-        RestartSec = "5s";
-        WorkingDirectory = cfg.stateDir;
-      };
-    };
-
-    systemd.services.agentmom-ui = lib.mkIf cfg.ui.enable {
-      description = "Agent Mom web UI";
-      wantedBy = [ "multi-user.target" ];
-      after = [ "network-online.target" "agentmom-api.service" ];
-      wants = [ "network-online.target" ];
-      path = commonPath;
-      environment = commonEnvironment
-        // {
-          MOM_UI_BIND = cfg.ui.bind;
-          MOM_API_URL = cfg.ui.apiUrl;
-        };
-      serviceConfig = {
-        Type = "simple";
-        User = cfg.user;
-        Group = cfg.group;
-        ExecStart = "${cfg.package}/bin/mom-ui";
         Restart = "always";
         RestartSec = "5s";
         WorkingDirectory = cfg.stateDir;

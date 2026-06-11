@@ -39,12 +39,15 @@ const GUEST_HERMES_HOME: &str = "/root/.hermes-agent";
 const GUEST_OPENCODE_DATA_HOME: &str = "/root/.local/share/opencode";
 const GUEST_OPENCODE_CONFIG_HOME: &str = "/root/.config/opencode";
 const OPENCODE_GUEST_PORT: u16 = 4096;
+const HERMES_GUEST_PORT: u16 = 9119;
 const BASE_BUILDER_NAME: &str = "mom-base-builder";
 
 mod api;
 mod backup;
 mod db;
 mod sandbox;
+mod service;
+mod ui;
 mod worker;
 
 pub(crate) use db::*;
@@ -273,6 +276,12 @@ struct WorkerArgs {
     /// Central Agent Mom API URL, e.g. http://127.0.0.1:8080.
     #[arg(long, env = "MOM_API_URL")]
     api_url: String,
+    /// HTTP bind address for worker-local control endpoints.
+    #[arg(long, default_value = "127.0.0.1:9090", env = "MOM_WORKER_BIND")]
+    bind: String,
+    /// URL the central API should use to reach this worker.
+    #[arg(long, env = "MOM_WORKER_URL")]
+    worker_url: Option<String>,
     /// Fallback polling interval in seconds.
     #[arg(long, default_value_t = 5)]
     interval: u64,
@@ -294,6 +303,7 @@ struct WorkspaceRecord {
     user_id: String,
     sandbox_name: String,
     volume_name: String,
+    node_id: Option<String>,
     desired_state: String,
     status: String,
     cpus: u8,
@@ -395,6 +405,8 @@ struct CreateWorkspaceRequest {
 struct RegisterNodeRequest {
     node_id: String,
     capacity: NodeCapacity,
+    #[serde(default)]
+    worker_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -402,6 +414,8 @@ struct ClaimJobRequest {
     node_id: String,
     capacity: NodeCapacity,
     pressure: NodePressure,
+    #[serde(default)]
+    worker_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -656,6 +670,7 @@ async fn workspace_create(args: WorkspaceCreateArgs) -> Result<()> {
         &user_id,
         &sandbox_name,
         &volume_name,
+        Some(&node_id()?),
         args.cpus,
         memory,
         args.volume_quota,
@@ -701,14 +716,15 @@ async fn workspace_create(args: WorkspaceCreateArgs) -> Result<()> {
 fn workspace_list() -> Result<()> {
     let records = workspace_all()?;
     println!(
-        "{:<24} {:<16} {:<12} {:<8} {:<8} {:<8} VOLUME",
-        "WORKSPACE", "USER", "DESIRED", "CPUS", "MEM", "QUOTA"
+        "{:<24} {:<16} {:<16} {:<12} {:<8} {:<8} {:<8} VOLUME",
+        "WORKSPACE", "USER", "NODE", "DESIRED", "CPUS", "MEM", "QUOTA"
     );
     for record in records {
         println!(
-            "{:<24} {:<16} {:<12} {:<8} {:<8} {:<8} {}",
+            "{:<24} {:<16} {:<16} {:<12} {:<8} {:<8} {:<8} {}",
             record.name,
             record.user_id,
+            record.node_id.as_deref().unwrap_or("-"),
             record.desired_state,
             record.cpus,
             format!("{}M", record.memory_mib),
@@ -730,7 +746,7 @@ async fn workspace_inspect(name: &str) -> Result<()> {
 
     println!("Workspace: {}", record.name);
     println!("User: {}", record.user_id);
-    println!("Node: {}", node_id()?);
+    println!("Node: {}", record.node_id.as_deref().unwrap_or("-"));
     println!("Desired: {}", record.desired_state);
     println!("Status: {}", record.status);
     println!("Sandbox: {}", record.sandbox_name);

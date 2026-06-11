@@ -32,7 +32,7 @@
           commonArgs = {
             src = craneLib.cleanCargoSource ./.;
             strictDeps = true;
-            nativeBuildInputs = [ pkgs.makeWrapper pkgs.pkg-config ];
+            nativeBuildInputs = [ pkgs.pkg-config ];
             buildInputs =
               nixpkgs.lib.optionals pkgs.stdenv.isDarwin [
                 pkgs."apple-sdk"
@@ -66,8 +66,6 @@
             postInstall = ''
               mkdir -p "$out/share/agentmom"
               cp -R ${ui}/share/agentmom/ui "$out/share/agentmom/ui"
-              wrapProgram "$out/bin/mom-ui" \
-                --set-default MOM_UI_DIST "$out/share/agentmom/ui"
             '';
           });
           ironProxyVersion = "0.42.0";

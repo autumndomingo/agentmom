@@ -7,10 +7,6 @@ edition = "2024"
 name = "mom"
 path = "src/main.rs"
 
-[[bin]]
-name = "mom-ui"
-path = "src/bin/mom-ui.rs"
-
 [dependencies]
 anyhow = "1.0"
 axum = "0.8"

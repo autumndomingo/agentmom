@@ -1,11 +1,30 @@
 use super::*;
 
+#[derive(Clone)]
+struct WorkerState {
+    services: service::ServiceState,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenServiceRequest {
+    workspace_name: String,
+    sandbox_name: String,
+}
+
 pub(crate) async fn worker(args: WorkerArgs) -> Result<()> {
     ensure_fleet_schema()?;
     let node = node_id()?;
     let client = reqwest::Client::new();
     let api_url = args.api_url.trim_end_matches('/').to_string();
-    register_worker(&client, &api_url, &node).await?;
+    let worker_url = args
+        .worker_url
+        .clone()
+        .unwrap_or_else(|| format!("http://{}", args.bind));
+    let state = Arc::new(WorkerState {
+        services: service::ServiceState::default(),
+    });
+    let worker_http = tokio::spawn(run_worker_http(args.bind.clone(), state));
+    register_worker(&client, &api_url, &node, &worker_url).await?;
     let (wake_tx, mut wake_rx) = mpsc::channel::<()>(32);
     let sse_client = client.clone();
     let sse_url = api_url.clone();
@@ -16,10 +35,11 @@ pub(crate) async fn worker(args: WorkerArgs) -> Result<()> {
 
     log_record("info", "worker_start", None, "Agent Mom worker starting");
     loop {
-        if worker_claim_once(&client, &api_url, &node).await? && args.once {
+        if worker_claim_once(&client, &api_url, &node, &worker_url).await? && args.once {
             return Ok(());
         }
         if args.once {
+            worker_http.abort();
             return Ok(());
         }
         tokio::select! {
@@ -29,13 +49,63 @@ pub(crate) async fn worker(args: WorkerArgs) -> Result<()> {
     }
 }
 
-async fn register_worker(client: &reqwest::Client, api_url: &str, node: &str) -> Result<()> {
+async fn run_worker_http(bind: String, state: Arc<WorkerState>) -> Result<()> {
+    let app = Router::new()
+        .route("/worker/health", get(worker_health))
+        .route("/worker/services/{service}/open", post(worker_open_service))
+        .with_state(state);
+    let addr: SocketAddr = bind
+        .parse()
+        .with_context(|| format!("parse worker bind address {bind}"))?;
+    log_record(
+        "info",
+        "worker_http_start",
+        None,
+        &format!("Agent Mom worker HTTP listening on http://{addr}"),
+    );
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("bind worker HTTP {addr}"))?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+    Ok(())
+}
+
+async fn worker_health() -> Json<Value> {
+    Json(json!({ "ok": true }))
+}
+
+async fn worker_open_service(
+    State(state): State<Arc<WorkerState>>,
+    AxumPath(service): AxumPath<String>,
+    headers: HeaderMap,
+    Json(request): Json<OpenServiceRequest>,
+) -> Result<Json<Value>, ApiError> {
+    require_worker_token(&headers).map_err(ApiError::Unauthorized)?;
+    let url = service::open_workspace_service(
+        &state.services,
+        &request.workspace_name,
+        &request.sandbox_name,
+        &service,
+    )
+    .await?;
+    Ok(Json(json!({ "url": url })))
+}
+
+async fn register_worker(
+    client: &reqwest::Client,
+    api_url: &str,
+    node: &str,
+    worker_url: &str,
+) -> Result<()> {
     client
         .post(format!("{api_url}/worker/register"))
         .with_worker_token()
         .json(&json!({
             "node_id": node,
-            "capacity": node_capacity()
+            "capacity": node_capacity(),
+            "worker_url": worker_url
         }))
         .send()
         .await?
@@ -68,7 +138,12 @@ async fn worker_sse_loop(
     }
 }
 
-async fn worker_claim_once(client: &reqwest::Client, api_url: &str, node: &str) -> Result<bool> {
+async fn worker_claim_once(
+    client: &reqwest::Client,
+    api_url: &str,
+    node: &str,
+    worker_url: &str,
+) -> Result<bool> {
     let records = workspace_all()?;
     let pressure = node_pressure(&records).await?;
     let response = client
@@ -77,7 +152,8 @@ async fn worker_claim_once(client: &reqwest::Client, api_url: &str, node: &str) 
         .json(&json!({
             "node_id": node,
             "capacity": node_capacity(),
-            "pressure": pressure
+            "pressure": pressure,
+            "worker_url": worker_url
         }))
         .send()
         .await?

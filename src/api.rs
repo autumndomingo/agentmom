@@ -21,7 +21,9 @@ pub(crate) async fn api(args: ApiArgs) -> Result<()> {
         .route("/worker/jobs/{id}/events", post(api_worker_job_event))
         .route("/worker/jobs/{id}/complete", post(api_worker_job_complete))
         .route("/worker/events", get(api_worker_events))
+        .merge(ui::api_routes())
         .with_state(Arc::new(state));
+    let app = ui::serve_assets(app);
     let addr: SocketAddr = args
         .bind
         .parse()
@@ -100,10 +102,25 @@ async fn api_create_workspace(
     Json(request): Json<CreateWorkspaceRequest>,
 ) -> Result<Json<JobResponse>, ApiError> {
     let name = sanitize_workspace_name(&request.name)?;
+    let assigned_node = request.node_id.clone().unwrap_or(node_id()?);
+    let user_id = request.user.clone().unwrap_or_else(|| name.clone());
+    let memory = u32::try_from(request.memory).context("memory must fit in u32 MiB")?;
+    workspace_upsert_pending(
+        &name,
+        &user_id,
+        &format!("mom-{name}"),
+        &format!("mom-{name}-workspace"),
+        Some(&assigned_node),
+        request.cpus,
+        memory,
+        request.volume_quota,
+        request.idle_timeout,
+        request.backup_interval,
+    )?;
     let job = create_job(CreateJobRequest {
         workspace_name: name,
         kind: "create".to_string(),
-        node_id: request.node_id,
+        node_id: Some(assigned_node),
         payload: json!({
             "user": request.user,
             "cpus": request.cpus,
@@ -128,7 +145,11 @@ async fn api_worker_register(
     Json(request): Json<RegisterNodeRequest>,
 ) -> Result<Json<Value>, ApiError> {
     require_worker_token(&headers).map_err(ApiError::Unauthorized)?;
-    register_node(&request.node_id, &request.capacity)?;
+    register_node(
+        &request.node_id,
+        &request.capacity,
+        request.worker_url.as_deref(),
+    )?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -137,7 +158,11 @@ async fn api_worker_claim(
     Json(request): Json<ClaimJobRequest>,
 ) -> Result<Json<Option<JobRecord>>, ApiError> {
     require_worker_token(&headers).map_err(ApiError::Unauthorized)?;
-    register_node(&request.node_id, &request.capacity)?;
+    register_node(
+        &request.node_id,
+        &request.capacity,
+        request.worker_url.as_deref(),
+    )?;
     if !request.pressure.capacity_ok {
         return Ok(Json(None));
     }
