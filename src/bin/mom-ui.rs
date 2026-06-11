@@ -24,20 +24,86 @@ use tower_http::{
 };
 
 const OPENCODE_GUEST_PORT: u16 = 4096;
+const HERMES_GUEST_PORT: u16 = 9119;
 
 #[derive(Clone)]
 struct AppState {
     mom_bin: PathBuf,
-    opencode_tunnels: Arc<Mutex<HashMap<String, OpencodeTunnel>>>,
+    opencode_tunnels: Arc<Mutex<HashMap<String, ServiceTunnel>>>,
+    hermes_tunnels: Arc<Mutex<HashMap<String, ServiceTunnel>>>,
 }
 
-struct OpencodeTunnel {
+struct ServiceTunnel {
     url: String,
     _sandbox: Sandbox,
     ssh_child: tokio::process::Child,
     server_task: JoinHandle<()>,
     key_dir: PathBuf,
 }
+
+struct GuestServiceSpec {
+    id: &'static str,
+    label: &'static str,
+    guest_port: u16,
+    health_path: &'static str,
+    workdir: &'static str,
+    log_path: &'static str,
+    command: &'static [&'static str],
+    env: &'static [(&'static str, &'static str)],
+    pre_start: Option<&'static str>,
+    readiness_attempts: u16,
+}
+
+const OPENCODE_SERVICE: GuestServiceSpec = GuestServiceSpec {
+    id: "opencode",
+    label: "OpenCode",
+    guest_port: OPENCODE_GUEST_PORT,
+    health_path: "/global/health",
+    workdir: "/workspace",
+    log_path: "/tmp/mom-opencode/web.log",
+    command: &[
+        "opencode",
+        "web",
+        "--hostname",
+        "0.0.0.0",
+        "--port",
+        "{port}",
+    ],
+    env: &[("BROWSER", "/tmp/mom-opencode/bin/xdg-open")],
+    pre_start: Some(
+        r#"
+mkdir -p /tmp/mom-opencode/bin
+cat >/tmp/mom-opencode/bin/xdg-open <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod +x /tmp/mom-opencode/bin/xdg-open
+"#,
+    ),
+    readiness_attempts: 60,
+};
+
+const HERMES_SERVICE: GuestServiceSpec = GuestServiceSpec {
+    id: "hermes",
+    label: "Hermes",
+    guest_port: HERMES_GUEST_PORT,
+    health_path: "/api/status",
+    workdir: "/workspace",
+    log_path: "/tmp/mom-hermes/dashboard.log",
+    command: &[
+        "hermes",
+        "dashboard",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "{port}",
+        "--no-open",
+        "--insecure",
+    ],
+    env: &[],
+    pre_start: None,
+    readiness_attempts: 90,
+};
 
 #[derive(Debug, Deserialize)]
 struct ListQuery {
@@ -113,6 +179,7 @@ async fn main() -> Result<()> {
     let state = AppState {
         mom_bin,
         opencode_tunnels: Arc::new(Mutex::new(HashMap::new())),
+        hermes_tunnels: Arc::new(Mutex::new(HashMap::new())),
     };
 
     let api = Router::new()
@@ -125,6 +192,7 @@ async fn main() -> Result<()> {
         .route("/vms/{name}/exec", post(exec_vm))
         .route("/vms/{name}/codex", post(codex_vm))
         .route("/vms/{name}/hermes", post(hermes_vm))
+        .route("/vms/{name}/hermes-ui", post(hermes_ui_vm))
         .route("/vms/{name}/opencode", post(opencode_vm))
         .with_state(state);
 
@@ -260,25 +328,66 @@ async fn opencode_vm(
     }))
 }
 
+async fn hermes_ui_vm(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<CommandResult>, ApiError> {
+    let url = ensure_hermes_tunnel(&state, &name).await?;
+    Ok(Json(CommandResult {
+        ok: true,
+        code: Some(0),
+        stdout: format!("{url}\n"),
+        stderr: String::new(),
+    }))
+}
+
 async fn ensure_opencode_tunnel(state: &AppState, name: &str) -> Result<String> {
+    ensure_guest_service_tunnel(state, name, &OPENCODE_SERVICE, &state.opencode_tunnels).await
+}
+
+async fn ensure_hermes_tunnel(state: &AppState, name: &str) -> Result<String> {
+    ensure_guest_service_tunnel(state, name, &HERMES_SERVICE, &state.hermes_tunnels).await
+}
+
+async fn ensure_guest_service_tunnel(
+    _state: &AppState,
+    name: &str,
+    service: &GuestServiceSpec,
+    tunnels: &Arc<Mutex<HashMap<String, ServiceTunnel>>>,
+) -> Result<String> {
     {
-        let mut tunnels = state.opencode_tunnels.lock().await;
-        if let Some(tunnel) = tunnels.get_mut(name) {
-            if tunnel_is_healthy(&tunnel.url).await {
+        let mut active = tunnels.lock().await;
+        if let Some(tunnel) = active.get_mut(name) {
+            if tunnel_is_healthy(&tunnel.url, service.health_path).await {
                 return Ok(tunnel.url.clone());
             }
             let _ = tunnel.ssh_child.kill().await;
             tunnel.server_task.abort();
             let _ = std::fs::remove_dir_all(&tunnel.key_dir);
-            tunnels.remove(name);
+            active.remove(name);
         }
     }
 
     let host_port = reserve_host_port().await?;
     let url = format!("http://127.0.0.1:{host_port}");
     let sandbox = running_sandbox_owned(name).await?;
-    start_opencode_web(&sandbox).await?;
-    let key_dir = env::temp_dir().join(format!("mom-opencode-{}-{}", name, std::process::id()));
+    ensure_guest_service(&sandbox, service).await?;
+    let tunnel = start_service_tunnel(name, service, &sandbox, host_port).await?;
+    wait_for_tunnel(name, tunnel, &url, service, tunnels).await
+}
+
+async fn start_service_tunnel(
+    name: &str,
+    service: &GuestServiceSpec,
+    sandbox: &Sandbox,
+    host_port: u16,
+) -> Result<ServiceTunnel> {
+    let key_dir = env::temp_dir().join(format!(
+        "mom-{}-{}-{}",
+        service.id,
+        name,
+        std::process::id()
+    ));
     let private_key = key_dir.join("id_ed25519");
     let public_key = key_dir.join("id_ed25519.pub");
     std::fs::create_dir_all(&key_dir).with_context(|| format!("create {}", key_dir.display()))?;
@@ -288,7 +397,7 @@ async fn ensure_opencode_tunnel(state: &AppState, name: &str) -> Result<String> 
         .stdin(Stdio::null())
         .output()
         .await
-        .context("generate OpenCode tunnel SSH key")?;
+        .with_context(|| format!("generate {} tunnel SSH key", service.label))?;
     if !keygen.status.success() {
         anyhow::bail!(
             "ssh-keygen failed: {}",
@@ -345,7 +454,7 @@ async fn ensure_opencode_tunnel(state: &AppState, name: &str) -> Result<String> 
             "LogLevel=ERROR",
             "-N",
             "-L",
-            &format!("127.0.0.1:{host_port}:127.0.0.1:{OPENCODE_GUEST_PORT}"),
+            &format!("127.0.0.1:{host_port}:127.0.0.1:{}", service.guest_port),
             "-p",
             &ssh_port.to_string(),
             "root@127.0.0.1",
@@ -354,23 +463,28 @@ async fn ensure_opencode_tunnel(state: &AppState, name: &str) -> Result<String> 
         .stdout(Stdio::null())
         .stderr(ssh_stderr)
         .spawn()
-        .context("start local OpenCode SSH tunnel")?;
+        .with_context(|| format!("start local {} SSH tunnel", service.label))?;
 
-    let mut tunnel = OpencodeTunnel {
-        url: url.clone(),
-        _sandbox: sandbox,
+    Ok(ServiceTunnel {
+        url: format!("http://127.0.0.1:{host_port}"),
+        _sandbox: sandbox.clone(),
         ssh_child,
         server_task,
         key_dir,
-    };
+    })
+}
+
+async fn wait_for_tunnel(
+    name: &str,
+    mut tunnel: ServiceTunnel,
+    url: &str,
+    service: &GuestServiceSpec,
+    tunnels: &Arc<Mutex<HashMap<String, ServiceTunnel>>>,
+) -> Result<String> {
     for _ in 0..50 {
-        if tunnel_is_healthy(&url).await {
-            state
-                .opencode_tunnels
-                .lock()
-                .await
-                .insert(name.to_string(), tunnel);
-            return Ok(url);
+        if tunnel_is_healthy(url, service.health_path).await {
+            tunnels.lock().await.insert(name.to_string(), tunnel);
+            return Ok(url.to_string());
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
@@ -386,12 +500,15 @@ async fn ensure_opencode_tunnel(state: &AppState, name: &str) -> Result<String> 
         .unwrap_or_else(|| "ssh was still running".to_string());
     let ssh_log = std::fs::read_to_string(tunnel.key_dir.join("ssh.log")).unwrap_or_default();
     let _ = std::fs::remove_dir_all(&tunnel.key_dir);
-    anyhow::bail!("OpenCode tunnel did not become reachable at {url}; {ssh_status}\n{ssh_log}");
+    anyhow::bail!(
+        "{} tunnel did not become reachable at {url}; {ssh_status}\n{ssh_log}",
+        service.label
+    );
 }
 
-async fn tunnel_is_healthy(url: &str) -> bool {
+async fn tunnel_is_healthy(url: &str, path: &str) -> bool {
     let Ok(output) = Command::new("curl")
-        .args(["-fsS", "--max-time", "2", &format!("{url}/global/health")])
+        .args(["-fsS", "--max-time", "2", &format!("{url}{path}")])
         .stdin(Stdio::null())
         .output()
         .await
@@ -417,39 +534,88 @@ async fn running_sandbox_owned(name: &str) -> Result<Sandbox> {
     }
 }
 
-async fn start_opencode_web(sandbox: &Sandbox) -> Result<()> {
-    checked_shell(
-        sandbox,
-        &format!(
-            r#"
+async fn ensure_guest_service(sandbox: &Sandbox, service: &GuestServiceSpec) -> Result<()> {
+    checked_shell(sandbox, &guest_service_script(service)).await
+}
+
+fn guest_service_script(service: &GuestServiceSpec) -> String {
+    let executable = service
+        .command
+        .first()
+        .expect("guest service command must not be empty");
+    let pre_start = service.pre_start.unwrap_or("");
+    let log_dir = service
+        .log_path
+        .rsplit_once('/')
+        .map(|(dir, _)| dir)
+        .unwrap_or("/tmp");
+    let command = guest_service_command(service);
+
+    format!(
+        r#"
 set -eu
-if ! command -v opencode >/dev/null 2>&1; then
-  echo "opencode is not installed in this VM; recreate it with the current snapshot" >&2
+if ! command -v {executable_q} >/dev/null 2>&1; then
+  echo "{label} is not installed in this VM; recreate it with the current snapshot" >&2
   exit 1
 fi
-mkdir -p /workspace /tmp/mom-opencode/bin
-cat >/tmp/mom-opencode/bin/xdg-open <<'EOF'
-#!/bin/sh
-exit 0
-EOF
-chmod +x /tmp/mom-opencode/bin/xdg-open
-if wget -q -O /dev/null --timeout=2 http://127.0.0.1:{OPENCODE_GUEST_PORT}/global/health >/dev/null 2>&1; then
+mkdir -p {workdir_q} {log_dir_q}
+{pre_start}
+if wget -q -O /dev/null --timeout=2 http://127.0.0.1:{port}{health_path} >/dev/null 2>&1; then
   exit 0
 fi
-cd /workspace
-nohup env BROWSER=/bin/true PATH="/tmp/mom-opencode/bin:$PATH" opencode web --hostname 0.0.0.0 --port {OPENCODE_GUEST_PORT} >/tmp/mom-opencode/web.log 2>&1 &
-for _ in $(seq 1 60); do
-  if wget -q -O /dev/null --timeout=2 http://127.0.0.1:{OPENCODE_GUEST_PORT}/global/health >/dev/null 2>&1; then
+cd {workdir_q}
+if ! netstat -ltn 2>/dev/null | grep -q ':{port}[[:space:]]'; then
+  setsid sh -c {command_q} &
+fi
+for _ in $(seq 1 {readiness_attempts}); do
+  if wget -q -O /dev/null --timeout=2 http://127.0.0.1:{port}{health_path} >/dev/null 2>&1; then
     exit 0
   fi
   sleep 1
 done
-cat /tmp/mom-opencode/web.log >&2 || true
+cat {log_path_q} >&2 || true
 exit 1
-"#
-        ),
+"#,
+        executable_q = shell_quote(executable),
+        label = service.label,
+        workdir_q = shell_quote(service.workdir),
+        log_dir_q = shell_quote(log_dir),
+        port = service.guest_port,
+        health_path = service.health_path,
+        command_q = shell_quote(&command),
+        readiness_attempts = service.readiness_attempts,
+        log_path_q = shell_quote(service.log_path),
     )
-    .await
+}
+
+fn guest_service_command(service: &GuestServiceSpec) -> String {
+    let env = service
+        .env
+        .iter()
+        .map(|(key, value)| format!("{key}={}", shell_quote(value)));
+    let argv = service.command.iter().map(|arg| {
+        let value = if *arg == "{port}" {
+            service.guest_port.to_string()
+        } else {
+            (*arg).to_string()
+        };
+        shell_quote(&value)
+    });
+    env.chain(argv).collect::<Vec<_>>().join(" ")
+        + &format!(" </dev/null >{} 2>&1", shell_quote(service.log_path))
+}
+
+fn shell_quote(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_string();
+    }
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || "-_./:=+".contains(ch))
+    {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 async fn checked_shell(sandbox: &Sandbox, script: &str) -> Result<()> {
