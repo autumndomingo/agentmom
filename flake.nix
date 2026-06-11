@@ -32,7 +32,7 @@
           commonArgs = {
             src = craneLib.cleanCargoSource ./.;
             strictDeps = true;
-            nativeBuildInputs = [ pkgs.pkg-config ];
+            nativeBuildInputs = [ pkgs.makeWrapper pkgs.pkg-config ];
             buildInputs =
               nixpkgs.lib.optionals pkgs.stdenv.isDarwin [
                 pkgs."apple-sdk"
@@ -49,8 +49,26 @@
             '';
           };
           cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+          ui = pkgs.buildNpmPackage {
+            pname = "agent-mom-ui";
+            version = "0.1.0";
+            src = ./ui;
+            npmDepsHash = "sha256-8K/nuaBIqeWYc/i3wvDnj9JED59PHhgSH9wN3E6h6Eg=";
+            installPhase = ''
+              runHook preInstall
+              mkdir -p "$out/share/agentmom/ui"
+              cp -R dist/. "$out/share/agentmom/ui/"
+              runHook postInstall
+            '';
+          };
           mom = craneLib.buildPackage (commonArgs // {
             inherit cargoArtifacts;
+            postInstall = ''
+              mkdir -p "$out/share/agentmom"
+              cp -R ${ui}/share/agentmom/ui "$out/share/agentmom/ui"
+              wrapProgram "$out/bin/mom-ui" \
+                --set-default MOM_UI_DIST "$out/share/agentmom/ui"
+            '';
           });
           ironProxyVersion = "0.42.0";
           ironProxyHashes = {

@@ -94,17 +94,12 @@ let
   // lib.optionalAttrs (cfg.microsandboxPackage != null) {
     MSB_PATH = "${cfg.microsandboxPackage}/bin/msb";
   }
-  // lib.optionalAttrs (cfg.backupCommand != null) {
-    MOM_BACKUP_COMMAND = cfg.backupCommand;
-  }
   // lib.optionalAttrs (cfg.workerTokenFile != null) {
     MOM_WORKER_TOKEN_FILE = toString cfg.workerTokenFile;
   };
 
   commonPath = with pkgs; [
     bash
-    gnutar
-    kopia
     restic
   ] ++ lib.optional (cfg.microsandboxPackage != null) cfg.microsandboxPackage;
 in
@@ -239,9 +234,9 @@ in
       };
 
       apiUrl = lib.mkOption {
-        type = lib.types.nullOr lib.types.str;
-        default = null;
-        description = "Agent Mom API URL used by mom-ui. If unset, mom-ui uses local CLI mode.";
+        type = lib.types.str;
+        default = "http://127.0.0.1:8080";
+        description = "Agent Mom API URL used by mom-ui.";
       };
     };
 
@@ -358,16 +353,6 @@ in
       };
     };
 
-    backupCommand = lib.mkOption {
-      type = lib.types.nullOr lib.types.str;
-      default = null;
-      description = ''
-        Optional shell command run for each stopped workspace backup.
-        Receives MOM_WORKSPACE, MOM_VOLUME, and MOM_VOLUME_PATH in the environment.
-        If unset, mom falls back to restic, then kopia, then a local tar archive.
-      '';
-    };
-
     workerTokenFile = lib.mkOption {
       type = lib.types.nullOr lib.types.path;
       default = null;
@@ -476,8 +461,6 @@ in
       environment = commonEnvironment
         // {
           MOM_UI_BIND = cfg.ui.bind;
-        }
-        // lib.optionalAttrs (cfg.ui.apiUrl != null) {
           MOM_API_URL = cfg.ui.apiUrl;
         };
       serviceConfig = {

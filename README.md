@@ -55,13 +55,10 @@ The daemon:
 - stops idle workspaces after their configured idle timeout
 - backs up workspace volumes when their backup interval is due
 
-Backup behavior is deliberately simple:
-
-1. If `MOM_BACKUP_COMMAND` is set, run it with `MOM_WORKSPACE`,
-   `MOM_VOLUME`, and `MOM_VOLUME_PATH`.
-2. Else, if `RESTIC_REPOSITORY` is set and `restic` exists, run `restic backup`.
-3. Else, if `kopia` exists, run `kopia snapshot create`.
-4. Else, write a local tar archive under `MOM_STATE_DIR/backups`.
+Backups use restic. Set `RESTIC_REPOSITORY` and the usual restic credentials in
+the service environment before enabling scheduled backups. Each backup is tagged
+with `agentmom` and the workspace name, and the recorded artifact stores the
+restic snapshot ID.
 
 Before backing up, Agent Mom gracefully stops the workspace VM so the named
 volume is in a consistent state. If the workspace was desired-running, it is
@@ -156,8 +153,9 @@ cd ..
 cargo run --bin mom-ui
 ```
 
-Open <http://127.0.0.1:8787>. Set `MOM_UI_PORT=9000` to use another port, or
-`MOM_BIN=/path/to/mom` if the backend should call a specific CLI binary.
+Open <http://127.0.0.1:8787>. Set `MOM_UI_PORT=9000` to use another port.
+`mom-ui` always talks to the Agent Mom API. Set `MOM_API_URL` to override the
+default `http://127.0.0.1:8080`.
 
 ## NixOS Service
 
@@ -178,9 +176,6 @@ its existing NixOS config:
     stateDir = "/var/lib/agentmom";
     microsandboxHome = "/var/lib/agentmom/microsandbox";
     configFile = /etc/agentmom/config.json;
-    backupCommand = ''
-      restic backup "$MOM_VOLUME_PATH" --tag agentmom --tag "$MOM_WORKSPACE"
-    '';
   };
 }
 ```
