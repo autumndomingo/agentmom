@@ -5,6 +5,7 @@ use std::{
     path::PathBuf,
     process::{ExitStatus, Stdio},
     sync::Arc,
+    time::Duration,
 };
 
 use anyhow::{Context, Result};
@@ -12,11 +13,12 @@ use axum::{
     Json, Router,
     extract::{Path, Query},
     http::StatusCode,
-    response::{IntoResponse, Response},
+    response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
 use microsandbox::{Sandbox, sandbox::SandboxStatus};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::{process::Command, sync::Mutex, task::JoinHandle};
 use tower_http::{
     cors::CorsLayer,
@@ -28,9 +30,20 @@ const HERMES_GUEST_PORT: u16 = 9119;
 
 #[derive(Clone)]
 struct AppState {
-    mom_bin: PathBuf,
+    backend: Backend,
     opencode_tunnels: Arc<Mutex<HashMap<String, ServiceTunnel>>>,
     hermes_tunnels: Arc<Mutex<HashMap<String, ServiceTunnel>>>,
+}
+
+#[derive(Clone)]
+enum Backend {
+    Local {
+        mom_bin: PathBuf,
+    },
+    Fleet {
+        api_url: String,
+        client: reqwest::Client,
+    },
 }
 
 struct ServiceTunnel {
@@ -114,11 +127,19 @@ struct ListQuery {
 struct CreateRequest {
     name: String,
     #[serde(default)]
+    user: Option<String>,
+    #[serde(default)]
     replace: bool,
     #[serde(default = "default_cpus")]
     cpus: u8,
     #[serde(default = "default_memory")]
     memory: u64,
+    #[serde(default = "default_volume_quota")]
+    volume_quota: u32,
+    #[serde(default = "default_idle_timeout")]
+    idle_timeout: u64,
+    #[serde(default = "default_backup_interval")]
+    backup_interval: u64,
     #[serde(default)]
     rebuild_snapshot: bool,
     #[serde(default)]
@@ -156,6 +177,25 @@ struct ListResponse {
     raw: CommandResult,
 }
 
+#[derive(Debug, Deserialize)]
+struct WorkspaceRecord {
+    name: String,
+    status: String,
+    desired_state: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct JobResponse {
+    job: JobRecord,
+}
+
+#[derive(Debug, Deserialize)]
+struct JobRecord {
+    id: String,
+    status: String,
+    output_json: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct ErrorBody {
     error: String,
@@ -170,14 +210,17 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let mom_bin = resolve_mom_bin()?;
+    let backend = resolve_backend()?;
     let port = env::var("MOM_UI_PORT")
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(8787);
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let bind = env::var("MOM_UI_BIND")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], port)));
     let state = AppState {
-        mom_bin,
+        backend,
         opencode_tunnels: Arc::new(Mutex::new(HashMap::new())),
         hermes_tunnels: Arc::new(Mutex::new(HashMap::new())),
     };
@@ -194,20 +237,19 @@ async fn main() -> Result<()> {
         .route("/vms/{name}/hermes", post(hermes_vm))
         .route("/vms/{name}/hermes-ui", post(hermes_ui_vm))
         .route("/vms/{name}/opencode", post(opencode_vm))
-        .with_state(state);
+        .with_state(state.clone());
 
-    let ui = ServeDir::new("ui/dist").fallback(ServeFile::new("ui/dist/index.html"));
-    let app = Router::new()
-        .nest("/api", api)
-        .fallback_service(ui)
-        .layer(CorsLayer::permissive());
+    let app = ui_router(api).layer(CorsLayer::permissive());
 
-    println!("Agent Mom UI backend listening on http://{addr}");
-    println!("Using mom binary: {}", resolve_mom_bin()?.display());
+    println!("Agent Mom UI backend listening on http://{bind}");
+    match &state.backend {
+        Backend::Local { mom_bin } => println!("Using mom binary: {}", mom_bin.display()),
+        Backend::Fleet { api_url, .. } => println!("Using Agent Mom API: {api_url}"),
+    }
 
-    let listener = tokio::net::TcpListener::bind(addr)
+    let listener = tokio::net::TcpListener::bind(bind)
         .await
-        .with_context(|| format!("bind {addr}"))?;
+        .with_context(|| format!("bind {bind}"))?;
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
@@ -222,6 +264,33 @@ async fn list_vms(
     axum::extract::State(state): axum::extract::State<AppState>,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<ListResponse>, ApiError> {
+    if let Backend::Fleet { api_url, client } = &state.backend {
+        let workspaces = client
+            .get(format!("{api_url}/api/workspaces"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Vec<WorkspaceRecord>>()
+            .await?;
+        let vms = workspaces
+            .into_iter()
+            .map(|workspace| Vm {
+                name: workspace.name,
+                status: workspace.status,
+                image: workspace.desired_state,
+            })
+            .collect();
+        return Ok(Json(ListResponse {
+            vms,
+            raw: CommandResult {
+                ok: true,
+                code: Some(0),
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        }));
+    }
+
     let mut args = vec!["list".to_string()];
     if query.all.unwrap_or(false) {
         args.push("--all".to_string());
@@ -235,6 +304,27 @@ async fn create_vm(
     axum::extract::State(state): axum::extract::State<AppState>,
     Json(request): Json<CreateRequest>,
 ) -> Result<Json<CommandResult>, ApiError> {
+    if let Backend::Fleet { api_url, client } = &state.backend {
+        let response = client
+            .post(format!("{api_url}/api/workspaces"))
+            .json(&serde_json::json!({
+                "name": request.name,
+                "user": request.user,
+                "cpus": request.cpus,
+                "memory": request.memory,
+                "volume_quota": request.volume_quota,
+                "idle_timeout": request.idle_timeout,
+                "backup_interval": request.backup_interval,
+                "node_id": ui_node_id()
+            }))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<JobResponse>()
+            .await?;
+        return wait_for_job(api_url, client, &response.job.id).await;
+    }
+
     let mut args = vec![
         "create".to_string(),
         request.name,
@@ -259,6 +349,11 @@ async fn start_vm(
     axum::extract::State(state): axum::extract::State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<CommandResult>, ApiError> {
+    if let Backend::Fleet { api_url, client } = &state.backend {
+        return create_and_wait_for_job(api_url, client, &name, "start", serde_json::json!({}))
+            .await;
+    }
+
     Ok(Json(run_mom(&state, vec!["start".into(), name]).await?))
 }
 
@@ -266,6 +361,11 @@ async fn stop_vm(
     axum::extract::State(state): axum::extract::State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<CommandResult>, ApiError> {
+    if let Backend::Fleet { api_url, client } = &state.backend {
+        return create_and_wait_for_job(api_url, client, &name, "stop", serde_json::json!({}))
+            .await;
+    }
+
     Ok(Json(run_mom(&state, vec!["stop".into(), name]).await?))
 }
 
@@ -273,6 +373,12 @@ async fn remove_vm(
     axum::extract::State(state): axum::extract::State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<CommandResult>, ApiError> {
+    if let Backend::Fleet { .. } = &state.backend {
+        return Err(ApiError::Anyhow(anyhow::anyhow!(
+            "workspace removal is not exposed in fleet UI mode yet"
+        )));
+    }
+
     Ok(Json(
         run_mom(&state, vec!["rm".into(), name, "--force".into()]).await?,
     ))
@@ -282,6 +388,12 @@ async fn doctor_vm(
     axum::extract::State(state): axum::extract::State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<CommandResult>, ApiError> {
+    if let Backend::Fleet { .. } = &state.backend {
+        return Err(ApiError::Anyhow(anyhow::anyhow!(
+            "doctor is not exposed in fleet UI mode yet"
+        )));
+    }
+
     Ok(Json(run_mom(&state, vec!["doctor".into(), name]).await?))
 }
 
@@ -290,6 +402,17 @@ async fn exec_vm(
     Path(name): Path<String>,
     Json(request): Json<CommandRequest>,
 ) -> Result<Json<CommandResult>, ApiError> {
+    if let Backend::Fleet { api_url, client } = &state.backend {
+        return create_and_wait_for_job(
+            api_url,
+            client,
+            &name,
+            "execute",
+            serde_json::json!({ "command": request.command }),
+        )
+        .await;
+    }
+
     let mut args = vec!["exec".to_string(), name, "--".to_string()];
     args.extend(request.command);
     Ok(Json(run_mom(&state, args).await?))
@@ -300,6 +423,17 @@ async fn codex_vm(
     Path(name): Path<String>,
     Json(request): Json<PromptRequest>,
 ) -> Result<Json<CommandResult>, ApiError> {
+    if let Backend::Fleet { api_url, client } = &state.backend {
+        return create_and_wait_for_job(
+            api_url,
+            client,
+            &name,
+            "codex",
+            serde_json::json!({ "prompt": request.prompt }),
+        )
+        .await;
+    }
+
     Ok(Json(
         run_mom(&state, vec!["codex".into(), name, request.prompt]).await?,
     ))
@@ -310,6 +444,17 @@ async fn hermes_vm(
     Path(name): Path<String>,
     Json(request): Json<CommandRequest>,
 ) -> Result<Json<CommandResult>, ApiError> {
+    if let Backend::Fleet { api_url, client } = &state.backend {
+        return create_and_wait_for_job(
+            api_url,
+            client,
+            &name,
+            "hermes",
+            serde_json::json!({ "args": request.command }),
+        )
+        .await;
+    }
+
     let mut args = vec!["hermes".to_string(), name, "--".to_string()];
     args.extend(request.command);
     Ok(Json(run_mom(&state, args).await?))
@@ -644,12 +789,18 @@ async fn reserve_host_port() -> Result<u16> {
 }
 
 async fn run_mom(state: &AppState, args: Vec<String>) -> Result<CommandResult, ApiError> {
-    let output = Command::new(&state.mom_bin)
+    let Backend::Local { mom_bin } = &state.backend else {
+        return Err(ApiError::Anyhow(anyhow::anyhow!(
+            "local command requested while UI is in fleet API mode"
+        )));
+    };
+
+    let output = Command::new(mom_bin)
         .args(args)
         .stdin(Stdio::null())
         .output()
         .await
-        .with_context(|| format!("run {}", state.mom_bin.display()))?;
+        .with_context(|| format!("run {}", mom_bin.display()))?;
 
     let result = command_result(output.status, output.stdout, output.stderr);
     if result.ok {
@@ -657,6 +808,89 @@ async fn run_mom(state: &AppState, args: Vec<String>) -> Result<CommandResult, A
     } else {
         Err(ApiError::Command(result))
     }
+}
+
+async fn create_and_wait_for_job(
+    api_url: &str,
+    client: &reqwest::Client,
+    workspace_name: &str,
+    kind: &str,
+    payload: Value,
+) -> Result<Json<CommandResult>, ApiError> {
+    let response = client
+        .post(format!("{api_url}/api/jobs"))
+        .json(&serde_json::json!({
+            "workspace_name": workspace_name,
+            "kind": kind,
+            "node_id": ui_node_id(),
+            "payload": payload
+        }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<JobResponse>()
+        .await?;
+    wait_for_job(api_url, client, &response.job.id).await
+}
+
+async fn wait_for_job(
+    api_url: &str,
+    client: &reqwest::Client,
+    job_id: &str,
+) -> Result<Json<CommandResult>, ApiError> {
+    for _ in 0..180 {
+        let response = client
+            .get(format!("{api_url}/api/jobs/{job_id}"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<JobResponse>()
+            .await?;
+        match response.job.status.as_str() {
+            "succeeded" => {
+                return Ok(Json(CommandResult {
+                    ok: true,
+                    code: Some(0),
+                    stdout: job_output_text(response.job.output_json.as_deref()),
+                    stderr: String::new(),
+                }));
+            }
+            "failed" | "canceled" => {
+                return Err(ApiError::Command(CommandResult {
+                    ok: false,
+                    code: Some(1),
+                    stdout: String::new(),
+                    stderr: job_output_text(response.job.output_json.as_deref()),
+                }));
+            }
+            _ => tokio::time::sleep(Duration::from_secs(1)).await,
+        }
+    }
+
+    Err(ApiError::Anyhow(anyhow::anyhow!(
+        "timed out waiting for job {job_id}"
+    )))
+}
+
+fn job_output_text(output_json: Option<&str>) -> String {
+    let Some(raw) = output_json else {
+        return String::new();
+    };
+    let Ok(value) = serde_json::from_str::<Value>(raw) else {
+        return raw.to_string();
+    };
+    if let Some(stdout) = value.get("stdout").and_then(Value::as_str) {
+        let stderr = value.get("stderr").and_then(Value::as_str).unwrap_or("");
+        return [stdout, stderr]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    if let Some(error) = value.get("error").and_then(Value::as_str) {
+        return error.to_string();
+    }
+    value.to_string()
 }
 
 fn command_result(status: ExitStatus, stdout: Vec<u8>, stderr: Vec<u8>) -> CommandResult {
@@ -702,6 +936,39 @@ fn resolve_mom_bin() -> Result<PathBuf> {
     Ok(PathBuf::from("mom"))
 }
 
+fn resolve_backend() -> Result<Backend> {
+    if let Ok(api_url) = env::var("MOM_API_URL") {
+        return Ok(Backend::Fleet {
+            api_url: api_url.trim_end_matches('/').to_string(),
+            client: reqwest::Client::new(),
+        });
+    }
+
+    Ok(Backend::Local {
+        mom_bin: resolve_mom_bin()?,
+    })
+}
+
+fn ui_router(api: Router) -> Router {
+    let dist = env::var_os("MOM_UI_DIST")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("ui/dist"));
+    let index = dist.join("index.html");
+    if index.exists() {
+        let ui = ServeDir::new(dist).fallback(ServeFile::new(index));
+        Router::new().nest("/api", api).fallback_service(ui)
+    } else {
+        Router::new()
+            .nest("/api", api)
+            .route("/", get(index_html))
+            .route("/{*path}", get(index_html))
+    }
+}
+
+async fn index_html() -> Html<&'static str> {
+    Html(INDEX_HTML)
+}
+
 async fn shutdown_signal() {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
@@ -734,6 +1001,185 @@ fn default_memory() -> u64 {
     2048
 }
 
+fn default_volume_quota() -> u32 {
+    4096
+}
+
+fn default_idle_timeout() -> u64 {
+    1800
+}
+
+fn default_backup_interval() -> u64 {
+    0
+}
+
+fn ui_node_id() -> Option<String> {
+    env::var("MOM_NODE_ID")
+        .ok()
+        .filter(|value| !value.is_empty())
+}
+
+const INDEX_HTML: &str = r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent Mom</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #050505; color: #f4f4f5; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: #050505; }
+    button, input { font: inherit; }
+    button { border: 0; color: inherit; cursor: pointer; }
+    button:disabled, input:disabled { opacity: .55; cursor: not-allowed; }
+    .shell { min-height: 100vh; display: grid; grid-template-columns: 300px minmax(0, 1fr); }
+    aside { padding: 14px; display: grid; grid-template-rows: auto auto 1fr auto; gap: 14px; background: #070707; border-right: 1px solid #2f2f35; }
+    .brand { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 17px; }
+    .mark { width: 32px; height: 32px; border: 1px solid #44444b; border-radius: 8px; display: grid; place-items: center; }
+    .create, .refresh, .item, .send { border-radius: 8px; background: #1b1b1e; }
+    .create, .refresh { height: 42px; padding: 0 12px; font-weight: 750; }
+    .create:hover, .refresh:hover, .item:hover { background: #2d2d31; }
+    .list { display: grid; gap: 4px; align-content: start; overflow: auto; }
+    .item { min-height: 48px; padding: 8px 12px; display: grid; gap: 3px; text-align: left; }
+    .item.active { outline: 1px solid #767680; }
+    .item strong, h1 { overflow-wrap: anywhere; }
+    .item small, .muted { color: #b3b3bb; }
+    main { min-width: 0; min-height: 100vh; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
+    header { height: 64px; padding: 0 26px; display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 14px; border-bottom: 1px solid #16161a; }
+    h1 { margin: 0; font-size: 19px; }
+    header p { margin: 3px 0 0; color: #b3b3bb; font-size: 14px; }
+    .body { min-height: 0; overflow: auto; padding: 30px; }
+    .empty { height: 100%; display: grid; place-items: center; text-align: center; color: #b3b3bb; }
+    .messages { width: min(860px, 100%); margin: 0 auto; display: grid; gap: 18px; }
+    .msg { display: grid; gap: 7px; }
+    .msg span { color: #777781; font-size: 13px; font-weight: 800; }
+    .msg pre { width: fit-content; max-width: 78ch; margin: 0; padding: 13px 15px; border-radius: 12px; background: #1b1b1e; color: #f4f4f5; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45; }
+    .msg.user { justify-items: end; }
+    .msg.user pre { background: #303036; }
+    form.composer { width: min(920px, calc(100% - 40px)); min-height: 58px; margin: 0 auto 28px; padding: 7px; border: 1px solid #2f2f35; border-radius: 999px; display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 8px; background: #2b2b2f; }
+    .composer input { min-width: 0; height: 42px; border: 0; outline: 0; background: transparent; color: #f4f4f5; padding: 0 10px; }
+    .send { width: 42px; height: 42px; background: #f4f4f5; color: #0a0a0b; border-radius: 999px; }
+    dialog { width: min(420px, calc(100% - 32px)); border: 1px solid #2f2f35; border-radius: 12px; background: #111113; color: #f4f4f5; padding: 22px; }
+    dialog::backdrop { background: rgb(0 0 0 / 62%); }
+    label { display: grid; gap: 7px; margin: 12px 0; color: #b3b3bb; font-size: 14px; font-weight: 700; }
+    label input { height: 44px; border: 1px solid #4a4a52; border-radius: 8px; background: #070707; color: #f4f4f5; padding: 0 12px; }
+    .actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
+    .actions button { height: 40px; padding: 0 14px; border-radius: 8px; background: #1b1b1e; font-weight: 750; }
+    .actions button.primary { background: #f4f4f5; color: #0a0a0b; }
+    @media (max-width: 800px) { .shell { grid-template-columns: 1fr; } aside { min-height: auto; border-right: 0; border-bottom: 1px solid #2f2f35; } }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside>
+      <div class="brand"><div class="mark">A</div><span>Agent Mom</span></div>
+      <button class="create" id="createButton">Create workspace</button>
+      <div class="list" id="workspaceList"></div>
+      <div><div class="muted">Fleet UI</div><strong id="health">Checking API...</strong></div>
+    </aside>
+    <main>
+      <header>
+        <div><h1 id="title">Agent workspace</h1><p id="subtitle">Create or select a workspace.</p></div>
+        <button class="refresh" id="refreshButton">Refresh</button>
+      </header>
+      <section class="body"><div id="messages" class="empty">Ready when you are.</div></section>
+      <form class="composer" id="composer"><input id="prompt" placeholder="Ask Codex in this workspace" disabled><button class="send" id="sendButton" disabled>→</button></form>
+    </main>
+  </div>
+  <dialog id="createDialog">
+    <form id="createForm" method="dialog">
+      <h2>Create workspace</h2>
+      <label>Your name<input id="userName" autocomplete="name"></label>
+      <label>Workspace name<input id="workspaceName" required pattern="[A-Za-z0-9._-]+"></label>
+      <div class="actions"><button value="cancel">Cancel</button><button class="primary" value="default">Create</button></div>
+    </form>
+  </dialog>
+  <script>
+    const state = { workspaces: [], selected: null, messages: [] };
+    const $ = (id) => document.getElementById(id);
+    async function api(path, options = {}) {
+      const res = await fetch('/api' + path, { headers: { 'content-type': 'application/json' }, ...options });
+      const text = await res.text();
+      const data = text ? JSON.parse(text) : {};
+      if (!res.ok) throw data;
+      return data;
+    }
+    function statusText(status) {
+      if (!status) return '';
+      if (status === 'running') return 'Ready';
+      if (status === 'stopped' || status === 'idle-stopped') return 'Paused';
+      if (status.includes('failed') || status === 'error') return 'Needs attention';
+      return status;
+    }
+    function render() {
+      $('workspaceList').innerHTML = state.workspaces.map((vm) => `<button class="item ${state.selected?.name === vm.name ? 'active' : ''}" data-name="${vm.name}"><strong>${vm.name}</strong><small>${statusText(vm.status)}</small></button>`).join('') || '<p class="muted">No workspaces yet.</p>';
+      document.querySelectorAll('.item').forEach((button) => button.onclick = () => selectWorkspace(button.dataset.name));
+      $('title').textContent = state.selected?.name || 'Agent workspace';
+      $('subtitle').textContent = state.selected ? statusText(state.selected.status) : 'Create or select a workspace.';
+      $('prompt').disabled = !state.selected;
+      $('sendButton').disabled = !state.selected;
+      if (!state.messages.length) {
+        $('messages').className = 'empty';
+        $('messages').textContent = state.selected ? 'Ask Codex about this workspace.' : 'Ready when you are.';
+      } else {
+        $('messages').className = 'messages';
+        $('messages').innerHTML = state.messages.map((msg) => `<article class="msg ${msg.role}"><span>${msg.role === 'user' ? 'You' : 'Agent Mom'}</span><pre>${msg.content.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}</pre></article>`).join('');
+      }
+    }
+    function selectWorkspace(name) {
+      state.selected = state.workspaces.find((vm) => vm.name === name) || null;
+      state.messages = [];
+      render();
+    }
+    async function refresh() {
+      $('health').textContent = 'Loading...';
+      const data = await api('/vms');
+      state.workspaces = data.vms || [];
+      if (state.selected) state.selected = state.workspaces.find((vm) => vm.name === state.selected.name) || null;
+      if (!state.selected && state.workspaces.length) state.selected = state.workspaces[0];
+      $('health').textContent = 'Connected';
+      render();
+    }
+    $('refreshButton').onclick = () => refresh().catch((err) => $('health').textContent = err.error || String(err));
+    $('createButton').onclick = () => $('createDialog').showModal();
+    $('createForm').onsubmit = async (event) => {
+      event.preventDefault();
+      const name = $('workspaceName').value.trim();
+      const user = $('userName').value.trim() || null;
+      $('createDialog').close();
+      state.messages = [{ role: 'assistant', content: `Creating ${name}...` }];
+      render();
+      try {
+        await api('/vms', { method: 'POST', body: JSON.stringify({ name, user, cpus: 1, memory: 2048 }) });
+        await refresh();
+        selectWorkspace(name);
+      } catch (err) {
+        state.messages.push({ role: 'assistant', content: err.stderr || err.error || String(err) });
+        render();
+      }
+    };
+    $('composer').onsubmit = async (event) => {
+      event.preventDefault();
+      if (!state.selected) return;
+      const prompt = $('prompt').value.trim();
+      if (!prompt) return;
+      $('prompt').value = '';
+      state.messages.push({ role: 'user', content: prompt });
+      render();
+      try {
+        const result = await api(`/vms/${encodeURIComponent(state.selected.name)}/codex`, { method: 'POST', body: JSON.stringify({ prompt }) });
+        state.messages.push({ role: 'assistant', content: result.stdout || result.stderr || 'Done.' });
+      } catch (err) {
+        state.messages.push({ role: 'assistant', content: err.stderr || err.error || String(err) });
+      }
+      await refresh().catch(() => {});
+      render();
+    };
+    refresh().catch((err) => { $('health').textContent = err.error || String(err); render(); });
+  </script>
+</body>
+</html>"#;
+
 enum ApiError {
     Anyhow(anyhow::Error),
     Command(CommandResult),
@@ -742,6 +1188,12 @@ enum ApiError {
 impl From<anyhow::Error> for ApiError {
     fn from(error: anyhow::Error) -> Self {
         Self::Anyhow(error)
+    }
+}
+
+impl From<reqwest::Error> for ApiError {
+    fn from(error: reqwest::Error) -> Self {
+        Self::Anyhow(error.into())
     }
 }
 

@@ -21,6 +21,61 @@ mom start mybox
 mom rm mybox --force
 ```
 
+## Single-Host Fleet Worker
+
+The next iteration treats a user workspace as the durable unit and the VM as
+replaceable compute. A workspace has:
+
+- one SQLite row in `MOM_STATE_DIR/fleet.db`
+- one microsandbox VM named `mom-<workspace>`
+- one microsandbox named volume mounted at `/workspace`
+
+```sh
+mom workspace create alice --user user_123 --replace
+mom workspace list
+mom workspace exec alice -- pwd
+mom workspace codex alice "Reply exactly ok"
+mom workspace inspect alice
+mom workspace events alice --since 2h
+mom workspace backup alice
+mom workspace stop alice
+mom workspace rm alice --force
+mom node status
+```
+
+Run the single scheduler/backup worker:
+
+```sh
+mom daemon
+```
+
+The daemon:
+
+- starts workspaces whose desired state is `running`
+- stops idle workspaces after their configured idle timeout
+- backs up workspace volumes when their backup interval is due
+
+Backup behavior is deliberately simple:
+
+1. If `MOM_BACKUP_COMMAND` is set, run it with `MOM_WORKSPACE`,
+   `MOM_VOLUME`, and `MOM_VOLUME_PATH`.
+2. Else, if `RESTIC_REPOSITORY` is set and `restic` exists, run `restic backup`.
+3. Else, if `kopia` exists, run `kopia snapshot create`.
+4. Else, write a local tar archive under `MOM_STATE_DIR/backups`.
+
+Before backing up, Agent Mom gracefully stops the workspace VM so the named
+volume is in a consistent state. If the workspace was desired-running, it is
+started again after backup.
+
+For local testing without touching the default microsandbox home:
+
+```sh
+export MOM_STATE_DIR="$PWD/.state/mom"
+export MSB_HOME="$PWD/.state/msb"
+cargo run --bin mom -- workspace list
+cargo run --bin mom -- daemon --once
+```
+
 ## Host Config
 
 `mom create` requires a host config file at `~/.config/mom/config.json`.
@@ -31,15 +86,18 @@ Set `MOM_CONFIG=/path/to/config.json` to use a different file.
   "codex_auth_path": "~/.codex/auth.json",
   "hermes_profile": "main",
   "hermes_model": "gpt-5.5",
-  "snapshot_name": "mom-alpine-agent-base"
+  "snapshot_name": "mom-alpine-agent-base",
+  "credential_mode": "vm-auth-json"
 }
 ```
 
 Required assumptions:
 
-- `codex_auth_path` exists and contains Codex CLI OAuth tokens.
+- `credential_mode` is either `vm-auth-json` or `openrouter-proxy`.
+- `vm-auth-json` requires `codex_auth_path` to exist and contain Codex CLI OAuth tokens. This copies credentials into the VM.
+- `openrouter-proxy` requires `credential_proxy_url` and `credential_proxy_ca_path`. It writes proxy env into the VM and expects iron-proxy to inject the OpenRouter API key on the host.
 - `hermes_profile` is the guest profile name to create.
-- `hermes_model` is the default Hermes model for `openai-codex`.
+- `hermes_model` is the default Hermes model for the selected mode. Use an `openai-codex` model in `vm-auth-json` mode and an OpenRouter model ID in `openrouter-proxy` mode.
 - `snapshot_name` is the prebuilt microsandbox snapshot to boot new VMs from.
 
 `create` uses `snapshot_name` by default. If the snapshot is missing, Agent Mom builds
@@ -48,18 +106,27 @@ it once from the `alpine` image by installing `nodejs`, `npm`, `python3`, `uv`,
 Pass `--rebuild-snapshot` to refresh that base, or `--no-snapshot` to force the
 slow direct-Alpine provisioning path.
 
-Each new VM is then patched with OpenAI/Codex auth and Hermes config:
+Each new VM is then patched with auth and Hermes config for the selected mode.
+
+In `vm-auth-json` mode:
 
 - `codex_auth_path` -> `/root/.codex/auth.json`
 - a generated `/root/.codex/config.toml` with `approval_policy = "never"` and `sandbox_mode = "danger-full-access"`
 - OpenAI Codex tokens from `codex_auth_path` -> `/root/.hermes-agent/<hermes_profile>/auth.json`
 - a minimal generated Hermes `config.yaml` selecting `openai-codex`
 
+In `openrouter-proxy` mode:
+
+- no Codex/Hermes auth files are written, and stale auth files are removed on `mom workspace refresh-config`
+- `/etc/profile.d/agentmom-proxy.sh` exports proxy variables and sentinel API-key values
+- Hermes `config.yaml` selects `provider: openrouter`
+- the configured iron-proxy CA is installed into the VM trust store
+
 These are one-time writes, not bind mounts. The base snapshot may contain the
-auth present when it was built, and each create overwrites auth from the current
-host config. Host Hermes profiles, sessions, custom providers, MCP entries,
-memories, plugins, and local paths are not copied. After creation, the VM has
-its own filesystem and no host directory sharing.
+auth/proxy config present when it was built, and each create overwrites auth from
+the current host config. Host Hermes profiles, sessions, custom providers, MCP
+entries, memories, plugins, and local paths are not copied. After creation, the
+VM has its own filesystem and no host directory sharing.
 
 ## Build
 
@@ -91,3 +158,70 @@ cargo run --bin mom-ui
 
 Open <http://127.0.0.1:8787>. Set `MOM_UI_PORT=9000` to use another port, or
 `MOM_BIN=/path/to/mom` if the backend should call a specific CLI binary.
+
+## NixOS Service
+
+The flake exports `nixosModules.agentmom`. A host can layer the worker on top of
+its existing NixOS config:
+
+```nix
+{
+  imports = [
+    inputs.agentmom.nixosModules.agentmom
+  ];
+
+  services.agentmom = {
+    enable = true;
+    package = inputs.agentmom.packages.${pkgs.system}.mom;
+    nodeId = "pika-build";
+    logFormat = "json";
+    stateDir = "/var/lib/agentmom";
+    microsandboxHome = "/var/lib/agentmom/microsandbox";
+    configFile = /etc/agentmom/config.json;
+    backupCommand = ''
+      restic backup "$MOM_VOLUME_PATH" --tag agentmom --tag "$MOM_WORKSPACE"
+    '';
+  };
+}
+```
+
+For multi-host mode, enable the API on one host and workers on each VM host:
+
+```nix
+services.agentmom = {
+  enable = true;
+  package = inputs.agentmom.packages.${pkgs.system}.mom;
+  nodeId = "pika-build";
+  logFormat = "json";
+  stateDir = "/var/lib/agentmom";
+  microsandboxHome = "/var/lib/agentmom/microsandbox";
+
+  api = {
+    enable = true;
+    bind = "0.0.0.0:8080";
+  };
+
+  worker = {
+    enable = true;
+    apiUrl = "http://127.0.0.1:8080";
+    intervalSeconds = 5;
+  };
+  workerTokenFile = /run/secrets/agentmom-worker-token;
+
+  capacity = {
+    cpus = 32;
+    memoryMib = 131072;
+    activeWorkspaces = 48;
+    diskReserveMib = 102400;
+  };
+};
+```
+
+`mom api` stores workspaces, jobs, nodes, events, and backup artifacts in SQLite.
+Workers keep using host-local microsandbox volumes and claim jobs through
+`POST /worker/claim`; `GET /worker/events?node_id=...` is only a low-latency
+wake signal.
+
+If `workerTokenFile` or `MOM_WORKER_TOKEN` is set, worker endpoints require a
+bearer token. Keep the API bound to localhost or a private network unless worker
+auth is configured.
