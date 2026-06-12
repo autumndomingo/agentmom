@@ -8,7 +8,6 @@ import {
   RefreshCcw,
   Send,
   Sparkles,
-  UserCircle,
 } from 'lucide-react';
 import './styles.css';
 
@@ -397,10 +396,6 @@ function App({ userSession }) {
     }));
   }
 
-  function openAdminProfile() {
-    window.location.href = '/admin';
-  }
-
   return (
     <main className="appShell">
       <aside className="sidebar">
@@ -488,10 +483,6 @@ function App({ userSession }) {
             <p>{selectedVm ? friendlyStatus(selectedVm.status) : 'Create a workspace to begin.'}</p>
           </div>
           <div className="headerActions">
-            <button className="refreshButton" onClick={openAdminProfile}>
-              <UserCircle size={17} />
-              Profile
-            </button>
             <button className="refreshButton" onClick={refresh} disabled={busy}>
               <RefreshCcw size={17} />
               Refresh
@@ -644,6 +635,9 @@ function AdminPage() {
       if (updatedUser.email === userSession.email) {
         const updatedSession = { ...userSession, role: updatedUser.role };
         window.localStorage.setItem(USER_SESSION_KEY, JSON.stringify(updatedSession));
+        if (updatedUser.role !== 'ADMN') {
+          window.location.href = '/';
+        }
       }
     } catch (error) {
       setUsers(previousUsers);
