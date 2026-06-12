@@ -85,18 +85,18 @@ Backups:
 - [x] Inspect active `hetzner` and `pika-build` Nix host shapes.
 
 - [ ] Config deployment lane.
-  - [ ] Commit/checkpoint `~/configs` before Agent Mom deployment edits.
-  - [ ] Point `~/configs` Agent Mom input at this worktree for testing, or at
+  - [x] Commit/checkpoint `~/configs` before Agent Mom deployment edits.
+  - [x] Point `~/configs` Agent Mom input at this worktree for testing, or at
         `github:autumndomingo/agentmom` after the code stabilizes.
-  - [ ] Add a shared agenix `agentmom-worker-token` secret.
-  - [ ] Add a shared agenix `agentmom-restic-env` secret.
-  - [ ] Wire `workerTokenFile` on `pika-build`.
+  - [x] Add a shared agenix `agentmom-worker-token` secret.
+  - [x] Add a shared agenix `agentmom-restic-env` secret.
+  - [x] Wire `workerTokenFile` on `pika-build`.
   - [x] Add first-class Agent Mom module option for worker restic env files.
-  - [ ] Wire restic env into `agentmom-worker` on `pika-build`.
-  - [ ] Add `inputs.agentmom.nixosModules.agentmom` to `hetzner`.
-  - [ ] Configure `hetzner` as worker-only with private bind/url.
-  - [ ] Open firewall only for private worker control traffic.
-  - [ ] Evaluate both NixOS configs before switching.
+  - [x] Wire restic env into `agentmom-worker` on `pika-build`.
+  - [x] Add `inputs.agentmom.nixosModules.agentmom` to `hetzner`.
+  - [x] Configure `hetzner` as worker-only with private bind/url.
+  - [x] Open firewall only for private worker control traffic.
+  - [x] Evaluate both NixOS configs before switching.
   - [ ] Switch `pika-build`, then `hetzner`.
 
 - [ ] Real-host testing lane.
@@ -188,6 +188,12 @@ Backups:
   Nix store.
 - Added ignored real-host integration tests in `tests/real_fleet.rs` and a
   `just real-fleet-test` shortcut.
+- Created Cloudflare R2 bucket `agentmom-backups`, encrypted restic S3 env into
+  `~/configs/secrets/agentmom-restic-env.age`, initialized the restic repository
+  under `prod/workspaces`, and verified a local smoke backup.
+- `~/configs` commits:
+  - `bb47ad4 wire agentmom fleet worker token`
+  - `bd8eb8f wire agentmom restic r2 backups`
 - Real-host test env contract:
   `AGENTMOM_REAL_API_URL`, `AGENTMOM_REAL_WORKER_TOKEN`,
   optional `AGENTMOM_REAL_BASIC_AUTH=user:password`,
