@@ -204,6 +204,7 @@ services.agentmom = {
     bind = "127.0.0.1:9090";
     url = "http://127.0.0.1:9090";
     intervalSeconds = 5;
+    resticEnvFile = "/run/secrets/agentmom-restic-env";
   };
 
   ui.enable = true;
@@ -236,3 +237,46 @@ multi-host deployments.
 
 Worker endpoints require a bearer token through `workerTokenFile`,
 `MOM_WORKER_TOKEN`, or `MOM_WORKER_TOKEN_FILE`.
+
+For restic backups on NixOS, set `worker.resticEnvFile` to a runtime secret
+file containing the usual restic environment, for example:
+
+```env
+RESTIC_REPOSITORY=s3:https://<account>.r2.cloudflarestorage.com/<bucket>/agentmom-prod/workspaces
+RESTIC_PASSWORD=...
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_DEFAULT_REGION=auto
+```
+
+Keep this file outside the Nix store, usually through agenix or another runtime
+secret manager.
+
+## Real Host Tests
+
+The repository includes opt-in integration tests for deployed hosts. They are
+ignored by default because some tests create real workspaces.
+
+Read-only API/auth smoke:
+
+```sh
+export AGENTMOM_REAL_API_URL=https://agentmom.xyz
+export AGENTMOM_REAL_BASIC_AUTH='justin:...'
+export AGENTMOM_REAL_WORKER_TOKEN='...'
+export AGENTMOM_REAL_NODE_A=pika-build
+cargo test --test real_fleet real_api_health_metrics_and_worker_sse_auth -- --ignored --nocapture
+```
+
+Workspace-creating tests require an explicit second switch:
+
+```sh
+export AGENTMOM_REAL_ALLOW_CREATE=1
+export AGENTMOM_REAL_NODE_B=hetzner
+just real-fleet-test
+```
+
+Restic backup smoke also requires:
+
+```sh
+export AGENTMOM_REAL_ALLOW_BACKUP=1
+```

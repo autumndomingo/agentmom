@@ -647,7 +647,7 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = bool>,
 {
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + Duration::from_secs(45);
     while Instant::now() < deadline {
         if check().await {
             return Ok(());

@@ -3,3 +3,4 @@
 /ui/dist/
 /ui/node_modules/
 /worktrees
+/.wrangler/

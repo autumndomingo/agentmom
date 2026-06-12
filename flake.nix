@@ -171,6 +171,13 @@
               exec cargo run --bin mom -- "$@"
             '';
           };
+          wranglerDev = pkgs.writeShellApplication {
+            name = "wrangler";
+            runtimeInputs = [ pkgs.nodejs ];
+            text = ''
+              exec npx --yes wrangler@4 "$@"
+            '';
+          };
         in
         {
           default = pkgs.mkShell {
@@ -183,6 +190,7 @@
                 pkgs.nodejs
                 pkgs.pkg-config
                 pkgs.rust-analyzer
+                wranglerDev
               ]
               ++ nixpkgs.lib.optionals pkgs.stdenv.isLinux [
                 pkgs.libcap_ng

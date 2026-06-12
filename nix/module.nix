@@ -243,6 +243,12 @@ in
         default = null;
         description = "Browser-visible base URL for worker service tunnels, without the port.";
       };
+
+      resticEnvFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Optional runtime environment file with RESTIC_* and S3-compatible credentials for workspace backups.";
+      };
     };
 
     ui = {
@@ -464,6 +470,8 @@ in
         Restart = "always";
         RestartSec = "5s";
         WorkingDirectory = cfg.stateDir;
+      } // lib.optionalAttrs (cfg.worker.resticEnvFile != null) {
+        EnvironmentFile = cfg.worker.resticEnvFile;
       };
     };
 
