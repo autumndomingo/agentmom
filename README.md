@@ -330,5 +330,5 @@ export AGENTMOM_REAL_ALLOW_CREATE=1
 export AGENTMOM_REAL_ALLOW_BACKUP=1
 export AGENTMOM_REAL_ALLOW_CATALOG_BACKUP=1
 export AGENTMOM_REAL_API_SSH_HOST=mom-ctrl
-just real-fleet-test
+just real-fleet-test-mutating
 ```
