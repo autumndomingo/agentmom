@@ -215,6 +215,19 @@ pub(crate) fn workspace_mark_status(name: &str, status: &str) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn workspace_assign_node(name: &str, node: &str, status: &str) -> Result<()> {
+    let now = now_epoch()?;
+    let db = fleet_db()?;
+    let changed = db.execute(
+        "UPDATE workspaces SET node_id = ?2, status = ?3, updated_at = ?4 WHERE name = ?1",
+        params![name, node, status, now],
+    )?;
+    if changed == 0 {
+        bail!("workspace not found: {name}");
+    }
+    Ok(())
+}
+
 pub(crate) fn workspace_mark_backup(name: &str) -> Result<()> {
     let now = now_epoch()?;
     let db = fleet_db()?;

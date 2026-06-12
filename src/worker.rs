@@ -315,7 +315,8 @@ async fn execute_job(api: &WorkerApi, job: &JobRecord) -> Result<Value> {
             Ok(json!({ "backed_up": true }))
         }
         "restore" => {
-            bail!("distributed restore is not implemented yet")
+            let workspace = api.workspace(&job.workspace_name).await?;
+            restore_workspace_local(api, job, &workspace, &payload).await
         }
         "execute" => {
             let command = payload
@@ -821,6 +822,195 @@ async fn backup_workspace_local(
     Ok(())
 }
 
+async fn restore_workspace_local(
+    api: &WorkerApi,
+    job: &JobRecord,
+    workspace: &WorkspaceRecord,
+    payload: &Value,
+) -> Result<Value> {
+    let backup_id = payload
+        .get("backup_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("restore job payload requires backup_id"))?;
+    let backup_kind = payload
+        .get("backup_kind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("restore job payload requires backup_kind"))?;
+    let backup_location = payload
+        .get("backup_location")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("restore job payload requires backup_location"))?;
+    if backup_kind != "restic" {
+        bail!("restore supports restic artifacts only; backup {backup_id} is {backup_kind}");
+    }
+
+    worker_job_event(
+        &api.client,
+        &api.api_url,
+        &api.node,
+        &job.id,
+        "workspace_restore_started",
+        "running",
+        "workspace restore started on target node",
+        json!({ "backup_id": backup_id, "backup_location": backup_location }),
+    )
+    .await?;
+
+    if fake_runtime_enabled() {
+        fake_restore_workspace(workspace, backup_id, backup_location).await?;
+    } else {
+        restore_restic_workspace(workspace, backup_id, backup_location).await?;
+        recreate_workspace_sandbox(workspace).await?;
+    }
+
+    worker_job_event(
+        &api.client,
+        &api.api_url,
+        &api.node,
+        &job.id,
+        "workspace_restore_completed",
+        "succeeded",
+        "workspace restore completed on target node",
+        json!({ "backup_id": backup_id }),
+    )
+    .await?;
+    Ok(json!({ "restored": true, "backup_id": backup_id }))
+}
+
+async fn restore_restic_workspace(
+    workspace: &WorkspaceRecord,
+    backup_id: &str,
+    backup_location: &str,
+) -> Result<()> {
+    let snapshot = backup_location
+        .rsplit_once('#')
+        .map(|(_, snapshot)| snapshot)
+        .filter(|snapshot| !snapshot.is_empty())
+        .ok_or_else(|| anyhow!("backup {backup_id} is missing restic snapshot id"))?;
+    let restore_root = microsandbox_home()?.join("restores").join(format!(
+        "{}-{}",
+        workspace.name,
+        new_id("restore")?
+    ));
+    fs::create_dir_all(&restore_root)
+        .with_context(|| format!("create restore dir {}", restore_root.display()))?;
+    let output = TokioCommand::new("restic")
+        .arg("restore")
+        .arg(snapshot)
+        .arg("--target")
+        .arg(&restore_root)
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .with_context(|| format!("run restic restore for backup {backup_id}"))?;
+    if !output.status.success() {
+        bail!(
+            "restic restore exited with {}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let restored_volume =
+        find_dir_named(&restore_root, &workspace.volume_name)?.ok_or_else(|| {
+            anyhow!(
+                "restic restore for backup {backup_id} did not contain volume {}",
+                workspace.volume_name
+            )
+        })?;
+    let volume_path = microsandbox_volume_path(&workspace.volume_name)?;
+    install_restored_dir(&restored_volume, &volume_path, backup_id)?;
+    let _ = fs::remove_dir_all(&restore_root);
+    Ok(())
+}
+
+fn find_dir_named(root: &Path, name: &str) -> Result<Option<PathBuf>> {
+    for entry in fs::read_dir(root).with_context(|| format!("read {}", root.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            if entry.file_name() == name {
+                return Ok(Some(path));
+            }
+            if let Some(found) = find_dir_named(&path, name)? {
+                return Ok(Some(found));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn install_restored_dir(restored: &Path, destination: &Path, backup_id: &str) -> Result<()> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| anyhow!("volume path has no parent: {}", destination.display()))?;
+    fs::create_dir_all(parent)?;
+    let old_name = format!(
+        "{}.pre-restore-{backup_id}",
+        destination
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| anyhow!("volume path has no file name: {}", destination.display()))?
+    );
+    let old_destination = destination.with_file_name(old_name);
+    if old_destination.exists() {
+        fs::remove_dir_all(&old_destination)
+            .with_context(|| format!("remove {}", old_destination.display()))?;
+    }
+    let had_existing = destination.exists();
+    if had_existing {
+        fs::rename(destination, &old_destination).with_context(|| {
+            format!(
+                "move existing volume {} to {}",
+                destination.display(),
+                old_destination.display()
+            )
+        })?;
+    }
+    if let Err(error) = fs::rename(restored, destination) {
+        if had_existing {
+            let _ = fs::rename(&old_destination, destination);
+        }
+        return Err(error).with_context(|| {
+            format!(
+                "install restored volume {} at {}",
+                restored.display(),
+                destination.display()
+            )
+        });
+    }
+    if had_existing {
+        let _ = fs::remove_dir_all(&old_destination);
+    }
+    Ok(())
+}
+
+async fn recreate_workspace_sandbox(workspace: &WorkspaceRecord) -> Result<()> {
+    if let Ok(handle) = Sandbox::get(&workspace.sandbox_name).await {
+        if handle.status() == SandboxStatus::Running || handle.status() == SandboxStatus::Draining {
+            handle.stop_with_timeout(Duration::from_secs(10)).await?;
+        }
+        Sandbox::remove(&workspace.sandbox_name).await?;
+    }
+    create_sandbox(
+        CreateArgs {
+            name: workspace.sandbox_name.clone(),
+            replace: true,
+            cpus: workspace.cpus,
+            memory: u64::from(workspace.memory_mib),
+            rebuild_snapshot: false,
+            no_snapshot: false,
+        },
+        Some(WorkspaceMount {
+            volume_name: workspace.volume_name.clone(),
+            volume_quota_mib: workspace.volume_quota_mib,
+            workspace_name: workspace.name.clone(),
+        }),
+    )
+    .await
+}
+
 fn fake_runtime_enabled() -> bool {
     env::var("MOM_RUNTIME").is_ok_and(|value| value == "fake")
 }
@@ -898,7 +1088,9 @@ async fn fake_stop_workspace(api: &WorkerApi, workspace: &WorkspaceRecord) -> Re
 async fn fake_backup_workspace(api: &WorkerApi, workspace: &WorkspaceRecord) -> Result<()> {
     let dir = fake_workspace_dir(workspace)?;
     fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    let snapshot = format!("fake-{}-{}", workspace.name, now_epoch()?);
+    let snapshot = new_id("fake")?;
+    let backup_dir = fake_backup_root()?.join(&snapshot);
+    copy_dir_all(&dir, &backup_dir)?;
     fs::write(dir.join("last-backup"), snapshot.as_bytes())?;
     let artifact = BackupArtifact {
         kind: "restic".to_string(),
@@ -916,6 +1108,56 @@ async fn fake_backup_workspace(api: &WorkerApi, workspace: &WorkspaceRecord) -> 
         json!({ "runtime": "fake", "backup_id": backup_id }),
     )
     .await
+}
+
+async fn fake_restore_workspace(
+    workspace: &WorkspaceRecord,
+    backup_id: &str,
+    backup_location: &str,
+) -> Result<()> {
+    let snapshot = backup_location
+        .rsplit_once('#')
+        .map(|(_, snapshot)| snapshot)
+        .filter(|snapshot| !snapshot.is_empty())
+        .ok_or_else(|| anyhow!("backup {backup_id} is missing fake snapshot id"))?;
+    let source = fake_backup_root()?.join(snapshot);
+    if !source.exists() {
+        bail!(
+            "fake backup {backup_id} source does not exist at {}",
+            source.display()
+        );
+    }
+    let destination = fake_workspace_dir(workspace)?;
+    if destination.exists() {
+        fs::remove_dir_all(&destination)
+            .with_context(|| format!("remove {}", destination.display()))?;
+    }
+    copy_dir_all(&source, &destination)?;
+    fs::write(destination.join("state"), b"stopped")?;
+    Ok(())
+}
+
+fn fake_backup_root() -> Result<PathBuf> {
+    if let Some(path) = env::var_os("MOM_FAKE_BACKUP_DIR") {
+        return Ok(PathBuf::from(path));
+    }
+    Ok(microsandbox_home()?.join("fake-backups"))
+}
+
+fn copy_dir_all(source: &Path, destination: &Path) -> Result<()> {
+    fs::create_dir_all(destination).with_context(|| format!("create {}", destination.display()))?;
+    for entry in fs::read_dir(source).with_context(|| format!("read {}", source.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        let target = destination.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_all(&path, &target)?;
+        } else {
+            fs::copy(&path, &target)
+                .with_context(|| format!("copy {} to {}", path.display(), target.display()))?;
+        }
+    }
+    Ok(())
 }
 
 async fn fake_open_service(workspace_name: &str, service: &str) -> Result<String> {

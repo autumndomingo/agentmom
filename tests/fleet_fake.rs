@@ -99,6 +99,73 @@ async fn fake_workers_create_assigned_workspace_without_shared_sqlite() -> Resul
 }
 
 #[tokio::test]
+async fn fake_move_restores_on_target_before_reassigning_workspace() -> Result<()> {
+    let fleet = TestFleet::start().await?;
+    let backup_root = tempfile::tempdir()?;
+    let node_a = spawn_worker_with_options(
+        "node-a",
+        &fleet.api_url,
+        "1",
+        None,
+        Some(backup_root.path()),
+    )?;
+    let node_b = spawn_worker_with_options(
+        "node-b",
+        &fleet.api_url,
+        "1",
+        None,
+        Some(backup_root.path()),
+    )?;
+    wait_for_node(fleet.api_state.path(), "node-a").await?;
+    wait_for_node(fleet.api_state.path(), "node-b").await?;
+
+    let create = create_workspace(&fleet.api_url, "mover", "node-a", 0).await?;
+    wait_for_job_status(&fleet.api_url, &create, "succeeded").await?;
+    wait_for_workspace_node(&fleet.api_url, "mover", "node-a").await?;
+    let source_dir = node_a.msb_home.path().join("fake/mover");
+    std::fs::write(source_dir.join("marker.txt"), b"restore me")?;
+
+    let backup = create_job(&fleet.api_url, "mover", "backup").await?;
+    wait_for_job_status(&fleet.api_url, &backup, "succeeded").await?;
+    wait_for_backup_count(fleet.api_state.path(), "mover", 1).await?;
+
+    let move_job = move_workspace(&fleet.api_url, "mover", "node-b").await?;
+    wait_for_workspace_node(&fleet.api_url, "mover", "node-a").await?;
+    wait_for_job_status(&fleet.api_url, &move_job, "succeeded").await?;
+    wait_for_workspace_node(&fleet.api_url, "mover", "node-b").await?;
+    let status = workspace(&fleet.api_url, "mover")
+        .await?
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        matches!(status.as_str(), "restored" | "running"),
+        "workspace should be restored or started on the target, got {status:?}"
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(node_b.msb_home.path().join("fake/mover/marker.txt"))?,
+        "restore me"
+    );
+    assert_eq!(
+        std::fs::read_to_string(node_a.msb_home.path().join("fake/mover/marker.txt"))?,
+        "restore me",
+        "move should leave the old host copy intact for manual cleanup"
+    );
+    let events = workspace_events(&fleet.api_url, "mover").await?;
+    assert!(
+        events.iter().any(|event| {
+            event.get("node_id").and_then(Value::as_str) == Some("node-b")
+                && event.get("event_type").and_then(Value::as_str) == Some("workspace_restored")
+        }),
+        "restore event should be attributed to node-b: {events:?}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn ui_create_selects_registered_worker_node() -> Result<()> {
     let fleet = TestFleet::start().await?;
     let node = spawn_worker("node-a", &fleet.api_url)?;
@@ -316,7 +383,7 @@ async fn explicit_create_rejects_full_node() -> Result<()> {
 #[tokio::test]
 async fn sse_wakes_worker_without_waiting_for_poll_interval() -> Result<()> {
     let fleet = TestFleet::start().await?;
-    let _node = spawn_worker_with_options("node-a", &fleet.api_url, "30", None)?;
+    let _node = spawn_worker_with_options("node-a", &fleet.api_url, "30", None, None)?;
     wait_for_node(fleet.api_state.path(), "node-a").await?;
 
     let started = Instant::now();
@@ -333,10 +400,20 @@ async fn sse_wakes_worker_without_waiting_for_poll_interval() -> Result<()> {
 #[tokio::test]
 async fn service_open_routes_to_assigned_worker_url() -> Result<()> {
     let fleet = TestFleet::start().await?;
-    let node_a =
-        spawn_worker_with_options("node-a", &fleet.api_url, "1", Some("http://node-a.fake"))?;
-    let node_b =
-        spawn_worker_with_options("node-b", &fleet.api_url, "1", Some("http://node-b.fake"))?;
+    let node_a = spawn_worker_with_options(
+        "node-a",
+        &fleet.api_url,
+        "1",
+        Some("http://node-a.fake"),
+        None,
+    )?;
+    let node_b = spawn_worker_with_options(
+        "node-b",
+        &fleet.api_url,
+        "1",
+        Some("http://node-b.fake"),
+        None,
+    )?;
     wait_for_node(fleet.api_state.path(), "node-a").await?;
     wait_for_node(fleet.api_state.path(), "node-b").await?;
 
@@ -405,7 +482,7 @@ fn spawn_api(state_dir: &Path, bind: &str) -> Result<ChildGuard> {
 }
 
 fn spawn_worker(node: &str, api_url: &str) -> Result<TestNode> {
-    spawn_worker_with_options(node, api_url, "1", None)
+    spawn_worker_with_options(node, api_url, "1", None, None)
 }
 
 fn spawn_worker_with_options(
@@ -413,6 +490,7 @@ fn spawn_worker_with_options(
     api_url: &str,
     interval: &str,
     fake_service_base_url: Option<&str>,
+    fake_backup_dir: Option<&Path>,
 ) -> Result<TestNode> {
     let state = tempfile::tempdir()?;
     let msb_home = tempfile::tempdir()?;
@@ -433,6 +511,9 @@ fn spawn_worker_with_options(
     if let Some(base_url) = fake_service_base_url {
         command.env("MOM_FAKE_SERVICE_BASE_URL", base_url);
     }
+    if let Some(backup_dir) = fake_backup_dir {
+        command.env("MOM_FAKE_BACKUP_DIR", backup_dir);
+    }
     let child = command
         .spawn()
         .with_context(|| format!("spawn worker {node}"))?;
@@ -442,6 +523,24 @@ fn spawn_worker_with_options(
         worker_url: format!("http://{bind}"),
         _process: ChildGuard { child },
     })
+}
+
+async fn move_workspace(api_url: &str, workspace: &str, target_node: &str) -> Result<String> {
+    let response = reqwest::Client::new()
+        .post(format!("{api_url}/api/workspaces/{workspace}/move"))
+        .json(&json!({
+            "target_node_id": target_node
+        }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Value>()
+        .await?;
+    response
+        .pointer("/job/id")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .ok_or_else(|| anyhow!("move workspace response missing job id: {response}"))
 }
 
 async fn create_workspace(
@@ -680,6 +779,16 @@ async fn workspace(api_url: &str, name: &str) -> Result<Value> {
         .into_iter()
         .find(|value| value.get("name").and_then(Value::as_str) == Some(name))
         .ok_or_else(|| anyhow!("workspace not found: {name}"))
+}
+
+async fn workspace_events(api_url: &str, name: &str) -> Result<Vec<Value>> {
+    Ok(
+        reqwest::get(format!("{api_url}/api/workspaces/{name}/events"))
+            .await?
+            .error_for_status()?
+            .json::<Vec<Value>>()
+            .await?,
+    )
 }
 
 async fn wait_until<F, Fut>(label: &str, mut check: F) -> Result<()>

@@ -14,6 +14,11 @@ pub(crate) async fn api(args: ApiArgs) -> Result<()> {
             "/api/workspaces",
             get(api_list_workspaces).post(api_create_workspace),
         )
+        .route("/api/workspaces/{name}/move", post(api_move_workspace))
+        .route(
+            "/api/workspaces/{name}/recover",
+            post(api_recover_workspace),
+        )
         .route("/api/workspaces/{name}/events", get(api_workspace_events))
         .route("/worker/register", post(api_worker_register))
         .route("/worker/heartbeat", post(api_worker_register))
@@ -173,6 +178,88 @@ async fn api_create_workspace(
     Ok(Json(JobResponse { job }))
 }
 
+async fn api_move_workspace(
+    State(state): State<Arc<ApiState>>,
+    AxumPath(name): AxumPath<String>,
+    Json(request): Json<WorkspaceRestoreRequest>,
+) -> Result<Json<JobResponse>, ApiError> {
+    enqueue_workspace_restore(state, &name, request, "workspace_move_queued").await
+}
+
+async fn api_recover_workspace(
+    State(state): State<Arc<ApiState>>,
+    AxumPath(name): AxumPath<String>,
+    Json(request): Json<WorkspaceRestoreRequest>,
+) -> Result<Json<JobResponse>, ApiError> {
+    enqueue_workspace_restore(state, &name, request, "workspace_recovery_queued").await
+}
+
+async fn enqueue_workspace_restore(
+    state: Arc<ApiState>,
+    name: &str,
+    request: WorkspaceRestoreRequest,
+    event_type: &str,
+) -> Result<Json<JobResponse>, ApiError> {
+    let workspace = workspace_get(name)?;
+    let target_node = select_ready_node(Some(&request.target_node_id))?;
+    if workspace.node_id.as_deref() == Some(target_node.as_str())
+        && event_type == "workspace_move_queued"
+    {
+        return Err(ApiError::Anyhow(anyhow!(
+            "workspace {} is already assigned to node {}",
+            workspace.name,
+            target_node
+        )));
+    }
+    let backup = match request.backup_id {
+        Some(id) => backup_record_get(&id)?,
+        None => latest_restic_backup(&workspace.name)?,
+    };
+    if backup.workspace_name != workspace.name {
+        return Err(ApiError::Anyhow(anyhow!(
+            "backup {} belongs to workspace {}, not {}",
+            backup.id,
+            backup.workspace_name,
+            workspace.name
+        )));
+    }
+    if backup.kind != "restic" {
+        return Err(ApiError::Anyhow(anyhow!(
+            "restore supports restic artifacts only; backup {} is {}",
+            backup.id,
+            backup.kind
+        )));
+    }
+    workspace_mark_status(&workspace.name, "restore-queued")?;
+    record_workspace_event_for_node(
+        &workspace.name,
+        &target_node,
+        event_type,
+        "queued",
+        "workspace restore queued on target node",
+        json!({
+            "backup_id": backup.id,
+            "backup_location": backup.location,
+            "source_node_id": workspace.node_id,
+            "target_node_id": target_node
+        }),
+    )?;
+    let job = create_job(CreateJobRequest {
+        workspace_name: workspace.name,
+        kind: "restore".to_string(),
+        node_id: Some(target_node),
+        payload: json!({
+            "backup_id": backup.id,
+            "backup_kind": backup.kind,
+            "backup_location": backup.location,
+            "source_node_id": workspace.node_id,
+            "target_node_id": request.target_node_id
+        }),
+    })?;
+    let _ = state.notifier.send("job_available".to_string());
+    Ok(Json(JobResponse { job }))
+}
+
 async fn api_workspace_events(
     AxumPath(name): AxumPath<String>,
 ) -> Result<Json<Vec<WorkspaceEvent>>, ApiError> {
@@ -224,8 +311,9 @@ async fn api_worker_job_event(
     if request.event_type == "job_running" {
         mark_job_running(&id, &request.node_id)?;
     }
-    record_workspace_event(
+    record_workspace_event_for_node(
         &job.workspace_name,
+        &request.node_id,
         &request.event_type,
         &request.status,
         &request.message,
@@ -240,12 +328,44 @@ async fn api_worker_job_event(
 
 async fn api_worker_job_complete(
     AxumPath(id): AxumPath<String>,
+    State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
     Json(request): Json<CompleteJobRequest>,
 ) -> Result<Json<JobResponse>, ApiError> {
     require_worker_token(&headers).map_err(ApiError::Unauthorized)?;
-    let job = complete_job(&id, &request.node_id, &request.status, request.output)?;
+    let node_id = request.node_id;
+    let status = request.status;
+    let job = complete_job(&id, &node_id, &status, request.output)?;
+    if job.kind == "restore" && status == "succeeded" {
+        finalize_workspace_restore(&job, &node_id)?;
+        let _ = state.notifier.send("job_available".to_string());
+    }
     Ok(Json(JobResponse { job }))
+}
+
+fn finalize_workspace_restore(job: &JobRecord, node: &str) -> Result<()> {
+    let payload: Value = serde_json::from_str(&job.payload_json)?;
+    let target = payload
+        .get("target_node_id")
+        .and_then(Value::as_str)
+        .unwrap_or(node);
+    if target != node {
+        bail!("restore job target node {target} does not match completing node {node}");
+    }
+    let backup_id = payload
+        .get("backup_id")
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    workspace_assign_node(&job.workspace_name, node, "restored")?;
+    record_workspace_event_for_node(
+        &job.workspace_name,
+        node,
+        "workspace_restored",
+        "succeeded",
+        "workspace restored and assigned to target node",
+        json!({ "backup_id": backup_id, "job_id": job.id }),
+    )?;
+    Ok(())
 }
 
 async fn api_worker_workspace_state(

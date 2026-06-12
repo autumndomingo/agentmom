@@ -391,6 +391,13 @@ struct CreateWorkspaceRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct WorkspaceRestoreRequest {
+    target_node_id: String,
+    #[serde(default)]
+    backup_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct RegisterNodeRequest {
     node_id: String,
     capacity: NodeCapacity,
