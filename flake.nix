@@ -29,8 +29,47 @@
           };
           rustToolchain = pkgs.rust-bin.stable.latest.default;
           craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
+          src = craneLib.cleanCargoSource ./.;
+          agentdPrebuilt = {
+            x86_64-linux = pkgs.fetchurl {
+              url = "https://github.com/superradcompany/microsandbox/releases/download/v0.5.6/agentd-x86_64";
+              hash = "sha256-7LRrjBMjQoPkyItM+MMrcVCYWCaxgE8s0KVbfTcEQ+o=";
+            };
+            x86_64-darwin = pkgs.fetchurl {
+              url = "https://github.com/superradcompany/microsandbox/releases/download/v0.5.6/agentd-x86_64";
+              hash = "sha256-7LRrjBMjQoPkyItM+MMrcVCYWCaxgE8s0KVbfTcEQ+o=";
+            };
+            aarch64-linux = pkgs.fetchurl {
+              url = "https://github.com/superradcompany/microsandbox/releases/download/v0.5.6/agentd-aarch64";
+              hash = "sha256-BHBGigWM/ydms0Or7E6A6/8SUo8/43mjSJgx2lIWhRg=";
+            };
+            aarch64-darwin = pkgs.fetchurl {
+              url = "https://github.com/superradcompany/microsandbox/releases/download/v0.5.6/agentd-aarch64";
+              hash = "sha256-BHBGigWM/ydms0Or7E6A6/8SUo8/43mjSJgx2lIWhRg=";
+            };
+          }.${system};
+          isMicrosandboxGit = packages:
+            nixpkgs.lib.any
+              (package:
+                nixpkgs.lib.hasPrefix "git+https://github.com/superradcompany/microsandbox"
+                  (package.source or ""))
+              packages;
+          cargoVendorDir = craneLib.vendorCargoDeps {
+            inherit src;
+            overrideVendorGitCheckout = packages: drv:
+              if isMicrosandboxGit packages then
+                drv.overrideAttrs (old: {
+                  postPatch = (old.postPatch or "") + ''
+                    substituteInPlace crates/filesystem/build.rs \
+                      --replace-fail 'download_to(&url, &dest);' \
+                      'std::fs::copy("${agentdPrebuilt}", &dest).expect("failed to copy Nix-provided agentd");'
+                  '';
+                })
+              else
+                drv;
+          };
           commonArgs = {
-            src = craneLib.cleanCargoSource ./.;
+            inherit src cargoVendorDir;
             strictDeps = true;
             nativeBuildInputs = [ pkgs.pkg-config ];
             buildInputs =
