@@ -96,6 +96,9 @@ let
   }
   // lib.optionalAttrs (cfg.workerTokenFile != null) {
     MOM_WORKER_TOKEN_FILE = cfg.workerTokenFile;
+  }
+  // lib.optionalAttrs (cfg.workerUrlAllowlist != [ ]) {
+    MOM_WORKER_URL_ALLOWLIST = lib.concatStringsSep "," cfg.workerUrlAllowlist;
   };
 
   commonPath = with pkgs; [
@@ -384,6 +387,12 @@ in
       type = lib.types.nullOr lib.types.str;
       default = null;
       description = "Optional runtime file containing the bearer token used by API worker endpoints.";
+    };
+
+    workerUrlAllowlist = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      description = "Exact worker URLs the API is allowed to accept from registering workers.";
     };
   };
 

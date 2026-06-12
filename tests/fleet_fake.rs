@@ -401,6 +401,7 @@ async fn idle_stopped_workspace_does_not_count_against_capacity() -> Result<()> 
 #[tokio::test]
 async fn offline_node_is_not_reenabled_by_stale_heartbeat() -> Result<()> {
     let fleet = TestFleet::start().await?;
+    let client = reqwest::Client::new();
     insert_node_with_status(
         fleet.api_state.path(),
         "lost-node",
@@ -409,7 +410,7 @@ async fn offline_node_is_not_reenabled_by_stale_heartbeat() -> Result<()> {
         "offline",
     )?;
 
-    reqwest::Client::new()
+    client
         .post(format!("{}/worker/register", fleet.api_url))
         .bearer_auth(WORKER_TOKEN)
         .json(&json!({
@@ -427,7 +428,7 @@ async fn offline_node_is_not_reenabled_by_stale_heartbeat() -> Result<()> {
         .error_for_status()?;
 
     assert_eq!(node_status(fleet.api_state.path(), "lost-node")?, "offline");
-    let response = reqwest::Client::new()
+    let response = client
         .post(format!("{}/api/workspaces", fleet.api_url))
         .json(&json!({
             "name": "should-not-place",
@@ -436,6 +437,41 @@ async fn offline_node_is_not_reenabled_by_stale_heartbeat() -> Result<()> {
         .send()
         .await?;
     assert!(!response.status().is_success());
+
+    let response = client
+        .post(format!("{}/worker/claim", fleet.api_url))
+        .bearer_auth(WORKER_TOKEN)
+        .json(&json!({
+            "node_id": "lost-node",
+            "capacity": {
+                "cpus": 8,
+                "memory_mib": 32768,
+                "max_active_workspaces": 24,
+                "disk_reserve_mib": 1024
+            },
+            "pressure": {
+                "managed_sandboxes": 0,
+                "running_sandboxes": 0,
+                "active_workspaces": 0,
+                "allocated_memory_mib": 0,
+                "disk_available_mib": 65536,
+                "capacity_ok": true
+            },
+            "worker_url": "http://100.64.0.42:9090"
+        }))
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let response = client
+        .get(format!(
+            "{}/worker/workspaces?node_id=lost-node",
+            fleet.api_url
+        ))
+        .bearer_auth(WORKER_TOKEN)
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
     Ok(())
 }
@@ -455,6 +491,50 @@ async fn worker_register_rejects_unspecified_worker_url() -> Result<()> {
                 "disk_reserve_mib": 1024
             },
             "worker_url": "http://0.0.0.0:9090"
+        }))
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn worker_register_rejects_urls_outside_allowlist() -> Result<()> {
+    let fleet =
+        TestFleet::start_with_api_env(&[("MOM_WORKER_URL_ALLOWLIST", "http://100.64.0.42:9090")])
+            .await?;
+    let client = reqwest::Client::new();
+
+    client
+        .post(format!("{}/worker/register", fleet.api_url))
+        .bearer_auth(WORKER_TOKEN)
+        .json(&json!({
+            "node_id": "allowed-node",
+            "capacity": {
+                "cpus": 8,
+                "memory_mib": 32768,
+                "max_active_workspaces": 24,
+                "disk_reserve_mib": 1024
+            },
+            "worker_url": "http://100.64.0.42:9090"
+        }))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let response = client
+        .post(format!("{}/worker/register", fleet.api_url))
+        .bearer_auth(WORKER_TOKEN)
+        .json(&json!({
+            "node_id": "poison-node",
+            "capacity": {
+                "cpus": 8,
+                "memory_mib": 32768,
+                "max_active_workspaces": 24,
+                "disk_reserve_mib": 1024
+            },
+            "worker_url": "http://100.64.0.43:9090"
         }))
         .send()
         .await?;
@@ -528,10 +608,14 @@ async fn service_open_routes_to_assigned_worker_url() -> Result<()> {
 
 impl TestFleet {
     async fn start() -> Result<Self> {
+        Self::start_with_api_env(&[]).await
+    }
+
+    async fn start_with_api_env(envs: &[(&str, &str)]) -> Result<Self> {
         let api_state = tempfile::tempdir()?;
         let api_addr = free_addr()?;
         let api_url = format!("http://{api_addr}");
-        let api = spawn_api(api_state.path(), &api_addr)?;
+        let api = spawn_api(api_state.path(), &api_addr, envs)?;
         wait_ready(&api_url).await?;
         Ok(Self {
             api_state,
@@ -541,17 +625,20 @@ impl TestFleet {
     }
 }
 
-fn spawn_api(state_dir: &Path, bind: &str) -> Result<ChildGuard> {
-    let child = Command::new(MOM_BIN)
+fn spawn_api(state_dir: &Path, bind: &str, envs: &[(&str, &str)]) -> Result<ChildGuard> {
+    let mut command = Command::new(MOM_BIN);
+    command
         .args(["api", "--bind", bind])
         .env("MOM_RUNTIME", "fake")
         .env("MOM_STATE_DIR", state_dir)
         .env("MOM_UI_DIST", state_dir.join("missing-ui"))
         .env("MOM_WORKER_TOKEN", WORKER_TOKEN)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("spawn mom api")?;
+        .stderr(Stdio::null());
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let child = command.spawn().context("spawn mom api")?;
     Ok(ChildGuard { child })
 }
 

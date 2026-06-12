@@ -764,6 +764,17 @@ pub(crate) fn node_worker_url(node: &str) -> Result<Option<String>> {
     Ok(url)
 }
 
+pub(crate) fn node_is_ready(node: &str) -> Result<bool> {
+    ensure_fleet_schema()?;
+    let db = fleet_db()?;
+    let count: i64 = db.query_row(
+        "SELECT COUNT(*) FROM nodes WHERE node_id = ?1 AND status = 'ready'",
+        params![node],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
 fn validate_worker_url(worker_url: &str) -> Result<()> {
     let url = reqwest::Url::parse(worker_url)
         .with_context(|| format!("parse worker_url {worker_url:?}"))?;
@@ -787,7 +798,23 @@ fn validate_worker_url(worker_url: &str) -> Result<()> {
             bail!("worker_url may not use loopback host outside fake runtime: {worker_url}");
         }
     }
+    if let Ok(allowlist) = env::var("MOM_WORKER_URL_ALLOWLIST") {
+        let worker_url = normalized_url(worker_url);
+        let allowed = allowlist
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(normalized_url)
+            .any(|allowed| allowed == worker_url);
+        if !allowed {
+            bail!("worker_url is not in MOM_WORKER_URL_ALLOWLIST: {worker_url}");
+        }
+    }
     Ok(())
+}
+
+fn normalized_url(url: &str) -> String {
+    url.trim().trim_end_matches('/').to_string()
 }
 
 fn requeue_stale_claims(db: &Connection, now: i64) -> Result<()> {
