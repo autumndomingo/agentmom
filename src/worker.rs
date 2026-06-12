@@ -605,17 +605,38 @@ async fn create_workspace_local(
     )
     .await?;
     if let Err(error) = create_workspace_sandbox(workspace, false).await {
-        api.update_workspace(&workspace.name, Some("create-failed"), None, false, false)
+        let volume_path = microsandbox_volume_path(&workspace.volume_name)?;
+        if volume_path.exists() {
+            api.event(
+                &workspace.name,
+                "workspace_create_retry_recreate_started",
+                "running",
+                "workspace volume exists after create failure; recreating sandbox around it",
+                json!({
+                    "sandbox": workspace.sandbox_name,
+                    "volume": workspace.volume_name,
+                    "error": format!("{error:#}")
+                }),
+            )
             .await?;
-        api.event(
-            &workspace.name,
-            "workspace_create_failed",
-            "failed",
-            &format!("{error:#}"),
-            json!({ "sandbox": workspace.sandbox_name, "volume": workspace.volume_name }),
-        )
-        .await?;
-        return Err(error);
+            create_workspace_sandbox(workspace, true).await.with_context(|| {
+                format!(
+                    "initial create failed with {error:#}; retry around existing volume also failed"
+                )
+            })?;
+        } else {
+            api.update_workspace(&workspace.name, Some("create-failed"), None, false, false)
+                .await?;
+            api.event(
+                &workspace.name,
+                "workspace_create_failed",
+                "failed",
+                &format!("{error:#}"),
+                json!({ "sandbox": workspace.sandbox_name, "volume": workspace.volume_name }),
+            )
+            .await?;
+            return Err(error);
+        }
     }
     api.update_workspace(&workspace.name, Some("stopped"), None, false, false)
         .await?;

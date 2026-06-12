@@ -341,6 +341,15 @@ struct MonitorCheckArgs {
     /// Maximum failed jobs allowed in the lookback window.
     #[arg(long, default_value_t = 0)]
     max_recent_failed_jobs: i64,
+    /// Maximum backup age for workspaces with scheduled backups. 0 disables this check.
+    #[arg(long, default_value_t = 0)]
+    max_backup_age_secs: i64,
+    /// Maximum scheduled-backup workspaces older than max backup age.
+    #[arg(long, default_value_t = 0)]
+    max_stale_scheduled_backups: i64,
+    /// Maximum backup failure events allowed in the failed-job lookback window.
+    #[arg(long, default_value_t = 0)]
+    max_recent_backup_failures: i64,
 }
 
 #[derive(Debug, Args)]
@@ -858,6 +867,9 @@ async fn monitor_check(args: MonitorCheckArgs) -> Result<()> {
         || args.max_queued_age_secs < 0
         || args.failed_job_lookback_secs < 0
         || args.max_recent_failed_jobs < 0
+        || args.max_backup_age_secs < 0
+        || args.max_stale_scheduled_backups < 0
+        || args.max_recent_backup_failures < 0
     {
         bail!("monitor thresholds must be non-negative");
     }
@@ -878,7 +890,8 @@ async fn monitor_check(args: MonitorCheckArgs) -> Result<()> {
     let now = now_epoch()?;
     let stale_cutoff = now.saturating_sub(i64::try_from(env_u64("MOM_NODE_STALE_SECS", 60))?);
     let failed_since = now.saturating_sub(args.failed_job_lookback_secs);
-    let snapshot = monitor_snapshot(stale_cutoff, now, failed_since)?;
+    let backup_stale_cutoff = now.saturating_sub(args.max_backup_age_secs);
+    let snapshot = monitor_snapshot(stale_cutoff, now, failed_since, backup_stale_cutoff)?;
 
     if snapshot.ready_nodes < args.min_ready_nodes {
         issues.push(format!(
@@ -904,14 +917,34 @@ async fn monitor_check(args: MonitorCheckArgs) -> Result<()> {
             snapshot.recent_failed_jobs, args.failed_job_lookback_secs, args.max_recent_failed_jobs
         ));
     }
+    if args.max_backup_age_secs > 0
+        && snapshot.stale_scheduled_backups > args.max_stale_scheduled_backups
+    {
+        issues.push(format!(
+            "stale scheduled backups {} above maximum {} for max backup age {}s",
+            snapshot.stale_scheduled_backups,
+            args.max_stale_scheduled_backups,
+            args.max_backup_age_secs
+        ));
+    }
+    if snapshot.recent_backup_failures > args.max_recent_backup_failures {
+        issues.push(format!(
+            "backup failures {} in last {}s above maximum {}",
+            snapshot.recent_backup_failures,
+            args.failed_job_lookback_secs,
+            args.max_recent_backup_failures
+        ));
+    }
 
     if issues.is_empty() {
         println!(
-            "monitor ok: ready_nodes={} stale_nodes={} oldest_queued_job_age_seconds={} recent_failed_jobs={}",
+            "monitor ok: ready_nodes={} stale_nodes={} oldest_queued_job_age_seconds={} recent_failed_jobs={} stale_scheduled_backups={} recent_backup_failures={}",
             snapshot.ready_nodes,
             snapshot.stale_nodes,
             snapshot.oldest_queued_job_age,
-            snapshot.recent_failed_jobs
+            snapshot.recent_failed_jobs,
+            snapshot.stale_scheduled_backups,
+            snapshot.recent_backup_failures
         );
         return Ok(());
     }
@@ -943,6 +976,7 @@ fn fleet_recover_host(from: &str, to: &str, dry_run: bool) -> Result<()> {
         "{} workspace(s) assigned to {from} will be restored on {to}",
         workspaces.len()
     );
+    let mut recovery_plan = Vec::with_capacity(workspaces.len());
     for workspace in workspaces {
         let backup = latest_restic_backup(&workspace.name).with_context(|| {
             format!(
@@ -951,38 +985,10 @@ fn fleet_recover_host(from: &str, to: &str, dry_run: bool) -> Result<()> {
             )
         })?;
         println!("{} -> {} using {}", workspace.name, to, backup.id);
-        if dry_run {
-            continue;
-        }
-        workspace_reassign_for_restore(&workspace.name, to)?;
-        record_workspace_event_for_node(
-            &workspace.name,
-            to,
-            "workspace_recovery_queued",
-            "queued",
-            "workspace reassigned for host-loss recovery",
-            json!({
-                "from_node": from,
-                "to_node": to,
-                "backup_id": backup.id,
-                "backup_location": backup.location
-            }),
-        )?;
-        create_job(CreateJobRequest {
-            workspace_name: workspace.name,
-            kind: "restore".to_string(),
-            node_id: Some(to.to_string()),
-            payload: json!({
-                "backup_id": backup.id,
-                "backup_location": backup.location,
-                "desired_state": workspace.desired_state,
-                "from_node": from,
-                "to_node": to
-            }),
-        })?;
+        recovery_plan.push((workspace, backup));
     }
     if !dry_run {
-        node_mark_offline(from)?;
+        recover_host_with_backups(from, to, &recovery_plan)?;
     }
     Ok(())
 }

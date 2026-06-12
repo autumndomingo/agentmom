@@ -335,22 +335,103 @@ pub(crate) fn workspace_mark_backup(name: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn workspace_reassign_for_restore(name: &str, node: &str) -> Result<()> {
+pub(crate) fn recover_host_with_backups(
+    from: &str,
+    to: &str,
+    items: &[(WorkspaceRecord, BackupRecord)],
+) -> Result<()> {
+    ensure_fleet_schema()?;
     let now = now_epoch()?;
-    let db = fleet_db()?;
-    let changed = db.execute(
-        r#"
+    let mut db = fleet_db()?;
+    let tx = db.transaction()?;
+
+    let target_ready: bool = tx
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM nodes WHERE node_id = ?1 AND status = 'ready'",
+            params![to],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(false);
+    if !target_ready {
+        bail!("target node is not ready: {to}");
+    }
+
+    for (workspace, backup) in items {
+        let current_node: Option<String> = tx
+            .query_row(
+                "SELECT node_id FROM workspaces WHERE name = ?1 AND status != 'removed'",
+                params![workspace.name],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if current_node.as_deref() != Some(from) {
+            bail!(
+                "workspace {} is no longer assigned to source node {}",
+                workspace.name,
+                from
+            );
+        }
+
+        tx.execute(
+            r#"
 UPDATE workspaces
 SET node_id = ?2,
     status = 'restore-queued',
     updated_at = ?3
 WHERE name = ?1
 "#,
-        params![name, node, now],
-    )?;
-    if changed == 0 {
-        bail!("workspace not found: {name}");
+            params![workspace.name, to, now],
+        )?;
+        tx.execute(
+            r#"
+INSERT INTO workspace_events (
+    workspace_name, node_id, event_type, status, message, metadata_json, created_at
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+"#,
+            params![
+                workspace.name,
+                to,
+                "workspace_recovery_queued",
+                "queued",
+                "workspace reassigned for host-loss recovery",
+                serde_json::to_string(&json!({
+                    "from_node": from,
+                    "to_node": to,
+                    "backup_id": backup.id,
+                    "backup_location": backup.location
+                }))?,
+                now,
+            ],
+        )?;
+        tx.execute(
+            r#"
+INSERT INTO jobs (
+    id, workspace_name, node_id, kind, status, payload_json, output_json,
+    claimed_by, claimed_at, created_at, updated_at
+) VALUES (?1, ?2, ?3, 'restore', 'queued', ?4, NULL, NULL, NULL, ?5, ?5)
+"#,
+            params![
+                new_id("job")?,
+                workspace.name,
+                to,
+                serde_json::to_string(&json!({
+                    "backup_id": backup.id,
+                    "backup_location": backup.location,
+                    "desired_state": workspace.desired_state,
+                    "from_node": from,
+                    "to_node": to
+                }))?,
+                now,
+            ],
+        )?;
     }
+
+    tx.execute(
+        "UPDATE nodes SET status = 'offline', last_seen_at = ?2 WHERE node_id = ?1",
+        params![from, now],
+    )?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -1043,12 +1124,15 @@ pub(crate) struct MonitorSnapshot {
     pub(crate) stale_nodes: i64,
     pub(crate) oldest_queued_job_age: i64,
     pub(crate) recent_failed_jobs: i64,
+    pub(crate) stale_scheduled_backups: i64,
+    pub(crate) recent_backup_failures: i64,
 }
 
 pub(crate) fn monitor_snapshot(
     stale_cutoff: i64,
     now: i64,
     failed_since: i64,
+    backup_stale_cutoff: i64,
 ) -> Result<MonitorSnapshot> {
     let db = open_existing_fleet_db(true)?;
     let ready_nodes = db.query_row(
@@ -1079,11 +1163,35 @@ WHERE status = 'ready'
         params![failed_since],
         |row| row.get(0),
     )?;
+    let stale_scheduled_backups = db.query_row(
+        r#"
+SELECT COUNT(*)
+FROM workspaces
+WHERE status != 'removed'
+  AND backup_interval_secs > 0
+  AND (last_backup_at IS NULL OR last_backup_at < ?1)
+"#,
+        params![backup_stale_cutoff],
+        |row| row.get(0),
+    )?;
+    let recent_backup_failures = db.query_row(
+        r#"
+SELECT COUNT(*)
+FROM workspace_events
+WHERE event_type = 'workspace_backup_failed'
+  AND status = 'failed'
+  AND created_at >= ?1
+"#,
+        params![failed_since],
+        |row| row.get(0),
+    )?;
     Ok(MonitorSnapshot {
         ready_nodes,
         stale_nodes,
         oldest_queued_job_age: now.saturating_sub(oldest_created_at),
         recent_failed_jobs,
+        stale_scheduled_backups,
+        recent_backup_failures,
     })
 }
 

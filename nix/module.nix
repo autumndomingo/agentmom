@@ -198,6 +198,12 @@ in
         default = true;
         description = "Whether missed catalog backup timer runs should execute after boot.";
       };
+
+      resticEnvFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        description = "Optional EnvironmentFile containing RESTIC_* credentials used to upload catalog backups off-host.";
+      };
     };
 
     monitorCheck = {
@@ -249,6 +255,24 @@ in
         type = lib.types.ints.unsigned;
         default = 0;
         description = "Maximum failed jobs allowed in the lookback window before the monitor check fails.";
+      };
+
+      maxBackupAgeSeconds = lib.mkOption {
+        type = lib.types.ints.unsigned;
+        default = 0;
+        description = "Maximum backup age for workspaces with scheduled backups. 0 disables the check.";
+      };
+
+      maxStaleScheduledBackups = lib.mkOption {
+        type = lib.types.ints.unsigned;
+        default = 0;
+        description = "Maximum scheduled-backup workspaces older than maxBackupAgeSeconds before the monitor check fails.";
+      };
+
+      maxRecentBackupFailures = lib.mkOption {
+        type = lib.types.ints.unsigned;
+        default = 0;
+        description = "Maximum backup failure events allowed in the failed-job lookback window before the monitor check fails.";
       };
 
       onFailureUnits = lib.mkOption {
@@ -598,8 +622,14 @@ in
           set -eu
           install -d -m 0750 ${lib.escapeShellArg cfg.catalogBackup.outputDir}
           ts="$(date -u +%Y%m%dT%H%M%SZ)"
-          exec ${cfg.package}/bin/mom db backup --output "${cfg.catalogBackup.outputDir}/fleet-$ts.db"
+          backup_path="${cfg.catalogBackup.outputDir}/fleet-$ts.db"
+          ${cfg.package}/bin/mom db backup --output "$backup_path"
+          ${lib.optionalString (cfg.catalogBackup.resticEnvFile != null) ''
+            restic backup "$backup_path" --tag agentmom --tag agentmom-catalog --tag fleet-catalog
+          ''}
         '';
+      } // lib.optionalAttrs (cfg.catalogBackup.resticEnvFile != null) {
+        EnvironmentFile = cfg.catalogBackup.resticEnvFile;
       };
     };
 
@@ -636,7 +666,10 @@ in
               --max-stale-nodes ${toString cfg.monitorCheck.maxStaleNodes} \
               --max-queued-age-secs ${toString cfg.monitorCheck.maxQueuedAgeSeconds} \
               --failed-job-lookback-secs ${toString cfg.monitorCheck.failedJobLookbackSeconds} \
-              --max-recent-failed-jobs ${toString cfg.monitorCheck.maxRecentFailedJobs}; then
+              --max-recent-failed-jobs ${toString cfg.monitorCheck.maxRecentFailedJobs} \
+              --max-backup-age-secs ${toString cfg.monitorCheck.maxBackupAgeSeconds} \
+              --max-stale-scheduled-backups ${toString cfg.monitorCheck.maxStaleScheduledBackups} \
+              --max-recent-backup-failures ${toString cfg.monitorCheck.maxRecentBackupFailures}; then
               exit 0
             fi
             if [ "$attempt" = 6 ]; then

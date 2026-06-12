@@ -176,10 +176,6 @@ pub(crate) async fn run_restic_restore(
         .map(|(_, snapshot)| snapshot)
         .filter(|snapshot| !snapshot.is_empty())
         .ok_or_else(|| anyhow!("backup {backup_id} is missing restic snapshot id"))?;
-    if volume_path.exists() {
-        fs::remove_dir_all(volume_path)
-            .with_context(|| format!("remove existing volume path {}", volume_path.display()))?;
-    }
     let parent = volume_path
         .parent()
         .ok_or_else(|| anyhow!("volume path has no parent: {}", volume_path.display()))?;
@@ -212,13 +208,42 @@ pub(crate) async fn run_restic_restore(
         bail!("restic restore exited with {status}");
     }
     let restored_volume = restored_volume_path(&restore_tmp, volume_path, volume_name)?;
+    let previous_volume = parent.join(format!(".pre-restore-{backup_id}"));
+    if previous_volume.exists() {
+        fs::remove_dir_all(&previous_volume).with_context(|| {
+            format!(
+                "remove stale previous restore dir {}",
+                previous_volume.display()
+            )
+        })?;
+    }
+    if volume_path.exists() {
+        fs::rename(volume_path, &previous_volume).with_context(|| {
+            format!(
+                "move current volume {} aside to {}",
+                volume_path.display(),
+                previous_volume.display()
+            )
+        })?;
+    }
     fs::rename(&restored_volume, volume_path).with_context(|| {
+        if previous_volume.exists() && !volume_path.exists() {
+            let _ = fs::rename(&previous_volume, volume_path);
+        }
         format!(
             "move restored volume {} to {}",
             restored_volume.display(),
             volume_path.display()
         )
     })?;
+    if previous_volume.exists() {
+        fs::remove_dir_all(&previous_volume).with_context(|| {
+            format!(
+                "remove previous restored volume {}",
+                previous_volume.display()
+            )
+        })?;
+    }
     fs::remove_dir_all(&restore_tmp)
         .with_context(|| format!("remove restore dir {}", restore_tmp.display()))?;
     Ok(())
