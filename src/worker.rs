@@ -590,20 +590,7 @@ async fn create_workspace_local(
         }),
     )
     .await?;
-    let create_args = CreateArgs {
-        name: workspace.sandbox_name.clone(),
-        replace: false,
-        cpus: workspace.cpus,
-        memory: u64::from(workspace.memory_mib),
-        rebuild_snapshot: false,
-        no_snapshot: false,
-    };
-    let mount = WorkspaceMount {
-        volume_name: workspace.volume_name.clone(),
-        volume_quota_mib: workspace.volume_quota_mib,
-        workspace_name: workspace.name.clone(),
-    };
-    if let Err(error) = create_sandbox(create_args, Some(mount)).await {
+    if let Err(error) = create_workspace_sandbox(workspace, false).await {
         api.update_workspace(&workspace.name, Some("create-failed"), None, false, false)
             .await?;
         api.event(
@@ -690,13 +677,64 @@ async fn ensure_workspace_running_local(
             )
             .await
         }
-        Err(error) => Err(error).with_context(|| {
-            format!(
-                "workspace {} has no sandbox {}; recreate it",
-                workspace.name, workspace.sandbox_name
+        Err(error) => {
+            api.event(
+                &workspace.name,
+                "sandbox_recreate_started",
+                "running",
+                "workspace sandbox missing; recreating it around existing volume",
+                json!({ "sandbox": workspace.sandbox_name, "volume": workspace.volume_name }),
             )
-        }),
+            .await?;
+            create_workspace_sandbox(workspace, false)
+                .await
+                .with_context(|| {
+                    format!(
+                        "workspace {} has no sandbox {}; failed to recreate it after: {error:#}",
+                        workspace.name, workspace.sandbox_name
+                    )
+                })?;
+            api.event(
+                &workspace.name,
+                "sandbox_recreated",
+                "succeeded",
+                "workspace sandbox recreated around existing volume",
+                json!({ "sandbox": workspace.sandbox_name, "volume": workspace.volume_name }),
+            )
+            .await?;
+            let handle = Sandbox::get(&workspace.sandbox_name)
+                .await
+                .with_context(|| format!("get recreated sandbox '{}'", workspace.sandbox_name))?;
+            handle.start_detached().await?;
+            api.update_workspace(&workspace.name, Some("running"), None, false, false)
+                .await?;
+            api.event(
+                &workspace.name,
+                "sandbox_started",
+                "succeeded",
+                "workspace sandbox started",
+                json!({ "sandbox": workspace.sandbox_name }),
+            )
+            .await
+        }
     }
+}
+
+async fn create_workspace_sandbox(workspace: &WorkspaceRecord, replace: bool) -> Result<()> {
+    let create_args = CreateArgs {
+        name: workspace.sandbox_name.clone(),
+        replace,
+        cpus: workspace.cpus,
+        memory: u64::from(workspace.memory_mib),
+        rebuild_snapshot: false,
+        no_snapshot: false,
+    };
+    let mount = WorkspaceMount {
+        volume_name: workspace.volume_name.clone(),
+        volume_quota_mib: workspace.volume_quota_mib,
+        workspace_name: workspace.name.clone(),
+    };
+    create_sandbox(create_args, Some(mount)).await
 }
 
 async fn workspace_running_sandbox_local(
