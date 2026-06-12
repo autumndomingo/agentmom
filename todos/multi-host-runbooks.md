@@ -58,14 +58,117 @@ journalctl -u agentmom-worker -n 300 --no-pager | rg backup
 
 Actions:
 
-- For restic/kopia failures, validate repository credentials outside Agent Mom.
-- For local tar fallback failures, verify free space under `/var/lib/agentmom`.
+- For restic failures, validate repository credentials outside Agent Mom.
+- Verify free space under `/var/lib/agentmom`.
 - Run one manual backup after fixing credentials or disk:
 
 ```sh
 mom workspace backup <workspace>
 mom workspace backups <workspace>
 ```
+
+## Catalog Backup And Restore Drill
+
+Impact: if the API host is lost, the central workspace/job/node catalog is only
+recoverable to the newest SQLite catalog backup.
+
+Checks:
+
+```sh
+mom db status
+systemctl status agentmom-catalog-backup.timer
+systemctl status agentmom-catalog-backup.service
+ls -lh /var/lib/agentmom/catalog-backups | tail
+```
+
+Actions:
+
+- Run an immediate catalog backup before risky API-host maintenance:
+
+```sh
+mom db backup --output /var/lib/agentmom/catalog-backups/fleet-manual-$(date -u +%Y%m%dT%H%M%SZ).db
+```
+
+- Drill restore into a temporary state dir instead of overwriting production:
+
+```sh
+latest="$(ls -1t /var/lib/agentmom/catalog-backups/fleet-*.db | head -1)"
+tmpdir="$(mktemp -d /var/lib/agentmom/catalog-restore-drill.XXXXXX)"
+cp "$latest" "$tmpdir/fleet.db"
+MOM_STATE_DIR="$tmpdir" mom db status
+rm -rf "$tmpdir"
+```
+
+- Do not restore over `/var/lib/agentmom/fleet.db` while `agentmom-api` is
+  running.
+
+## Monitoring And Alerts
+
+Impact: missed checks hide API downtime, dead workers, stuck queues, or backup
+regressions.
+
+Checks:
+
+```sh
+mom monitor check --api-url http://127.0.0.1:8080 --min-ready-nodes 1 --max-stale-nodes 0
+curl -fsS http://127.0.0.1:8080/metrics
+systemctl status agentmom-monitor-check.timer
+journalctl -u agentmom-monitor-check -n 100 --no-pager
+```
+
+Actions:
+
+- If a host is intentionally removed, retire it with `mom node retire <node>`
+  or raise the temporary stale-node threshold in Nix.
+- If queued-job age is high, inspect worker health and capacity before retrying
+  jobs.
+- If recent failed jobs exceed the threshold, inspect workspace events and
+  worker logs for the failing job kind.
+
+## Idle Stop And Wake
+
+Impact: idle stop preserves memory and cost, but cold wake must stay fast enough
+for interactive messages.
+
+Checks:
+
+```sh
+mom workspace inspect <workspace>
+mom workspace events <workspace> --since 2h
+journalctl -u agentmom-worker -n 300 --no-pager | rg 'idle|start|claim|job_available'
+```
+
+Actions:
+
+- User-triggered work should queue a job through the API; SSE is only the
+  low-latency nudge, and polling is the fallback.
+- If a stopped workspace does not wake, check `agentmom-worker` SSE reconnect
+  logs, then verify `POST /worker/claim` succeeds with the worker bearer token.
+- Do not lengthen polling to paper over SSE failures; fix SSE or worker auth
+  first.
+
+## Rolling Worker Update
+
+Impact: planned host maintenance should avoid new placements and preserve
+currently running work.
+
+Steps:
+
+```sh
+mom node cordon <node>
+mom node inspect <node>
+mom node drain <node>
+systemctl restart agentmom-worker
+mom node uncordon <node>
+mom node inspect <node>
+```
+
+Notes:
+
+- `cordon` stops new placements but lets assigned work continue.
+- `drain` stops job claims for the node; use it once current work is quiet.
+- `uncordon` sets the node back to ready but requires a fresh heartbeat before
+  scheduling resumes.
 
 ## Disk Pressure
 
@@ -99,7 +202,7 @@ journalctl -u agentmom-worker -n 200 --no-pager | rg 'proxy|auth|401|403'
 
 Actions:
 
-- Confirm production workspaces use `credential_mode = "proxy"`.
+- Confirm production workspaces use `credential_mode = "openrouter-proxy"`.
 - Confirm `credential_proxy_url` points at the proxy URL visible from the guest.
 - If a custom CA is configured, confirm it was written into the guest trust store.
 - Rotate worker/API bearer tokens through the configured token file, then restart

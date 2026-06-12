@@ -1,9 +1,42 @@
 use super::*;
 
+pub(crate) const FLEET_SCHEMA_VERSION: i64 = 1;
+
+const NODE_HAS_CAPACITY_SQL: &str = r#"
+max_active_workspaces = 0 OR (
+    SELECT COUNT(*)
+    FROM workspaces
+    WHERE workspaces.node_id = nodes.node_id
+      AND workspaces.desired_state = 'running'
+) < max_active_workspaces
+"#;
+
+fn ready_node_query(select_clause: &str, extra_where: &str, order_limit: &str) -> String {
+    format!(
+        r#"
+SELECT {select_clause}
+FROM nodes
+WHERE status = 'ready'
+  AND worker_url IS NOT NULL
+  AND last_seen_at >= ?1
+  {extra_where}
+  AND ({NODE_HAS_CAPACITY_SQL})
+{order_limit}
+"#
+    )
+}
+
 pub(crate) fn ensure_fleet_schema() -> Result<()> {
     let db = fleet_db()?;
+    let current = ensure_supported_schema_without_mutation(&db)?;
     db.execute_batch(
         r#"
+CREATE TABLE IF NOT EXISTS schema_version (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    version INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS workspaces (
     name TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
@@ -82,6 +115,66 @@ ON jobs (status, node_id, created_at);
     )?;
     add_column_if_missing(&db, "workspaces", "node_id", "TEXT")?;
     add_column_if_missing(&db, "nodes", "worker_url", "TEXT")?;
+    migrate_fleet_schema(&db, current)?;
+    Ok(())
+}
+
+fn migrate_fleet_schema(db: &Connection, current: i64) -> Result<()> {
+    match current {
+        0 => set_schema_version(db, FLEET_SCHEMA_VERSION),
+        FLEET_SCHEMA_VERSION => Ok(()),
+        other => bail!("unsupported fleet.db schema version {other}"),
+    }
+}
+
+fn ensure_supported_schema_without_mutation(db: &Connection) -> Result<i64> {
+    let current = read_schema_version_without_mutation(db)?;
+    if current > FLEET_SCHEMA_VERSION {
+        bail!(
+            "fleet.db schema version {current} is newer than this binary supports ({FLEET_SCHEMA_VERSION})"
+        );
+    }
+    if current != 0 && current != FLEET_SCHEMA_VERSION {
+        bail!("unsupported fleet.db schema version {current}");
+    }
+    Ok(current)
+}
+
+pub(crate) fn current_fleet_schema_version() -> Result<i64> {
+    let db = open_existing_fleet_db(true)?;
+    read_schema_version_without_mutation(&db)
+}
+
+fn read_schema_version_without_mutation(db: &Connection) -> Result<i64> {
+    let has_table = db.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'",
+        [],
+        |row| row.get::<_, i64>(0),
+    )? > 0;
+    if !has_table {
+        return Ok(0);
+    }
+    db.query_row(
+        "SELECT version FROM schema_version WHERE id = 1",
+        [],
+        |row| row.get(0),
+    )
+    .optional()
+    .map(|version| version.unwrap_or(0))
+    .map_err(Into::into)
+}
+
+fn set_schema_version(db: &Connection, version: i64) -> Result<()> {
+    db.execute(
+        r#"
+INSERT INTO schema_version (id, version, updated_at)
+VALUES (1, ?1, ?2)
+ON CONFLICT(id) DO UPDATE SET
+    version = excluded.version,
+    updated_at = excluded.updated_at
+"#,
+        params![version, now_epoch()?],
+    )?;
     Ok(())
 }
 
@@ -558,23 +651,8 @@ pub(crate) fn select_ready_node(requested: Option<&str>) -> Result<String> {
     let db = fleet_db()?;
     if let Some(node) = requested {
         let exists = db.query_row(
-            r#"
-SELECT COUNT(*)
-FROM nodes
-WHERE node_id = ?1
-  AND status = 'ready'
-  AND worker_url IS NOT NULL
-  AND last_seen_at >= ?2
-  AND (
-      max_active_workspaces = 0 OR (
-          SELECT COUNT(*)
-          FROM workspaces
-          WHERE workspaces.node_id = nodes.node_id
-            AND workspaces.desired_state = 'running'
-      ) < max_active_workspaces
-  )
-"#,
-            params![node, stale_cutoff],
+            &ready_node_query("COUNT(*)", "AND node_id = ?2", ""),
+            params![stale_cutoff, node],
             |row| row.get::<_, i64>(0),
         )? > 0;
         if !exists {
@@ -583,28 +661,109 @@ WHERE node_id = ?1
         return Ok(node.to_string());
     }
     db.query_row(
-        r#"
-SELECT node_id
-FROM nodes
-WHERE status = 'ready'
-  AND worker_url IS NOT NULL
-  AND last_seen_at >= ?1
-  AND (
-      max_active_workspaces = 0 OR (
-          SELECT COUNT(*)
-          FROM workspaces
-          WHERE workspaces.node_id = nodes.node_id
-            AND workspaces.desired_state = 'running'
-      ) < max_active_workspaces
-  )
-ORDER BY last_seen_at DESC
-LIMIT 1
-"#,
+        &ready_node_query("node_id", "", "ORDER BY last_seen_at DESC\nLIMIT 1"),
         params![stale_cutoff],
         |row| row.get(0),
     )
     .optional()?
     .ok_or_else(|| anyhow!("no ready worker nodes are registered"))
+}
+
+pub(crate) fn node_all() -> Result<Vec<NodeRecord>> {
+    ensure_fleet_schema()?;
+    let db = fleet_db()?;
+    let mut stmt = db.prepare(
+        r#"
+SELECT node_id, worker_url, cpus, memory_mib, max_active_workspaces,
+       disk_reserve_mib, last_seen_at, status
+FROM nodes
+ORDER BY node_id
+"#,
+    )?;
+    Ok(stmt
+        .query_map([], node_from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+pub(crate) fn node_get(node: &str) -> Result<NodeRecord> {
+    ensure_fleet_schema()?;
+    let db = fleet_db()?;
+    db.query_row(
+        r#"
+SELECT node_id, worker_url, cpus, memory_mib, max_active_workspaces,
+       disk_reserve_mib, last_seen_at, status
+FROM nodes
+WHERE node_id = ?1
+"#,
+        params![node],
+        node_from_row,
+    )
+    .optional()?
+    .ok_or_else(|| anyhow!("node not found: {node}"))
+}
+
+pub(crate) fn node_set_status(node: &str, status: &str) -> Result<()> {
+    if !matches!(
+        status,
+        "ready" | "cordoned" | "draining" | "maintenance" | "retired"
+    ) {
+        bail!("invalid node status: {status}");
+    }
+    ensure_fleet_schema()?;
+    let db = fleet_db()?;
+    let changed = if status == "ready" {
+        db.execute(
+            "UPDATE nodes SET status = ?2, last_seen_at = 0 WHERE node_id = ?1",
+            params![node, status],
+        )?
+    } else {
+        db.execute(
+            "UPDATE nodes SET status = ?2 WHERE node_id = ?1",
+            params![node, status],
+        )?
+    };
+    if changed == 0 {
+        bail!("node not found: {node}");
+    }
+    Ok(())
+}
+
+pub(crate) fn node_allows_worker_reports(node: &str) -> Result<bool> {
+    node_has_status(node, &["ready", "cordoned", "draining"])
+}
+
+pub(crate) fn node_allows_worker_claims(node: &str) -> Result<bool> {
+    node_has_status(node, &["ready", "cordoned"])
+}
+
+fn node_has_status(node: &str, allowed: &[&str]) -> Result<bool> {
+    ensure_fleet_schema()?;
+    let db = fleet_db()?;
+    let status: Option<String> = db
+        .query_row(
+            "SELECT status FROM nodes WHERE node_id = ?1",
+            params![node],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(status.is_some_and(|status| allowed.iter().any(|allowed| *allowed == status)))
+}
+
+fn node_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<NodeRecord> {
+    let cpus: i64 = row.get(2)?;
+    let memory_mib: i64 = row.get(3)?;
+    let max_active_workspaces: i64 = row.get(4)?;
+    let disk_reserve_mib: i64 = row.get(5)?;
+    Ok(NodeRecord {
+        node_id: row.get(0)?,
+        worker_url: row.get(1)?,
+        cpus: cpus as u32,
+        memory_mib: memory_mib as u64,
+        max_active_workspaces: max_active_workspaces as u32,
+        disk_reserve_mib: disk_reserve_mib as u64,
+        last_seen_at: row.get(6)?,
+        status: row.get(7)?,
+    })
 }
 
 pub(crate) fn job_get(id: &str) -> Result<JobRecord> {
@@ -637,6 +796,11 @@ WHERE id = (
     SELECT id
     FROM jobs
     WHERE status = 'queued' AND node_id = ?1
+      AND EXISTS (
+          SELECT 1 FROM nodes
+          WHERE nodes.node_id = ?1
+            AND nodes.status IN ('ready', 'cordoned')
+      )
     ORDER BY created_at ASC
     LIMIT 1
 )
@@ -720,7 +884,7 @@ ON CONFLICT(node_id) DO UPDATE SET
     disk_reserve_mib = excluded.disk_reserve_mib,
     last_seen_at = excluded.last_seen_at,
     status = CASE
-        WHEN nodes.status IN ('offline', 'disabled', 'quarantined') THEN nodes.status
+        WHEN nodes.status IN ('offline', 'disabled', 'quarantined', 'cordoned', 'draining', 'maintenance', 'retired') THEN nodes.status
         ELSE excluded.status
     END
 "#,
@@ -762,17 +926,6 @@ pub(crate) fn node_worker_url(node: &str) -> Result<Option<String>> {
         validate_worker_url(url)?;
     }
     Ok(url)
-}
-
-pub(crate) fn node_is_ready(node: &str) -> Result<bool> {
-    ensure_fleet_schema()?;
-    let db = fleet_db()?;
-    let count: i64 = db.query_row(
-        "SELECT COUNT(*) FROM nodes WHERE node_id = ?1 AND status = 'ready'",
-        params![node],
-        |row| row.get(0),
-    )?;
-    Ok(count > 0)
 }
 
 fn validate_worker_url(worker_url: &str) -> Result<()> {
@@ -843,6 +996,97 @@ pub(crate) fn job_counts() -> Result<Vec<(String, i64)>> {
         .collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+pub(crate) fn workspace_status_counts() -> Result<Vec<(String, i64)>> {
+    ensure_fleet_schema()?;
+    let db = fleet_db()?;
+    let mut stmt = db.prepare("SELECT status, COUNT(*) FROM workspaces GROUP BY status")?;
+    Ok(stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+pub(crate) fn node_status_counts() -> Result<Vec<(String, i64)>> {
+    ensure_fleet_schema()?;
+    let db = fleet_db()?;
+    let mut stmt = db.prepare("SELECT status, COUNT(*) FROM nodes GROUP BY status")?;
+    Ok(stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+pub(crate) fn stale_node_count(stale_cutoff: i64) -> Result<i64> {
+    ensure_fleet_schema()?;
+    let db = fleet_db()?;
+    Ok(db.query_row(
+        "SELECT COUNT(*) FROM nodes WHERE status != 'retired' AND last_seen_at < ?1",
+        params![stale_cutoff],
+        |row| row.get(0),
+    )?)
+}
+
+pub(crate) fn oldest_queued_job_age(now: i64) -> Result<i64> {
+    ensure_fleet_schema()?;
+    let db = fleet_db()?;
+    let created_at = db
+        .query_row(
+            "SELECT MIN(created_at) FROM jobs WHERE status = 'queued'",
+            [],
+            |row| row.get::<_, Option<i64>>(0),
+        )?
+        .unwrap_or(now);
+    Ok(now.saturating_sub(created_at))
+}
+
+#[derive(Debug)]
+pub(crate) struct MonitorSnapshot {
+    pub(crate) ready_nodes: i64,
+    pub(crate) stale_nodes: i64,
+    pub(crate) oldest_queued_job_age: i64,
+    pub(crate) recent_failed_jobs: i64,
+}
+
+pub(crate) fn monitor_snapshot(
+    stale_cutoff: i64,
+    now: i64,
+    failed_since: i64,
+) -> Result<MonitorSnapshot> {
+    let db = open_existing_fleet_db(true)?;
+    let ready_nodes = db.query_row(
+        r#"
+SELECT COUNT(*)
+FROM nodes
+WHERE status = 'ready'
+  AND worker_url IS NOT NULL
+  AND last_seen_at >= ?1
+"#,
+        params![stale_cutoff],
+        |row| row.get(0),
+    )?;
+    let stale_nodes = db.query_row(
+        "SELECT COUNT(*) FROM nodes WHERE status != 'retired' AND last_seen_at < ?1",
+        params![stale_cutoff],
+        |row| row.get(0),
+    )?;
+    let oldest_created_at = db
+        .query_row(
+            "SELECT MIN(created_at) FROM jobs WHERE status = 'queued'",
+            [],
+            |row| row.get::<_, Option<i64>>(0),
+        )?
+        .unwrap_or(now);
+    let recent_failed_jobs = db.query_row(
+        "SELECT COUNT(*) FROM jobs WHERE status = 'failed' AND updated_at >= ?1",
+        params![failed_since],
+        |row| row.get(0),
+    )?;
+    Ok(MonitorSnapshot {
+        ready_nodes,
+        stale_nodes,
+        oldest_queued_job_age: now.saturating_sub(oldest_created_at),
+        recent_failed_jobs,
+    })
+}
+
 pub(crate) fn backup_count() -> Result<i64> {
     ensure_fleet_schema()?;
     let db = fleet_db()?;
@@ -882,10 +1126,59 @@ pub(crate) fn backup_due(workspace: &WorkspaceRecord, now: i64) -> bool {
 pub(crate) fn fleet_db() -> Result<Connection> {
     let dir = fleet_state_dir()?;
     fs::create_dir_all(&dir)?;
-    let db = Connection::open(dir.join("fleet.db"))?;
+    let db = Connection::open(fleet_db_path()?)?;
+    ensure_supported_schema_without_mutation(&db)?;
     db.pragma_update(None, "journal_mode", "WAL")?;
     db.pragma_update(None, "foreign_keys", "ON")?;
     Ok(db)
+}
+
+fn open_existing_fleet_db(read_only: bool) -> Result<Connection> {
+    let path = fleet_db_path()?;
+    if !path.exists() {
+        bail!(
+            "fleet catalog does not exist at {}; start mom api or set MOM_STATE_DIR to the deployed state directory",
+            path.display()
+        );
+    }
+    let db = if read_only {
+        Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?
+    } else {
+        Connection::open(path)?
+    };
+    ensure_supported_schema_without_mutation(&db)?;
+    Ok(db)
+}
+
+fn fleet_db_path() -> Result<PathBuf> {
+    Ok(fleet_state_dir()?.join("fleet.db"))
+}
+
+pub(crate) fn backup_fleet_catalog(output: Option<&Path>) -> Result<PathBuf> {
+    let path = match output {
+        Some(path) => expand_tilde(&path.to_path_buf())?,
+        None => default_catalog_backup_path()?,
+    };
+    if path.exists() {
+        bail!(
+            "refusing to overwrite existing catalog backup: {}",
+            path.display()
+        );
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create catalog backup directory {}", parent.display()))?;
+    }
+    let db = open_existing_fleet_db(false)?;
+    let path_sql = path.to_string_lossy().into_owned();
+    db.execute("VACUUM main INTO ?1", params![path_sql])?;
+    Ok(path)
+}
+
+fn default_catalog_backup_path() -> Result<PathBuf> {
+    Ok(fleet_state_dir()?
+        .join("catalog-backups")
+        .join(format!("fleet-{}.db", now_epoch()?)))
 }
 
 fn add_column_if_missing(

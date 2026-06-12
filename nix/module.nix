@@ -172,6 +172,92 @@ in
       description = "Agent Mom config.json containing Codex/Hermes seed configuration.";
     };
 
+    catalogBackup = {
+      enable = lib.mkEnableOption "scheduled Agent Mom SQLite catalog backups";
+
+      outputDir = lib.mkOption {
+        type = lib.types.str;
+        default = "${cfg.stateDir}/catalog-backups";
+        description = "Directory for SQLite catalog backup files created by mom db backup.";
+      };
+
+      onCalendar = lib.mkOption {
+        type = lib.types.str;
+        default = "*:0/15";
+        description = "systemd OnCalendar expression for catalog backups.";
+      };
+
+      randomizedDelaySec = lib.mkOption {
+        type = lib.types.str;
+        default = "2m";
+        description = "Randomized delay for the catalog backup timer.";
+      };
+
+      persistent = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = "Whether missed catalog backup timer runs should execute after boot.";
+      };
+    };
+
+    monitorCheck = {
+      enable = lib.mkEnableOption "scheduled lightweight Agent Mom health checks";
+
+      apiUrl = lib.mkOption {
+        type = lib.types.str;
+        default = "http://127.0.0.1:8080";
+        description = "Agent Mom API URL checked through /health/ready.";
+      };
+
+      onCalendar = lib.mkOption {
+        type = lib.types.str;
+        default = "*:0/1";
+        description = "systemd OnCalendar expression for monitor checks.";
+      };
+
+      randomizedDelaySec = lib.mkOption {
+        type = lib.types.str;
+        default = "10s";
+        description = "Randomized delay for the monitor check timer.";
+      };
+
+      minReadyNodes = lib.mkOption {
+        type = lib.types.ints.unsigned;
+        default = 1;
+        description = "Minimum fresh ready nodes required before the monitor check fails.";
+      };
+
+      maxStaleNodes = lib.mkOption {
+        type = lib.types.ints.unsigned;
+        default = 0;
+        description = "Maximum stale node count allowed before the monitor check fails.";
+      };
+
+      maxQueuedAgeSeconds = lib.mkOption {
+        type = lib.types.ints.unsigned;
+        default = 300;
+        description = "Maximum age of the oldest queued job before the monitor check fails.";
+      };
+
+      failedJobLookbackSeconds = lib.mkOption {
+        type = lib.types.ints.unsigned;
+        default = 900;
+        description = "Lookback window for recent failed job alerting.";
+      };
+
+      maxRecentFailedJobs = lib.mkOption {
+        type = lib.types.ints.unsigned;
+        default = 0;
+        description = "Maximum failed jobs allowed in the lookback window before the monitor check fails.";
+      };
+
+      onFailureUnits = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ ];
+        description = "Optional systemd units triggered by OnFailure when monitor checks fail.";
+      };
+    };
+
     capacity = {
       cpus = lib.mkOption {
         type = lib.types.ints.unsigned;
@@ -413,6 +499,8 @@ in
     systemd.tmpfiles.rules = [
       "d ${cfg.stateDir} 0750 ${cfg.user} ${cfg.group} - -"
       "d ${cfg.microsandboxHome} 0750 ${cfg.user} ${cfg.group} - -"
+    ] ++ lib.optionals cfg.catalogBackup.enable [
+      "d ${cfg.catalogBackup.outputDir} 0750 ${cfg.user} ${cfg.group} - -"
     ] ++ lib.optionals cfg.credentialProxy.enable [
       "d ${cfg.credentialProxy.stateDir} 0755 root root - -"
     ];
@@ -433,6 +521,14 @@ in
       {
         assertion = !(cfg.api.enable || cfg.worker.enable) || cfg.workerTokenFile != null;
         message = "services.agentmom.workerTokenFile is required when the Agent Mom API or worker service is enabled.";
+      }
+      {
+        assertion = !cfg.catalogBackup.enable || cfg.api.enable;
+        message = "services.agentmom.api.enable is required when services.agentmom.catalogBackup.enable is true.";
+      }
+      {
+        assertion = !cfg.monitorCheck.enable || cfg.api.enable;
+        message = "services.agentmom.api.enable is required when services.agentmom.monitorCheck.enable is true.";
       }
     ];
 
@@ -485,6 +581,73 @@ in
         WorkingDirectory = cfg.stateDir;
       } // lib.optionalAttrs (cfg.worker.resticEnvFile != null) {
         EnvironmentFile = cfg.worker.resticEnvFile;
+      };
+    };
+
+    systemd.services.agentmom-catalog-backup = lib.mkIf cfg.catalogBackup.enable {
+      description = "Agent Mom SQLite catalog backup";
+      after = [ "agentmom-api.service" ];
+      path = commonPath;
+      environment = commonEnvironment;
+      serviceConfig = {
+        Type = "oneshot";
+        User = cfg.user;
+        Group = cfg.group;
+        WorkingDirectory = cfg.stateDir;
+        ExecStart = pkgs.writeShellScript "agentmom-catalog-backup" ''
+          set -eu
+          install -d -m 0750 ${lib.escapeShellArg cfg.catalogBackup.outputDir}
+          ts="$(date -u +%Y%m%dT%H%M%SZ)"
+          exec ${cfg.package}/bin/mom db backup --output "${cfg.catalogBackup.outputDir}/fleet-$ts.db"
+        '';
+      };
+    };
+
+    systemd.timers.agentmom-catalog-backup = lib.mkIf cfg.catalogBackup.enable {
+      description = "Agent Mom SQLite catalog backup timer";
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnCalendar = cfg.catalogBackup.onCalendar;
+        RandomizedDelaySec = cfg.catalogBackup.randomizedDelaySec;
+        Persistent = cfg.catalogBackup.persistent;
+        Unit = "agentmom-catalog-backup.service";
+      };
+    };
+
+    systemd.services.agentmom-monitor-check = lib.mkIf cfg.monitorCheck.enable {
+      description = "Agent Mom lightweight monitor check";
+      after = [ "agentmom-api.service" ];
+      path = commonPath;
+      environment = commonEnvironment;
+      unitConfig = lib.optionalAttrs (cfg.monitorCheck.onFailureUnits != [ ]) {
+        OnFailure = cfg.monitorCheck.onFailureUnits;
+      };
+      serviceConfig = {
+        Type = "oneshot";
+        User = cfg.user;
+        Group = cfg.group;
+        WorkingDirectory = cfg.stateDir;
+        ExecStart = pkgs.writeShellScript "agentmom-monitor-check" ''
+          set -eu
+          exec ${cfg.package}/bin/mom monitor check \
+            --api-url ${lib.escapeShellArg cfg.monitorCheck.apiUrl} \
+            --min-ready-nodes ${toString cfg.monitorCheck.minReadyNodes} \
+            --max-stale-nodes ${toString cfg.monitorCheck.maxStaleNodes} \
+            --max-queued-age-secs ${toString cfg.monitorCheck.maxQueuedAgeSeconds} \
+            --failed-job-lookback-secs ${toString cfg.monitorCheck.failedJobLookbackSeconds} \
+            --max-recent-failed-jobs ${toString cfg.monitorCheck.maxRecentFailedJobs}
+        '';
+      };
+    };
+
+    systemd.timers.agentmom-monitor-check = lib.mkIf cfg.monitorCheck.enable {
+      description = "Agent Mom lightweight monitor check timer";
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnCalendar = cfg.monitorCheck.onCalendar;
+        RandomizedDelaySec = cfg.monitorCheck.randomizedDelaySec;
+        Persistent = true;
+        Unit = "agentmom-monitor-check.service";
       };
     };
 

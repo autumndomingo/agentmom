@@ -477,6 +477,111 @@ async fn offline_node_is_not_reenabled_by_stale_heartbeat() -> Result<()> {
 }
 
 #[tokio::test]
+async fn node_lifecycle_controls_placement_and_claims() -> Result<()> {
+    let fleet = TestFleet::start().await?;
+    let node = spawn_worker("node-a", &fleet.api_url)?;
+    wait_for_node(fleet.api_state.path(), "node-a").await?;
+
+    let create = create_workspace(&fleet.api_url, "lifecycle", "node-a", 0).await?;
+    wait_for_job_status(&fleet.api_url, &create, "succeeded").await?;
+
+    run_mom(fleet.api_state.path(), &["node", "cordon", "node-a"])?;
+    assert_eq!(node_status(fleet.api_state.path(), "node-a")?, "cordoned");
+    let response = reqwest::Client::new()
+        .post(format!("{}/api/workspaces", fleet.api_url))
+        .json(&json!({
+            "name": "blocked-on-cordon",
+            "node_id": "node-a"
+        }))
+        .send()
+        .await?;
+    assert!(
+        !response.status().is_success(),
+        "cordoned node should not receive new placements"
+    );
+
+    let stop = create_job(&fleet.api_url, "lifecycle", "stop").await?;
+    wait_for_job_status(&fleet.api_url, &stop, "succeeded").await?;
+    assert_eq!(
+        std::fs::read_to_string(node.msb_home.path().join("fake/lifecycle/state"))?,
+        "stopped",
+        "cordoned node should still claim assigned workspace jobs"
+    );
+
+    run_mom(fleet.api_state.path(), &["node", "drain", "node-a"])?;
+    assert_eq!(node_status(fleet.api_state.path(), "node-a")?, "draining");
+    let start = create_job(&fleet.api_url, "lifecycle", "start").await?;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(job_status(&fleet.api_url, &start).await?, "queued");
+
+    run_mom(fleet.api_state.path(), &["node", "uncordon", "node-a"])?;
+    assert_eq!(node_status(fleet.api_state.path(), "node-a")?, "ready");
+    wait_for_job_status(&fleet.api_url, &start, "succeeded").await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn catalog_backup_and_monitor_check_cover_deployed_catalog() -> Result<()> {
+    let fleet = TestFleet::start().await?;
+    let _node = spawn_worker("node-a", &fleet.api_url)?;
+    wait_for_node(fleet.api_state.path(), "node-a").await?;
+
+    run_mom(fleet.api_state.path(), &["db", "status"])?;
+    run_mom(
+        fleet.api_state.path(),
+        &[
+            "monitor",
+            "check",
+            "--api-url",
+            &fleet.api_url,
+            "--min-ready-nodes",
+            "1",
+        ],
+    )?;
+
+    let backup_dir = tempfile::tempdir()?;
+    let backup_path = backup_dir.path().join("fleet-backup.db");
+    run_mom(
+        fleet.api_state.path(),
+        &[
+            "db",
+            "backup",
+            "--output",
+            backup_path.to_str().ok_or_else(|| anyhow!("utf-8 path"))?,
+        ],
+    )?;
+    assert!(backup_path.exists());
+    assert!(
+        run_mom_status(
+            fleet.api_state.path(),
+            &[
+                "db",
+                "backup",
+                "--output",
+                backup_path.to_str().ok_or_else(|| anyhow!("utf-8 path"))?,
+            ],
+        )?
+        .code()
+        .is_some_and(|code| code != 0),
+        "catalog backup should refuse to overwrite an existing file"
+    );
+
+    run_mom(fleet.api_state.path(), &["node", "drain", "node-a"])?;
+    assert!(
+        run_mom_status(
+            fleet.api_state.path(),
+            &["monitor", "check", "--min-ready-nodes", "1"]
+        )?
+        .code()
+        .is_some_and(|code| code != 0),
+        "monitor check should fail when no fresh ready nodes exist"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn worker_register_rejects_unspecified_worker_url() -> Result<()> {
     let fleet = TestFleet::start().await?;
     let response = reqwest::Client::new()
@@ -683,16 +788,35 @@ fn spawn_worker_with_options(
 }
 
 fn run_recover_host(api_state: &Path, from: &str, to: &str) -> Result<()> {
-    let status = Command::new(MOM_BIN)
-        .args(["fleet", "recover-host", "--from", from, "--to", to])
-        .env("MOM_STATE_DIR", api_state)
-        .env("MOM_WORKER_TOKEN", WORKER_TOKEN)
-        .status()
-        .context("run fleet recover-host")?;
+    let status = run_mom_status(
+        api_state,
+        &["fleet", "recover-host", "--from", from, "--to", to],
+    )
+    .context("run fleet recover-host")?;
     if !status.success() {
         bail!("fleet recover-host exited with {status}");
     }
     Ok(())
+}
+
+fn run_mom(api_state: &Path, args: &[&str]) -> Result<()> {
+    let status =
+        run_mom_status(api_state, args).with_context(|| format!("run mom {}", args.join(" ")))?;
+    if !status.success() {
+        bail!("mom {} exited with {status}", args.join(" "));
+    }
+    Ok(())
+}
+
+fn run_mom_status(api_state: &Path, args: &[&str]) -> Result<std::process::ExitStatus> {
+    Command::new(MOM_BIN)
+        .args(args)
+        .env("MOM_STATE_DIR", api_state)
+        .env("MOM_WORKER_TOKEN", WORKER_TOKEN)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .with_context(|| format!("run mom {}", args.join(" ")))
 }
 
 async fn create_workspace(
@@ -893,15 +1017,26 @@ fn backup_count(api_state: &Path, workspace: &str) -> Result<i64> {
 
 async fn wait_for_job_status(api_url: &str, job_id: &str, status: &str) -> Result<()> {
     wait_until(&format!("job {job_id} status {status}"), || async {
-        let Ok(response) = reqwest::get(format!("{api_url}/api/jobs/{job_id}")).await else {
-            return false;
-        };
-        let Ok(value) = response.json::<Value>().await else {
-            return false;
-        };
-        value.pointer("/job/status").and_then(Value::as_str) == Some(status)
+        job_status(api_url, job_id)
+            .await
+            .ok()
+            .as_deref()
+            .is_some_and(|actual| actual == status)
     })
     .await
+}
+
+async fn job_status(api_url: &str, job_id: &str) -> Result<String> {
+    let value = reqwest::get(format!("{api_url}/api/jobs/{job_id}"))
+        .await?
+        .error_for_status()?
+        .json::<Value>()
+        .await?;
+    value
+        .pointer("/job/status")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .ok_or_else(|| anyhow!("job response missing status: {value}"))
 }
 
 async fn wait_for_workspace_status(api_url: &str, name: &str, status: &str) -> Result<()> {

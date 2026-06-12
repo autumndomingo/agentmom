@@ -24,7 +24,7 @@ use clap::{Args, Parser, Subcommand};
 use microsandbox::{
     MicrosandboxError, Sandbox, Snapshot, SnapshotDestination, sandbox::SandboxStatus,
 };
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::process::Command as TokioCommand;
@@ -125,6 +125,16 @@ enum Command {
         #[command(subcommand)]
         command: FleetCommand,
     },
+    /// Inspect and maintain the central fleet catalog.
+    Db {
+        #[command(subcommand)]
+        command: DbCommand,
+    },
+    /// Run lightweight health checks for alerting.
+    Monitor {
+        #[command(subcommand)]
+        command: MonitorCommand,
+    },
     /// Run the central HTTP API and SSE notification service.
     Api(ApiArgs),
     /// Run a worker that claims jobs from a central API.
@@ -224,6 +234,30 @@ enum WorkspaceCommand {
 enum NodeCommand {
     /// Show local worker node status.
     Status,
+    /// List registered fleet nodes from the central catalog.
+    List,
+    /// Show a registered fleet node from the central catalog.
+    Inspect { node: String },
+    /// Prevent new workspace placement on a node while allowing existing work.
+    Cordon { node: String },
+    /// Prevent new placement and worker job claims on a node.
+    Drain { node: String },
+    /// Mark a drained node as intentionally removed from service.
+    Retire { node: String },
+    /// Return a cordoned or draining node to normal scheduling.
+    Uncordon { node: String },
+}
+
+#[derive(Debug, Subcommand)]
+enum DbCommand {
+    /// Show the local fleet catalog schema version.
+    Status,
+    /// Back up the SQLite fleet catalog with VACUUM INTO.
+    Backup {
+        /// Destination .db file. Defaults to MOM_STATE_DIR/catalog-backups/fleet-<epoch>.db.
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -279,6 +313,34 @@ struct ApiArgs {
     /// HTTP bind address for the API.
     #[arg(long, default_value = "127.0.0.1:8080", env = "MOM_API_BIND")]
     bind: String,
+}
+
+#[derive(Debug, Subcommand)]
+enum MonitorCommand {
+    /// Exit non-zero if the API/catalog looks unhealthy.
+    Check(MonitorCheckArgs),
+}
+
+#[derive(Debug, Args)]
+struct MonitorCheckArgs {
+    /// Optional API URL to check with /health/ready.
+    #[arg(long)]
+    api_url: Option<String>,
+    /// Minimum fresh ready nodes required.
+    #[arg(long, default_value_t = 1)]
+    min_ready_nodes: i64,
+    /// Maximum stale node count allowed.
+    #[arg(long, default_value_t = 0)]
+    max_stale_nodes: i64,
+    /// Maximum oldest queued job age before alerting.
+    #[arg(long, default_value_t = 300)]
+    max_queued_age_secs: i64,
+    /// Look back this many seconds for failed jobs.
+    #[arg(long, default_value_t = 900)]
+    failed_job_lookback_secs: i64,
+    /// Maximum failed jobs allowed in the lookback window.
+    #[arg(long, default_value_t = 0)]
+    max_recent_failed_jobs: i64,
 }
 
 #[derive(Debug, Args)]
@@ -365,6 +427,18 @@ struct NodePressure {
     allocated_memory_mib: u64,
     disk_available_mib: Option<u64>,
     capacity_ok: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct NodeRecord {
+    node_id: String,
+    worker_url: Option<String>,
+    cpus: u32,
+    memory_mib: u64,
+    max_active_workspaces: u32,
+    disk_reserve_mib: u64,
+    last_seen_at: i64,
+    status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -620,6 +694,8 @@ async fn main() -> Result<()> {
         Command::Workspace { command } => workspace_command(command).await,
         Command::Node { command } => node_command(command).await,
         Command::Fleet { command } => fleet_command(command).await,
+        Command::Db { command } => db_command(command),
+        Command::Monitor { command } => monitor_command(command).await,
         Command::Api(args) => api::api(args).await,
         Command::Worker(args) => worker::worker(args).await,
     }
@@ -689,7 +765,161 @@ async fn workspace_command(command: WorkspaceCommand) -> Result<()> {
 async fn node_command(command: NodeCommand) -> Result<()> {
     match command {
         NodeCommand::Status => node_status().await,
+        NodeCommand::List => node_list(),
+        NodeCommand::Inspect { node } => node_inspect(&node),
+        NodeCommand::Cordon { node } => node_set_scheduling(&node, "cordoned"),
+        NodeCommand::Drain { node } => node_set_scheduling(&node, "draining"),
+        NodeCommand::Retire { node } => node_set_scheduling(&node, "retired"),
+        NodeCommand::Uncordon { node } => node_set_scheduling(&node, "ready"),
     }
+}
+
+fn node_list() -> Result<()> {
+    let nodes = node_all()?;
+    println!(
+        "{:<20} {:<10} {:<10} {:<8} {:<10} {:<8} {:<12} WORKER_URL",
+        "NODE", "STATUS", "ELIGIBLE", "CPUS", "MEM", "MAX", "LAST_SEEN"
+    );
+    for node in nodes {
+        let eligible = node_eligible(&node)?;
+        println!(
+            "{:<20} {:<10} {:<10} {:<8} {:<10} {:<8} {:<12} {}",
+            node.node_id,
+            node.status,
+            eligible,
+            node.cpus,
+            format!("{}M", node.memory_mib),
+            node.max_active_workspaces,
+            node.last_seen_at,
+            node.worker_url.as_deref().unwrap_or("-")
+        );
+    }
+    Ok(())
+}
+
+fn node_inspect(node: &str) -> Result<()> {
+    let node = node_get(node)?;
+    println!("Node: {}", node.node_id);
+    println!("Status: {}", node.status);
+    println!("Worker URL: {}", node.worker_url.as_deref().unwrap_or("-"));
+    println!("CPUs: {}", node.cpus);
+    println!("Memory: {} MiB", node.memory_mib);
+    println!("Max active workspaces: {}", node.max_active_workspaces);
+    println!("Disk reserve: {} MiB", node.disk_reserve_mib);
+    println!("Last seen: {}", node.last_seen_at);
+    println!("Eligible: {}", node_eligible(&node)?);
+    Ok(())
+}
+
+fn node_set_scheduling(node: &str, status: &str) -> Result<()> {
+    node_set_status(node, status)?;
+    println!("set node {node} status to {status}");
+    Ok(())
+}
+
+fn node_eligible(node: &NodeRecord) -> Result<&'static str> {
+    if node.status != "ready" || node.worker_url.is_none() {
+        return Ok("no");
+    }
+    let stale_cutoff =
+        now_epoch()?.saturating_sub(i64::try_from(env_u64("MOM_NODE_STALE_SECS", 60))?);
+    if node.last_seen_at < stale_cutoff {
+        return Ok("no");
+    }
+    Ok("yes")
+}
+
+fn db_command(command: DbCommand) -> Result<()> {
+    match command {
+        DbCommand::Status => {
+            let version = current_fleet_schema_version()?;
+            let db = fleet_state_dir()?.join("fleet.db");
+            println!("Catalog: {}", db.display());
+            println!("Schema version: {version}");
+            Ok(())
+        }
+        DbCommand::Backup { output } => {
+            let path = backup_fleet_catalog(output.as_deref())?;
+            println!("Backed up catalog to {}", path.display());
+            Ok(())
+        }
+    }
+}
+
+async fn monitor_command(command: MonitorCommand) -> Result<()> {
+    match command {
+        MonitorCommand::Check(args) => monitor_check(args).await,
+    }
+}
+
+async fn monitor_check(args: MonitorCheckArgs) -> Result<()> {
+    if args.min_ready_nodes < 0
+        || args.max_stale_nodes < 0
+        || args.max_queued_age_secs < 0
+        || args.failed_job_lookback_secs < 0
+        || args.max_recent_failed_jobs < 0
+    {
+        bail!("monitor thresholds must be non-negative");
+    }
+
+    let mut issues = Vec::new();
+    if let Some(api_url) = args.api_url.as_deref() {
+        let url = format!("{}/health/ready", api_url.trim_end_matches('/'));
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()?;
+        match client.get(&url).send().await {
+            Ok(response) if response.status().is_success() => {}
+            Ok(response) => issues.push(format!("api readiness returned {}", response.status())),
+            Err(error) => issues.push(format!("api readiness failed: {error:#}")),
+        }
+    }
+
+    let now = now_epoch()?;
+    let stale_cutoff = now.saturating_sub(i64::try_from(env_u64("MOM_NODE_STALE_SECS", 60))?);
+    let failed_since = now.saturating_sub(args.failed_job_lookback_secs);
+    let snapshot = monitor_snapshot(stale_cutoff, now, failed_since)?;
+
+    if snapshot.ready_nodes < args.min_ready_nodes {
+        issues.push(format!(
+            "ready nodes {} below minimum {}",
+            snapshot.ready_nodes, args.min_ready_nodes
+        ));
+    }
+    if snapshot.stale_nodes > args.max_stale_nodes {
+        issues.push(format!(
+            "stale nodes {} above maximum {}",
+            snapshot.stale_nodes, args.max_stale_nodes
+        ));
+    }
+    if snapshot.oldest_queued_job_age > args.max_queued_age_secs {
+        issues.push(format!(
+            "oldest queued job age {}s above maximum {}s",
+            snapshot.oldest_queued_job_age, args.max_queued_age_secs
+        ));
+    }
+    if snapshot.recent_failed_jobs > args.max_recent_failed_jobs {
+        issues.push(format!(
+            "failed jobs {} in last {}s above maximum {}",
+            snapshot.recent_failed_jobs, args.failed_job_lookback_secs, args.max_recent_failed_jobs
+        ));
+    }
+
+    if issues.is_empty() {
+        println!(
+            "monitor ok: ready_nodes={} stale_nodes={} oldest_queued_job_age_seconds={} recent_failed_jobs={}",
+            snapshot.ready_nodes,
+            snapshot.stale_nodes,
+            snapshot.oldest_queued_job_age,
+            snapshot.recent_failed_jobs
+        );
+        return Ok(());
+    }
+
+    for issue in &issues {
+        eprintln!("monitor alert: {issue}");
+    }
+    bail!("monitor check failed with {} issue(s)", issues.len())
 }
 
 async fn fleet_command(command: FleetCommand) -> Result<()> {

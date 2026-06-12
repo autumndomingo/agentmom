@@ -41,6 +41,14 @@ mom workspace backup alice
 mom workspace stop alice
 mom workspace rm alice --force
 mom node status
+mom node list
+mom node inspect pika-build
+mom node cordon pika-build
+mom node drain pika-build
+mom node uncordon pika-build
+mom db status
+mom db backup
+mom monitor check
 ```
 
 Run the worker against a local or central API:
@@ -75,6 +83,52 @@ cargo run --bin mom -- workspace list
 cargo run --bin mom -- api --bind 127.0.0.1:8080
 MOM_API_URL=http://127.0.0.1:8080 cargo run --bin mom -- worker --once
 ```
+
+## Fleet Operations
+
+The central API owns the fleet catalog at `MOM_STATE_DIR/fleet.db`. Workers own
+host-local microsandbox VMs and named volumes. If a worker host is lost, the
+central catalog still records workspace ownership and backup artifacts, but the
+host-local volume is recovered from restic rather than live-migrated.
+
+Use node lifecycle commands before planned host work:
+
+```sh
+mom node list
+mom node inspect mom-1
+mom node cordon mom-1    # stop new placements, keep assigned work running
+mom node drain mom-1     # stop new claims for assigned work
+mom node uncordon mom-1  # require a fresh heartbeat before scheduling resumes
+mom node retire mom-2    # intentionally removed host; excluded from stale checks
+```
+
+Use catalog backup commands on the API host:
+
+```sh
+mom db status
+mom db backup --output /var/lib/agentmom/catalog-backups/fleet-$(date -u +%Y%m%dT%H%M%SZ).db
+```
+
+`mom db backup` uses SQLite `VACUUM INTO`, refuses to overwrite existing files,
+and checks the fleet schema version before copying. It backs up the central
+catalog only; workspace volume data is backed up separately by restic jobs.
+
+`mom monitor check` is a small systemd-friendly health check:
+
+```sh
+mom monitor check \
+  --api-url http://127.0.0.1:8080 \
+  --min-ready-nodes 1 \
+  --max-stale-nodes 0 \
+  --max-queued-age-secs 300 \
+  --failed-job-lookback-secs 900 \
+  --max-recent-failed-jobs 0
+```
+
+It checks `/health/ready`, node freshness, ready-node count, queued-job age, and
+recent failed jobs. `/metrics` exposes the same operational surface for
+Prometheus-style scraping: workspace totals by status, job totals by status,
+node totals by status, stale node count, and oldest queued job age.
 
 ## Host Config
 
@@ -216,6 +270,18 @@ services.agentmom = {
     activeWorkspaces = 48;
     diskReserveMib = 102400;
   };
+
+  catalogBackup = {
+    enable = true;
+    onCalendar = "*:0/15";
+  };
+
+  monitorCheck = {
+    enable = true;
+    minReadyNodes = 1;
+    maxStaleNodes = 0;
+    maxQueuedAgeSeconds = 300;
+  };
 };
 ```
 
@@ -236,3 +302,33 @@ multi-host deployments.
 
 Worker endpoints require a bearer token through `workerTokenFile`,
 `MOM_WORKER_TOKEN`, or `MOM_WORKER_TOKEN_FILE`.
+
+## Real Fleet Tests
+
+`tests/real_fleet.rs` is ignored by default and intended for deployed-host
+smoke testing. Prefer an SSH tunnel to the API host so tests do not depend on
+public auth:
+
+```sh
+ssh -L 18080:127.0.0.1:8080 mom-ctrl -N
+```
+
+Then run read-only checks:
+
+```sh
+export AGENTMOM_REAL_API_URL=http://127.0.0.1:18080
+export AGENTMOM_REAL_WORKER_TOKEN="$(ssh mom-ctrl 'cat /run/agenix/agentmom-worker-token')"
+export AGENTMOM_REAL_NODE_A=mom-1
+just real-fleet-test
+```
+
+Workspace-creating and backup tests are opt-in because they touch real
+microsandbox state:
+
+```sh
+export AGENTMOM_REAL_ALLOW_CREATE=1
+export AGENTMOM_REAL_ALLOW_BACKUP=1
+export AGENTMOM_REAL_ALLOW_CATALOG_BACKUP=1
+export AGENTMOM_REAL_API_SSH_HOST=mom-ctrl
+just real-fleet-test
+```

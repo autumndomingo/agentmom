@@ -59,6 +59,8 @@ Out of scope for this phase:
   - [~] Emit structured logs with workspace, node, sandbox, job, and backup IDs.
   - [x] Add health endpoints: `/health/live` and `/health/ready`.
   - [x] Add Prometheus metrics endpoint.
+  - [x] Expand metrics for node status, stale nodes, workspace status, and queued-job age.
+  - [x] Add lightweight monitor checks suitable for a systemd timer.
   - [x] Add NixOS module options for bind addresses and log format.
 
 - [~] Integrate iron-proxy for credentials and egress.
@@ -105,7 +107,9 @@ Out of scope for this phase:
   - [ ] Alert/report when backup age exceeds RPO.
   - [x] Add `mom workspace backups`.
   - [x] Add `mom workspace restore`.
-  - [ ] Add restore drill command for random workspace verification.
+  - [x] Add explicit SQLite catalog backup/status commands.
+  - [x] Add NixOS timer for catalog backups on the API host.
+  - [~] Add restore drill command for random workspace verification.
 
 - [~] Add deployment flow for multiple systemd hosts.
   - [x] Document host bootstrap for `pika-build` style NixOS boxes.
@@ -115,6 +119,17 @@ Out of scope for this phase:
   - [x] Serve the embedded UI from the API process; do not run a separate UI daemon.
   - [x] Keep per-host worker config small: node ID, API URL, state dirs, MSB_HOME, proxy config.
   - [x] Add runbooks for worker down, API down, backup failing, disk pressure, and proxy blocked request spikes.
+
+- [~] Production ops integration from `worktrees/codex-production-ops`.
+  - [x] Keep current `master` worker trust boundaries: ready-node worker gates and worker URL allowlist.
+  - [x] Do not take the older ops-worktree flake packaging changes; current `master` already has newer hermetic microsandbox packaging.
+  - [x] Integrate catalog schema/version guard and `mom db backup`.
+  - [x] Integrate monitor checks and richer `/metrics`.
+  - [x] Integrate node list/inspect/cordon/drain/retire/uncordon commands without weakening offline/quarantine behavior.
+  - [x] Integrate ignored real-host test harness.
+  - [x] Integrate runbook updates for catalog backup, monitoring, idle wake, and rolling updates.
+  - [x] Defer managed skills until the core fleet safety work lands.
+  - [x] Defer API move/recover endpoints until restore ownership transfer is fully transactional.
 
 - [ ] Preserve k3s migration path.
   - [x] Keep all runtime config available via env vars/files.
@@ -147,8 +162,10 @@ Out of scope for this phase:
 - `mom workspace refresh-config <workspace>` re-applies Codex/Hermes/proxy config to an existing workspace without rebuilding the base snapshot.
 - Current API smoke tests cover `/health/live`, `/health/ready`, `/metrics`, workspace job creation, worker registration, transactional claim, and SSE `job_available` notification.
 - Worker endpoints support shared bearer-token auth through `MOM_WORKER_TOKEN` or `MOM_WORKER_TOKEN_FILE`; local smoke tests cover 401 without the token and success with the token.
-- SSH deployment to `mom-1` uses the Tailscale address `100.81.250.67`. SSH to `mom-2` currently works through its current Tailscale address from `tailscale status`.
-- Current remote verification: `mom-ctrl` has active `agentmom-api`, Caddy, and Tailscale; `mom-1` and `mom-2` have active `agentmom-worker` and inactive local API/Caddy. The control DB shows both nodes `ready`.
+- SSH deployment to `mom-1` uses the Tailscale address `100.81.250.67`. `mom-2` is currently unreachable by the deploy script and is marked offline in the control catalog.
+- Current remote verification: `mom-ctrl` has active `agentmom-api`, Caddy, and Tailscale; `mom-1` has active `agentmom-worker` and credential proxy. The control DB shows `mom-1` ready and `mom-2` offline.
 - Step 6 remote QA created one workspace per worker, stopped both, restarted both, backed both up to Cloudflare R2 via restic, and stopped both again. All create/start/stop/backup jobs succeeded and were claimed by the expected worker.
 - `~/configs` now references Agent Mom as `path:/Users/justin/code/agentmom-fleet`; the accidental `~/configs/agentmom` source mirror has been removed. The `pika-build` deploy path evaluates locally and copies Nix store paths to the remote build/target host rather than rsyncing application source into configs.
 - Operational runbooks live in `todos/multi-host-runbooks.md`.
+- Production ops integration pass should prioritize operator safety and test coverage over broad feature import. The old ops worktree is useful reference material, but selected changes must be rebased onto the current trust-boundary and restore semantics.
+- Production ops integration imported catalog schema/version checks, SQLite catalog backup, richer metrics, monitor checks, node lifecycle controls, an ignored real-host test harness, and runbook updates. Managed skills and API-level move/recover were intentionally left out of this pass.

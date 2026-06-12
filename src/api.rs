@@ -71,17 +71,54 @@ async fn api_health_ready() -> Result<Json<HealthResponse>, ApiError> {
 
 async fn api_metrics() -> Result<String, ApiError> {
     let workspaces = workspace_all()?.len();
+    let workspace_statuses = workspace_status_counts()?;
     let jobs = job_counts()?;
     let backups = backup_count()?;
+    let node_statuses = node_status_counts()?;
+    let now = now_epoch()?;
+    let stale_cutoff = now.saturating_sub(
+        i64::try_from(env_u64("MOM_NODE_STALE_SECS", 60))
+            .context("MOM_NODE_STALE_SECS is too large")?,
+    );
+    let stale_nodes = stale_node_count(stale_cutoff)?;
+    let queued_age = oldest_queued_job_age(now)?;
     Ok(format!(
         "# HELP agentmom_workspaces Total workspaces in the Agent Mom database\n\
          # TYPE agentmom_workspaces gauge\n\
          agentmom_workspaces {workspaces}\n\
+         # HELP agentmom_workspaces_by_status Workspaces by status\n\
+         # TYPE agentmom_workspaces_by_status gauge\n\
+{}\
+         # HELP agentmom_nodes Nodes by status\n\
+         # TYPE agentmom_nodes gauge\n\
+{}\
+         # HELP agentmom_nodes_stale Nodes whose last heartbeat is older than MOM_NODE_STALE_SECS\n\
+         # TYPE agentmom_nodes_stale gauge\n\
+         agentmom_nodes_stale {stale_nodes}\n\
          # HELP agentmom_backups_total Backup artifact records\n\
          # TYPE agentmom_backups_total gauge\n\
          agentmom_backups_total {backups}\n\
+         # HELP agentmom_oldest_queued_job_age_seconds Age of the oldest queued job, or 0 when none are queued\n\
+         # TYPE agentmom_oldest_queued_job_age_seconds gauge\n\
+         agentmom_oldest_queued_job_age_seconds {queued_age}\n\
          # HELP agentmom_jobs Jobs by status\n\
          # TYPE agentmom_jobs gauge\n{}",
+        workspace_statuses
+            .into_iter()
+            .map(|(status, count)| format!(
+                "agentmom_workspaces_by_status{{status=\"{}\"}} {}\n",
+                escape_metric_label(&status),
+                count
+            ))
+            .collect::<String>(),
+        node_statuses
+            .into_iter()
+            .map(|(status, count)| format!(
+                "agentmom_nodes{{status=\"{}\"}} {}\n",
+                escape_metric_label(&status),
+                count
+            ))
+            .collect::<String>(),
         jobs.into_iter()
             .map(|(status, count)| format!(
                 "agentmom_jobs{{status=\"{}\"}} {}",
@@ -203,7 +240,10 @@ async fn api_worker_claim(
         &request.capacity,
         request.worker_url.as_deref(),
     )?;
-    require_ready_worker(&request.node_id)?;
+    if !node_allows_worker_claims(&request.node_id)? {
+        require_worker_report_allowed(&request.node_id)?;
+        return Ok(Json(None));
+    }
     if !request.pressure.capacity_ok {
         return Ok(Json(None));
     }
@@ -223,7 +263,7 @@ async fn api_worker_job_event(
             request.node_id
         )));
     }
-    require_ready_worker(&request.node_id)?;
+    require_worker_report_allowed(&request.node_id)?;
     if request.event_type == "job_running" {
         mark_job_running(&id, &request.node_id)?;
     }
@@ -247,7 +287,7 @@ async fn api_worker_job_complete(
     Json(request): Json<CompleteJobRequest>,
 ) -> Result<Json<JobResponse>, ApiError> {
     require_worker_token(&headers).map_err(ApiError::Unauthorized)?;
-    require_ready_worker(&request.node_id)?;
+    require_worker_report_allowed(&request.node_id)?;
     let job = complete_job(&id, &request.node_id, &request.status, request.output)?;
     Ok(Json(JobResponse { job }))
 }
@@ -259,7 +299,7 @@ async fn api_worker_workspace_state(
 ) -> Result<Json<Value>, ApiError> {
     require_worker_token(&headers).map_err(ApiError::Unauthorized)?;
     require_assigned_worker(&name, &request.node_id)?;
-    require_ready_worker(&request.node_id)?;
+    require_worker_report_allowed(&request.node_id)?;
     workspace_update_from_worker(
         &name,
         request.status.as_deref(),
@@ -277,7 +317,7 @@ async fn api_worker_workspace_event(
 ) -> Result<Json<Value>, ApiError> {
     require_worker_token(&headers).map_err(ApiError::Unauthorized)?;
     require_assigned_worker(&name, &request.node_id)?;
-    require_ready_worker(&request.node_id)?;
+    require_worker_report_allowed(&request.node_id)?;
     record_workspace_event_for_node(
         &name,
         &request.node_id,
@@ -296,7 +336,7 @@ async fn api_worker_backup_artifact(
 ) -> Result<Json<Value>, ApiError> {
     require_worker_token(&headers).map_err(ApiError::Unauthorized)?;
     require_assigned_worker(&name, &request.node_id)?;
-    require_ready_worker(&request.node_id)?;
+    require_worker_report_allowed(&request.node_id)?;
     let artifact = BackupArtifact {
         kind: request.kind,
         location: request.location,
@@ -311,7 +351,7 @@ async fn api_worker_workspaces(
     Query(query): Query<WorkerWorkspacesQuery>,
 ) -> Result<Json<Vec<WorkspaceRecord>>, ApiError> {
     require_worker_token(&headers).map_err(ApiError::Unauthorized)?;
-    require_ready_worker(&query.node_id)?;
+    require_worker_report_allowed(&query.node_id)?;
     Ok(Json(workspaces_for_node(&query.node_id)?))
 }
 
@@ -328,12 +368,12 @@ fn require_assigned_worker(workspace_name: &str, node: &str) -> Result<(), ApiEr
     }
 }
 
-fn require_ready_worker(node: &str) -> Result<(), ApiError> {
-    if node_is_ready(node)? {
+fn require_worker_report_allowed(node: &str) -> Result<(), ApiError> {
+    if node_allows_worker_reports(node)? {
         return Ok(());
     }
     Err(ApiError::Unauthorized(anyhow!(
-        "node {node} is not ready for worker actions"
+        "node {node} is not allowed to report worker state"
     )))
 }
 
@@ -347,7 +387,7 @@ async fn api_worker_events(
 > {
     require_worker_token(&headers).map_err(ApiError::Unauthorized)?;
     let node_id = query.node_id;
-    require_ready_worker(&node_id)?;
+    require_worker_report_allowed(&node_id)?;
     let stream = BroadcastStream::new(state.notifier.subscribe()).filter_map(move |message| {
         let node_id = node_id.clone();
         match message {
