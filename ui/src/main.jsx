@@ -39,6 +39,35 @@ function Root() {
       });
   }, []);
 
+  useEffect(() => {
+    if (!userSession?.token || window.location.pathname === '/admin') return undefined;
+
+    let cancelled = false;
+    const checkSession = async () => {
+      try {
+        const refreshedSession = await validateSession(userSession);
+        if (!cancelled) {
+          setUserSession((current) =>
+            current?.token === userSession.token
+              ? { ...current, email: refreshedSession.email, role: refreshedSession.role }
+              : current,
+          );
+        }
+      } catch {
+        window.localStorage.removeItem(USER_SESSION_KEY);
+        if (!cancelled) {
+          setUserSession(null);
+        }
+      }
+    };
+
+    const interval = window.setInterval(checkSession, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [userSession?.token]);
+
   function enterUserFlow(session) {
     window.localStorage.setItem(USER_SESSION_KEY, JSON.stringify(session));
     setUserSession(session);
@@ -651,14 +680,64 @@ function AdminPage() {
     }
   }
 
-  function logOutUser(userId) {
+  async function logOutUser(user) {
+    if (!userSession?.token) {
+      setAdminError('Sign in as an admin to log out users.');
+      return;
+    }
+
+    const previousUsers = users;
     setUsers((current) =>
-      current.map((user) => (user.id === userId ? { ...user, status: 'inactive' } : user)),
+      current.map((currentUser) =>
+        currentUser.id === user.id ? { ...currentUser, status: 'inactive' } : currentUser,
+      ),
     );
+    setAdminError('');
+
+    try {
+      const response = await fetch(`${API_BASE}/users/${user.id}/sessions`, {
+        method: 'DELETE',
+        headers: authHeaders(userSession),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw data;
+      }
+      if (user.email === userSession.email) {
+        window.localStorage.removeItem(USER_SESSION_KEY);
+        window.location.href = '/';
+      }
+    } catch (error) {
+      setUsers(previousUsers);
+      setAdminError(formatError(error));
+    }
   }
 
-  function logOutAll() {
+  async function logOutAll() {
+    if (!userSession?.token) {
+      setAdminError('Sign in as an admin to log out users.');
+      return;
+    }
+
+    const previousUsers = users;
     setUsers((current) => current.map((user) => ({ ...user, status: 'inactive' })));
+    setAdminError('');
+
+    try {
+      const response = await fetch(`${API_BASE}/sessions`, {
+        method: 'DELETE',
+        headers: authHeaders(userSession),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw data;
+      }
+      window.localStorage.removeItem(USER_SESSION_KEY);
+      window.location.href = '/';
+    } catch (error) {
+      setUsers(previousUsers);
+      setAdminError(formatError(error));
+    }
   }
 
   function openWorkspace() {
@@ -726,7 +805,7 @@ function AdminPage() {
                   title={adminStatusLabel(user.status)}
                   aria-label={adminStatusLabel(user.status)}
                 />
-                <button type="button" onClick={() => logOutUser(user.id)}>
+                <button type="button" onClick={() => logOutUser(user)}>
                   Log Out
                 </button>
               </article>

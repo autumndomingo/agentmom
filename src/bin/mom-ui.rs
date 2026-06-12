@@ -14,7 +14,7 @@ use axum::{
     extract::{Path, Query},
     http::{HeaderMap, StatusCode, header::AUTHORIZATION},
     response::{IntoResponse, Response},
-    routing::{get, patch, post},
+    routing::{delete, get, patch, post},
 };
 use microsandbox::{Sandbox, sandbox::SandboxStatus};
 use rand::Rng;
@@ -165,6 +165,12 @@ struct CreateAccessCodeResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct LogoutResponse {
+    ok: bool,
+    logged_out: u64,
+}
+
+#[derive(Debug, Serialize)]
 struct ErrorBody {
     error: String,
 }
@@ -207,6 +213,8 @@ async fn main() -> Result<()> {
         .route("/auth/session", get(current_session))
         .route("/users", get(list_users))
         .route("/users/{id}/role", patch(update_user_role))
+        .route("/users/{id}/sessions", delete(log_out_user))
+        .route("/sessions", delete(log_out_all_users))
         .route("/access-codes", post(create_access_code))
         .route("/vms", get(list_vms).post(create_vm))
         .route("/vms/{name}/start", post(start_vm))
@@ -349,6 +357,90 @@ RETURNING id, name, email, role, status, last_active_at
         role: row.get("role"),
         status: row.get("status"),
         last_active_at: row.get("last_active_at"),
+    }))
+}
+
+async fn log_out_user(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Json<LogoutResponse>, ApiError> {
+    authorize_admin(&state, &headers).await?;
+    let exists = sqlx::query("SELECT id FROM users WHERE id = ?1")
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await
+        .context("look up user to log out")?;
+    if exists.is_none() {
+        return Err(ApiError::NotFound);
+    }
+
+    let now = now_epoch();
+    let sessions = sqlx::query(
+        r#"
+UPDATE sessions
+SET revoked_at = ?1
+WHERE user_id = ?2
+  AND revoked_at IS NULL
+"#,
+    )
+    .bind(now)
+    .bind(id)
+    .execute(&state.db)
+    .await
+    .context("revoke user sessions")?;
+
+    sqlx::query(
+        r#"
+UPDATE users
+SET status = 'inactive', updated_at = ?1
+WHERE id = ?2
+"#,
+    )
+    .bind(now)
+    .bind(id)
+    .execute(&state.db)
+    .await
+    .context("mark logged-out user inactive")?;
+
+    Ok(Json(LogoutResponse {
+        ok: true,
+        logged_out: sessions.rows_affected(),
+    }))
+}
+
+async fn log_out_all_users(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<LogoutResponse>, ApiError> {
+    authorize_admin(&state, &headers).await?;
+    let now = now_epoch();
+    let sessions = sqlx::query(
+        r#"
+UPDATE sessions
+SET revoked_at = ?1
+WHERE revoked_at IS NULL
+"#,
+    )
+    .bind(now)
+    .execute(&state.db)
+    .await
+    .context("revoke all sessions")?;
+
+    sqlx::query(
+        r#"
+UPDATE users
+SET status = 'inactive', updated_at = ?1
+"#,
+    )
+    .bind(now)
+    .execute(&state.db)
+    .await
+    .context("mark all users inactive")?;
+
+    Ok(Json(LogoutResponse {
+        ok: true,
+        logged_out: sessions.rows_affected(),
     }))
 }
 
