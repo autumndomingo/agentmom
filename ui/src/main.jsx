@@ -308,6 +308,276 @@ function App() {
   );
 }
 
+function AdminPage({ userSession }) {
+  const [users, setUsers] = useState([]);
+  const [accessCodeStatus, setAccessCodeStatus] = useState('Generate code');
+  const [adminError, setAdminError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  function endAdminSession() {
+    window.localStorage.removeItem(USER_SESSION_KEY);
+    window.location.href = '/';
+  }
+
+  function leaveAdminView(updatedSession = userSession) {
+    window.localStorage.setItem(USER_SESSION_KEY, JSON.stringify(updatedSession));
+    window.location.href = '/';
+  }
+
+  async function loadUsers() {
+    if (!userSession?.token) {
+      endAdminSession();
+      return;
+    }
+
+    setAdminError('');
+    const response = await fetch(`${API_BASE}/users`, {
+      headers: authHeaders(userSession),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      if (response.status === 401 || response.status === 403) {
+        endAdminSession();
+        return;
+      }
+      throw data;
+    }
+    setUsers((data.users ?? []).map(normalizeAdminUser));
+  }
+
+  useEffect(() => {
+    loadUsers().catch((error) => setAdminError(formatError(error)));
+  }, [userSession?.token]);
+
+  useEffect(() => {
+    if (!userSession?.token) {
+      endAdminSession();
+      return undefined;
+    }
+
+    let cancelled = false;
+    const checkAdminSession = async () => {
+      try {
+        const refreshedSession = await validateSession(userSession);
+        if (cancelled) return;
+        if (refreshedSession.role !== 'ADMN') {
+          leaveAdminView(refreshedSession);
+        }
+      } catch {
+        if (!cancelled) {
+          endAdminSession();
+        }
+      }
+    };
+
+    const interval = window.setInterval(checkAdminSession, 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [userSession?.token]);
+
+  async function updateRole(userId, role) {
+    if (!userSession?.token) {
+      setAdminError('Sign in as an admin to update roles.');
+      return;
+    }
+
+    const previousUsers = users;
+    setUsers((current) =>
+      current.map((user) => (user.id === userId ? { ...user, role } : user)),
+    );
+    setAdminError('');
+
+    try {
+      const response = await fetch(`${API_BASE}/users/${userId}/role`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeaders(userSession),
+        },
+        body: JSON.stringify({ role }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw data;
+      }
+      const updatedUser = normalizeAdminUser(data);
+      setUsers((current) =>
+        current.map((user) => (user.id === updatedUser.id ? updatedUser : user)),
+      );
+      if (sameEmail(updatedUser.email, userSession.email)) {
+        const updatedSession = { ...userSession, role: updatedUser.role };
+        if (updatedUser.role !== 'ADMN') {
+          leaveAdminView(updatedSession);
+        } else {
+          window.localStorage.setItem(USER_SESSION_KEY, JSON.stringify(updatedSession));
+        }
+      }
+    } catch (error) {
+      setUsers(previousUsers);
+      setAdminError(formatError(error));
+    }
+  }
+
+  async function refreshAccessCode() {
+    if (!userSession?.token) {
+      setAdminError('Sign in as an admin to generate an access code.');
+      return;
+    }
+
+    setBusy(true);
+    setAdminError('');
+    try {
+      const response = await fetch(`${API_BASE}/access-codes`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeaders(userSession),
+        },
+        body: JSON.stringify({ label: 'Meetup access' }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw data;
+      }
+      setAccessCodeStatus(data.code);
+    } catch (error) {
+      setAdminError(formatError(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function logOutUser(user) {
+    if (!userSession?.token) {
+      setAdminError('Sign in as an admin to log out users.');
+      return;
+    }
+
+    const previousUsers = users;
+    setUsers((current) =>
+      current.map((currentUser) =>
+        currentUser.id === user.id ? { ...currentUser, status: 'inactive' } : currentUser,
+      ),
+    );
+    setAdminError('');
+
+    try {
+      const response = await fetch(`${API_BASE}/users/${user.id}/sessions`, {
+        method: 'DELETE',
+        headers: authHeaders(userSession),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw data;
+      }
+      if (sameEmail(user.email, userSession.email)) {
+        endAdminSession();
+      }
+    } catch (error) {
+      setUsers(previousUsers);
+      setAdminError(formatError(error));
+    }
+  }
+
+  async function logOutAll() {
+    if (!userSession?.token) {
+      setAdminError('Sign in as an admin to log out users.');
+      return;
+    }
+
+    const previousUsers = users;
+    setUsers((current) => current.map((user) => ({ ...user, status: 'inactive' })));
+    setAdminError('');
+
+    try {
+      const response = await fetch(`${API_BASE}/sessions`, {
+        method: 'DELETE',
+        headers: authHeaders(userSession),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw data;
+      }
+      window.localStorage.removeItem(USER_SESSION_KEY);
+      window.location.href = '/';
+    } catch (error) {
+      setUsers(previousUsers);
+      setAdminError(formatError(error));
+    }
+  }
+
+  function openWorkspace() {
+    window.location.href = '/';
+  }
+
+  return (
+    <main className="adminPage">
+      <section className="adminPanel" aria-label="Admin user management preview">
+        <header className="adminTopBar">
+          <div className="adminTopActions">
+            <button className="adminNavButton" type="button" onClick={openWorkspace}>
+              Workspace
+            </button>
+            <div className="accessCodeControl" aria-label="Access code">
+              <code>{busy ? 'Generating...' : accessCodeStatus}</code>
+              <button
+                type="button"
+                onClick={refreshAccessCode}
+                title="Generate access code"
+                disabled={busy}
+              >
+                <RefreshCcw size={17} />
+              </button>
+            </div>
+          </div>
+        </header>
+
+        {adminError && <p className="adminError">{adminError}</p>}
+
+        <section className="adminTableShell">
+          <div className="adminTableHeader">
+            <span>Name</span>
+            <span>Email</span>
+            <span>Role</span>
+            <span>Status</span>
+            <button type="button" onClick={logOutAll}>
+              Log Out All
+            </button>
+          </div>
+
+          <div className="adminUserList">
+            {users.map((user) => (
+              <article className="adminUserRow" key={user.id}>
+                <strong>{user.name}</strong>
+                <span>{user.email}</span>
+                <select
+                  value={user.role}
+                  onChange={(event) => updateRole(user.id, event.target.value)}
+                  aria-label={`Role for ${user.name}`}
+                >
+                  <option value="ADMN">ADMN</option>
+                  <option value="PAR">PAR</option>
+                </select>
+                <span
+                  className={`adminStatusDot ${user.status}`}
+                  title={adminStatusLabel(user.status)}
+                  aria-label={adminStatusLabel(user.status)}
+                />
+                <button type="button" onClick={() => logOutUser(user)}>
+                  Log Out
+                </button>
+              </article>
+            ))}
+            {!users.length && <p className="emptyList">No users in the database yet.</p>}
+          </div>
+        </section>
+      </section>
+    </main>
+  );
+}
+
 function friendlyStatus(status) {
   const lower = status.toLowerCase();
   if (lower === 'running' || lower === 'draining') return 'Ready';
