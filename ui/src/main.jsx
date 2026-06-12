@@ -254,10 +254,17 @@ function SetupPage({ userSession, onSubmit }) {
 }
 
 function App({ userSession }) {
+  const currentUserId = userIdentity(userSession.email);
   const [vms, setVms] = useState(() => [
-    { name: userSession.agentName, userName: userSession.userName, status: 'paused' },
+    {
+      id: currentUserId,
+      email: userSession.email,
+      name: userSession.agentName,
+      userName: userSession.userName,
+      status: 'paused',
+    },
   ]);
-  const [selectedName, setSelectedName] = useState(userSession.agentName);
+  const [selectedUserId, setSelectedUserId] = useState(currentUserId);
   const [busy, setBusy] = useState(false);
   const [showUsers, setShowUsers] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
@@ -269,11 +276,14 @@ function App({ userSession }) {
   const [now, setNow] = useState(() => Date.now());
 
   const selectedVm = useMemo(
-    () => vms.find((vm) => vm.name === selectedName) ?? vms[0],
-    [selectedName, vms],
+    () => vms.find((vm) => vm.id === selectedUserId) ?? vms[0],
+    [selectedUserId, vms],
   );
-  const selectedChats = selectedVm ? chatsByUser[selectedVm.name] ?? [] : [];
-  const activeChatId = selectedVm ? activeChatByUser[selectedVm.name] ?? selectedChats[0]?.id : undefined;
+  const selectedKey = selectedVm?.id;
+  const selectedChats = selectedKey ? chatsByUser[selectedKey] ?? [] : [];
+  const activeChatId = selectedKey
+    ? activeChatByUser[selectedKey] ?? selectedChats[0]?.id
+    : undefined;
   const activeChat = selectedChats.find((chat) => chat.id === activeChatId);
   const chatGroups = groupChatsByAge(selectedChats, now);
   const messages = activeChat?.messages ?? [];
@@ -289,7 +299,7 @@ function App({ userSession }) {
 
   async function refresh() {
     setVms((current) =>
-      current.map((vm) => (vm.name === selectedName ? { ...vm, status: 'paused' } : vm)),
+      current.map((vm) => (vm.id === selectedUserId ? { ...vm, status: 'paused' } : vm)),
     );
   }
 
@@ -299,14 +309,22 @@ function App({ userSession }) {
     if (!name) return;
 
     setVms((current) => {
-      const withoutDuplicate = current.filter((vm) => vm.name !== name);
-      return [{ name, userName: createForm.userName.trim() || userSession.userName, status: 'paused' }, ...withoutDuplicate];
+      const existing = current.find((vm) => vm.id === currentUserId);
+      const updated = {
+        ...(existing ?? {}),
+        id: currentUserId,
+        email: userSession.email,
+        name,
+        userName: createForm.userName.trim() || userSession.userName,
+        status: existing?.status ?? 'paused',
+      };
+      return [updated, ...current.filter((vm) => vm.id !== currentUserId)];
     });
     setCreateForm({ userName: userSession.userName, botName: '' });
     setShowCreate(false);
-    setSelectedName(name);
-    markActive(name);
-    startNewChat(name);
+    setSelectedUserId(currentUserId);
+    markActive(currentUserId);
+    startNewChat(currentUserId);
   }
 
   async function sendMessage(event) {
@@ -317,28 +335,28 @@ function App({ userSession }) {
     if (!prompt) return;
 
     setChatInput('');
-    markActive(selectedVm.name);
-    const chatId = ensureChatForPrompt(selectedVm.name, prompt);
-    appendMessage(selectedVm.name, chatId, { role: 'user', content: prompt });
+    markActive(selectedVm.id);
+    const chatId = ensureChatForPrompt(selectedVm.id, prompt);
+    appendMessage(selectedVm.id, chatId, { role: 'user', content: prompt });
 
-    appendMessage(selectedVm.name, chatId, {
+    appendMessage(selectedVm.id, chatId, {
       role: 'assistant',
       content: 'This prototype is connected through the local onboarding flow. Backend chat wiring can be added after the screen flow is finalized.',
     });
   }
 
-  function selectWorkspace(name) {
-    setSelectedName(name);
+  function selectWorkspace(id) {
+    setSelectedUserId(id);
     setShowUsers(false);
-    markActive(name);
+    markActive(id);
   }
 
-  function markActive(name) {
-    setActivityByName((current) => ({ ...current, [name]: Date.now() }));
+  function markActive(id) {
+    setActivityByName((current) => ({ ...current, [id]: Date.now() }));
   }
 
-  function startNewChat(name = selectedVm?.name) {
-    if (!name) return;
+  function startNewChat(id = selectedVm?.id) {
+    if (!id) return;
     const chat = {
       id: window.crypto?.randomUUID?.() ?? `${Date.now()}`,
       title: 'New chat',
@@ -348,18 +366,18 @@ function App({ userSession }) {
     };
     setChatsByUser((current) => ({
       ...current,
-      [name]: [chat, ...(current[name] ?? [])],
+      [id]: [chat, ...(current[id] ?? [])],
     }));
-    setActiveChatByUser((current) => ({ ...current, [name]: chat.id }));
+    setActiveChatByUser((current) => ({ ...current, [id]: chat.id }));
   }
 
   function selectChat(chatId) {
     if (!selectedVm) return;
-    setActiveChatByUser((current) => ({ ...current, [selectedVm.name]: chatId }));
+    setActiveChatByUser((current) => ({ ...current, [selectedVm.id]: chatId }));
   }
 
-  function ensureChatForPrompt(name, prompt) {
-    const existing = activeChatByUser[name] ?? chatsByUser[name]?.[0]?.id;
+  function ensureChatForPrompt(id, prompt) {
+    const existing = activeChatByUser[id] ?? chatsByUser[id]?.[0]?.id;
     if (existing) return existing;
 
     const chat = {
@@ -371,16 +389,16 @@ function App({ userSession }) {
     };
     setChatsByUser((current) => ({
       ...current,
-      [name]: [chat, ...(current[name] ?? [])],
+      [id]: [chat, ...(current[id] ?? [])],
     }));
-    setActiveChatByUser((current) => ({ ...current, [name]: chat.id }));
+    setActiveChatByUser((current) => ({ ...current, [id]: chat.id }));
     return chat.id;
   }
 
-  function appendMessage(name, chatId, message) {
+  function appendMessage(id, chatId, message) {
     setChatsByUser((current) => ({
       ...current,
-      [name]: (current[name] ?? []).map((chat) =>
+      [id]: (current[id] ?? []).map((chat) =>
         chat.id === chatId
           ? {
               ...chat,
@@ -415,12 +433,12 @@ function App({ userSession }) {
           {showUsers && (
             <div className="userMenu">
               {vms.map((vm) => {
-                const status = userStatus(vm, activityByName[vm.name], now);
+                const status = userStatus(vm, activityByName[vm.id], now);
                 return (
                   <button
-                    key={vm.name}
-                    className={`userMenuItem ${selectedVm?.name === vm.name ? 'active' : ''}`}
-                    onClick={() => selectWorkspace(vm.name)}
+                    key={vm.id}
+                    className={`userMenuItem ${selectedVm?.id === vm.id ? 'active' : ''}`}
+                    onClick={() => selectWorkspace(vm.id)}
                   >
                     <span className={`statusDot ${status}`} />
                     <span>{vm.userName ?? userSession.userName}</span>
@@ -915,6 +933,10 @@ function loadUserSession() {
   } catch {
     return null;
   }
+}
+
+function userIdentity(email) {
+  return String(email ?? '').trim().toLowerCase();
 }
 
 function authHeaders(session = loadUserSession()) {
