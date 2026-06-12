@@ -414,6 +414,16 @@ fn service_tunnel_bind_host() -> String {
 
 fn service_tunnel_public_url(bind_host: &str, port: u16) -> String {
     if let Ok(base) = env::var("MOM_SERVICE_TUNNEL_BASE_URL") {
+        return service_tunnel_public_url_from_base(bind_host, port, Some(&base));
+    }
+    service_tunnel_public_url_from_base(bind_host, port, None)
+}
+
+fn service_tunnel_public_url_from_base(bind_host: &str, port: u16, base: Option<&str>) -> String {
+    if let Some(base) = base {
+        if base.contains("{port}") {
+            return base.replace("{port}", &port.to_string());
+        }
         return format!("{}:{port}", base.trim_end_matches('/'));
     }
     let host = if bind_host == "0.0.0.0" {
@@ -422,4 +432,26 @@ fn service_tunnel_public_url(bind_host: &str, port: u16) -> String {
         bind_host
     };
     format!("http://{host}:{port}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::service_tunnel_public_url_from_base;
+
+    #[test]
+    fn service_tunnel_url_supports_path_template() {
+        let url = service_tunnel_public_url_from_base(
+            "0.0.0.0",
+            45887,
+            Some("https://agentmom.xyz/tunnels/mom-1/{port}/"),
+        );
+        assert_eq!(url, "https://agentmom.xyz/tunnels/mom-1/45887/");
+    }
+
+    #[test]
+    fn service_tunnel_url_keeps_legacy_base_port_behavior() {
+        let url =
+            service_tunnel_public_url_from_base("0.0.0.0", 45887, Some("http://100.81.250.67"));
+        assert_eq!(url, "http://100.81.250.67:45887");
+    }
 }
