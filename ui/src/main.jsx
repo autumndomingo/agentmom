@@ -61,7 +61,7 @@ function Root() {
       }
     };
 
-    const interval = window.setInterval(checkSession, 5000);
+    const interval = window.setInterval(checkSession, 1000);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
@@ -703,10 +703,8 @@ function AdminPage() {
       if (!response.ok) {
         throw data;
       }
-      if (user.email === userSession.email) {
-        window.localStorage.removeItem(USER_SESSION_KEY);
-        window.location.href = '/';
-      }
+      window.localStorage.removeItem(USER_SESSION_KEY);
+      window.location.href = '/';
     } catch (error) {
       setUsers(previousUsers);
       setAdminError(formatError(error));
