@@ -8,6 +8,7 @@ import {
   RefreshCcw,
   Send,
   Sparkles,
+  Users,
 } from 'lucide-react';
 import './styles.css';
 
@@ -307,6 +308,10 @@ function App({ userSession }) {
     );
   }
 
+  function openAdminPage() {
+    window.location.href = '/admin';
+  }
+
   async function createWorkspace(event) {
     event.preventDefault();
     const name = createForm.botName.trim();
@@ -505,6 +510,12 @@ function App({ userSession }) {
             <p>{selectedVm ? friendlyStatus(selectedVm.status) : 'Create a workspace to begin.'}</p>
           </div>
           <div className="headerActions">
+            {userSession.role === 'ADMN' && (
+              <button className="refreshButton" type="button" onClick={openAdminPage}>
+                <Users size={17} />
+                Admin
+              </button>
+            )}
             <button className="refreshButton" onClick={refresh} disabled={busy}>
               <RefreshCcw size={17} />
               Refresh
