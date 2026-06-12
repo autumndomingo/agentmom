@@ -315,7 +315,9 @@ async fn execute_job(api: &WorkerApi, job: &JobRecord) -> Result<Value> {
             Ok(json!({ "backed_up": true }))
         }
         "restore" => {
-            bail!("distributed restore is not implemented yet")
+            let workspace = api.workspace(&job.workspace_name).await?;
+            restore_workspace_local(api, &workspace, &payload).await?;
+            Ok(json!({ "restored": true }))
         }
         "execute" => {
             let command = payload
@@ -471,7 +473,12 @@ async fn worker_reconcile_workspace(
 impl WorkerApi {
     async fn workspaces(&self) -> Result<Vec<WorkspaceRecord>> {
         self.client
-            .get(format!("{}/api/workspaces", self.api_url))
+            .get(format!(
+                "{}/worker/workspaces?node_id={}",
+                self.api_url,
+                url_component(&self.node)
+            ))
+            .with_worker_token()
             .send()
             .await?
             .error_for_status()?
@@ -811,6 +818,59 @@ async fn backup_workspace_local(
     Ok(())
 }
 
+async fn restore_workspace_local(
+    api: &WorkerApi,
+    workspace: &WorkspaceRecord,
+    payload: &Value,
+) -> Result<()> {
+    let backup_id = payload
+        .get("backup_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("restore job payload requires backup_id"))?;
+    let backup_location = payload
+        .get("backup_location")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("restore job payload requires backup_location"))?;
+    if fake_runtime_enabled() {
+        return fake_restore_workspace(api, workspace, backup_id, backup_location).await;
+    }
+    if let Ok(handle) = Sandbox::get(&workspace.sandbox_name).await {
+        if handle.status() == SandboxStatus::Running || handle.status() == SandboxStatus::Draining {
+            handle.stop_with_timeout(Duration::from_secs(20)).await?;
+        }
+    }
+    api.update_workspace(&workspace.name, Some("restoring"), None, false, false)
+        .await?;
+    api.event(
+        &workspace.name,
+        "workspace_restore_started",
+        "running",
+        "workspace volume restore started",
+        json!({ "backup_id": backup_id, "location": backup_location }),
+    )
+    .await?;
+    let volume_path = microsandbox_volume_path(&workspace.volume_name)?;
+    backup::run_restic_restore(backup_id, backup_location, &volume_path).await?;
+    api.update_workspace(
+        &workspace.name,
+        Some("restored"),
+        Some("running"),
+        false,
+        false,
+    )
+    .await?;
+    api.event(
+        &workspace.name,
+        "workspace_restored",
+        "succeeded",
+        "workspace volume restored from backup",
+        json!({ "backup_id": backup_id, "location": backup_location }),
+    )
+    .await?;
+    ensure_workspace_running_local(api, workspace).await?;
+    Ok(())
+}
+
 fn fake_runtime_enabled() -> bool {
     env::var("MOM_RUNTIME").is_ok_and(|value| value == "fake")
 }
@@ -904,6 +964,34 @@ async fn fake_backup_workspace(api: &WorkerApi, workspace: &WorkspaceRecord) -> 
         "succeeded",
         "fake workspace backup completed",
         json!({ "runtime": "fake", "backup_id": backup_id }),
+    )
+    .await
+}
+
+async fn fake_restore_workspace(
+    api: &WorkerApi,
+    workspace: &WorkspaceRecord,
+    backup_id: &str,
+    backup_location: &str,
+) -> Result<()> {
+    let dir = fake_workspace_dir(workspace)?;
+    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    fs::write(dir.join("restored-from"), backup_location.as_bytes())?;
+    fs::write(dir.join("state"), b"running")?;
+    api.update_workspace(
+        &workspace.name,
+        Some("running"),
+        Some("running"),
+        false,
+        false,
+    )
+    .await?;
+    api.event(
+        &workspace.name,
+        "workspace_restored",
+        "succeeded",
+        "fake workspace restored from backup",
+        json!({ "runtime": "fake", "backup_id": backup_id, "location": backup_location }),
     )
     .await
 }

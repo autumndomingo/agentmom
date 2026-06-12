@@ -146,15 +146,38 @@ pub(crate) async fn workspace_restore(name: &str, backup_id: Option<&str>) -> Re
             backup.kind
         );
     }
-    let snapshot = backup
-        .location
+    let volume_path = microsandbox_volume_path(&workspace.volume_name)?;
+    run_restic_restore(&backup.id, &backup.location, &volume_path).await?;
+    workspace_mark_status(name, "restored")?;
+    record_workspace_event(
+        name,
+        "workspace_restored",
+        "succeeded",
+        "workspace volume restored from backup",
+        json!({ "backup_id": backup.id, "location": backup.location }),
+    )?;
+    println!("restored workspace {name} from {}", backup.id);
+    Ok(())
+}
+
+pub(crate) async fn run_restic_restore(
+    backup_id: &str,
+    backup_location: &str,
+    volume_path: &Path,
+) -> Result<()> {
+    if env::var_os("RESTIC_REPOSITORY").is_none() {
+        bail!("RESTIC_REPOSITORY must be set before workspace restore can run");
+    }
+    if !command_exists("restic").await {
+        bail!("restic must be installed before workspace restore can run");
+    }
+    let snapshot = backup_location
         .rsplit_once('#')
         .map(|(_, snapshot)| snapshot)
         .filter(|snapshot| !snapshot.is_empty())
-        .ok_or_else(|| anyhow!("backup {} is missing restic snapshot id", backup.id))?;
-    let volume_path = microsandbox_volume_path(&workspace.volume_name)?;
+        .ok_or_else(|| anyhow!("backup {backup_id} is missing restic snapshot id"))?;
     if volume_path.exists() {
-        fs::remove_dir_all(&volume_path)
+        fs::remove_dir_all(volume_path)
             .with_context(|| format!("remove existing volume path {}", volume_path.display()))?;
     }
     let parent = volume_path
@@ -172,15 +195,6 @@ pub(crate) async fn workspace_restore(name: &str, backup_id: Option<&str>) -> Re
     if !status.success() {
         bail!("restic restore exited with {status}");
     }
-    workspace_mark_status(name, "restored")?;
-    record_workspace_event(
-        name,
-        "workspace_restored",
-        "succeeded",
-        "workspace volume restored from backup",
-        json!({ "backup_id": backup.id, "location": backup.location }),
-    )?;
-    println!("restored workspace {name} from {}", backup.id);
     Ok(())
 }
 

@@ -163,6 +163,23 @@ ORDER BY name
     Ok(records)
 }
 
+pub(crate) fn workspaces_for_node(node: &str) -> Result<Vec<WorkspaceRecord>> {
+    ensure_fleet_schema()?;
+    let db = fleet_db()?;
+    let mut stmt = db.prepare(
+        r#"
+SELECT name, user_id, sandbox_name, volume_name, desired_state, cpus, memory_mib,
+       node_id, status, volume_quota_mib, idle_timeout_secs, backup_interval_secs, last_used_at, last_backup_at
+FROM workspaces
+WHERE node_id = ?1 AND status != 'removed'
+ORDER BY name
+"#,
+    )?;
+    Ok(stmt
+        .query_map(params![node], workspace_from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 pub(crate) fn workspace_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkspaceRecord> {
     let cpus: i64 = row.get(5)?;
     let memory_mib: i64 = row.get(6)?;
@@ -222,6 +239,26 @@ pub(crate) fn workspace_mark_backup(name: &str) -> Result<()> {
         "UPDATE workspaces SET last_backup_at = ?2, updated_at = ?2 WHERE name = ?1",
         params![name, now],
     )?;
+    Ok(())
+}
+
+pub(crate) fn workspace_reassign_for_restore(name: &str, node: &str) -> Result<()> {
+    let now = now_epoch()?;
+    let db = fleet_db()?;
+    let changed = db.execute(
+        r#"
+UPDATE workspaces
+SET node_id = ?2,
+    desired_state = 'running',
+    status = 'restore-queued',
+    updated_at = ?3
+WHERE name = ?1
+"#,
+        params![name, node, now],
+    )?;
+    if changed == 0 {
+        bail!("workspace not found: {name}");
+    }
     Ok(())
 }
 
@@ -691,6 +728,16 @@ ON CONFLICT(node_id) DO UPDATE SET
             i64::try_from(capacity.disk_reserve_mib).context("disk reserve too large")?,
             now_epoch()?,
         ],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn node_mark_offline(node: &str) -> Result<()> {
+    ensure_fleet_schema()?;
+    let db = fleet_db()?;
+    db.execute(
+        "UPDATE nodes SET status = 'offline', last_seen_at = ?2 WHERE node_id = ?1",
+        params![node, now_epoch()?],
     )?;
     Ok(())
 }

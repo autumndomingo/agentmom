@@ -32,6 +32,7 @@ pub(crate) async fn api(args: ApiArgs) -> Result<()> {
             "/worker/workspaces/{name}/backups",
             post(api_worker_backup_artifact),
         )
+        .route("/worker/workspaces", get(api_worker_workspaces))
         .route("/worker/events", get(api_worker_events))
         .merge(ui::api_routes())
         .with_state(Arc::new(state));
@@ -297,6 +298,14 @@ async fn api_worker_backup_artifact(
     };
     let id = record_backup_artifact_for_node(&name, &request.node_id, &artifact, &request.status)?;
     Ok(Json(json!({ "id": id })))
+}
+
+async fn api_worker_workspaces(
+    headers: HeaderMap,
+    Query(query): Query<WorkerWorkspacesQuery>,
+) -> Result<Json<Vec<WorkspaceRecord>>, ApiError> {
+    require_worker_token(&headers).map_err(ApiError::Unauthorized)?;
+    Ok(Json(workspaces_for_node(&query.node_id)?))
 }
 
 fn require_assigned_worker(workspace_name: &str, node: &str) -> Result<(), ApiError> {

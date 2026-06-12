@@ -120,6 +120,11 @@ enum Command {
         #[command(subcommand)]
         command: NodeCommand,
     },
+    /// Fleet-level operations for the central API database.
+    Fleet {
+        #[command(subcommand)]
+        command: FleetCommand,
+    },
     /// Run the central HTTP API and SSE notification service.
     Api(ApiArgs),
     /// Run a worker that claims jobs from a central API.
@@ -219,6 +224,22 @@ enum WorkspaceCommand {
 enum NodeCommand {
     /// Show local worker node status.
     Status,
+}
+
+#[derive(Debug, Subcommand)]
+enum FleetCommand {
+    /// Reassign workspaces from a lost host and queue restore jobs on a ready host.
+    RecoverHost {
+        /// Host/node ID that is lost.
+        #[arg(long)]
+        from: String,
+        /// Ready host/node ID that should restore the latest backups.
+        #[arg(long)]
+        to: String,
+        /// Print the planned recovery actions without changing state.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -442,6 +463,11 @@ struct WorkerEventsQuery {
     node_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct WorkerWorkspacesQuery {
+    node_id: String,
+}
+
 #[derive(Debug, Clone)]
 struct ApiState {
     notifier: broadcast::Sender<String>,
@@ -593,6 +619,7 @@ async fn main() -> Result<()> {
         }
         Command::Workspace { command } => workspace_command(command).await,
         Command::Node { command } => node_command(command).await,
+        Command::Fleet { command } => fleet_command(command).await,
         Command::Api(args) => api::api(args).await,
         Command::Worker(args) => worker::worker(args).await,
     }
@@ -663,6 +690,70 @@ async fn node_command(command: NodeCommand) -> Result<()> {
     match command {
         NodeCommand::Status => node_status().await,
     }
+}
+
+async fn fleet_command(command: FleetCommand) -> Result<()> {
+    match command {
+        FleetCommand::RecoverHost { from, to, dry_run } => fleet_recover_host(&from, &to, dry_run),
+    }
+}
+
+fn fleet_recover_host(from: &str, to: &str, dry_run: bool) -> Result<()> {
+    select_ready_node(Some(to))?;
+    let workspaces = workspaces_for_node(from)?;
+    if workspaces.is_empty() {
+        println!("no workspaces assigned to {from}");
+        if !dry_run {
+            node_mark_offline(from)?;
+        }
+        return Ok(());
+    }
+
+    println!(
+        "{} workspace(s) assigned to {from} will be restored on {to}",
+        workspaces.len()
+    );
+    for workspace in workspaces {
+        let backup = latest_restic_backup(&workspace.name).with_context(|| {
+            format!(
+                "workspace {} cannot be recovered because it has no successful restic backup",
+                workspace.name
+            )
+        })?;
+        println!("{} -> {} using {}", workspace.name, to, backup.id);
+        if dry_run {
+            continue;
+        }
+        workspace_reassign_for_restore(&workspace.name, to)?;
+        record_workspace_event_for_node(
+            &workspace.name,
+            to,
+            "workspace_recovery_queued",
+            "queued",
+            "workspace reassigned for host-loss recovery",
+            json!({
+                "from_node": from,
+                "to_node": to,
+                "backup_id": backup.id,
+                "backup_location": backup.location
+            }),
+        )?;
+        create_job(CreateJobRequest {
+            workspace_name: workspace.name,
+            kind: "restore".to_string(),
+            node_id: Some(to.to_string()),
+            payload: json!({
+                "backup_id": backup.id,
+                "backup_location": backup.location,
+                "from_node": from,
+                "to_node": to
+            }),
+        })?;
+    }
+    if !dry_run {
+        node_mark_offline(from)?;
+    }
+    Ok(())
 }
 
 async fn workspace_create(args: WorkspaceCreateArgs) -> Result<()> {

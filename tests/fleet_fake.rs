@@ -192,6 +192,81 @@ async fn worker_events_requires_worker_token() -> Result<()> {
 }
 
 #[tokio::test]
+async fn worker_workspace_list_requires_token_and_is_node_scoped() -> Result<()> {
+    let fleet = TestFleet::start().await?;
+    let _node_a = spawn_worker("node-a", &fleet.api_url)?;
+    let _node_b = spawn_worker("node-b", &fleet.api_url)?;
+    wait_for_node(fleet.api_state.path(), "node-a").await?;
+    wait_for_node(fleet.api_state.path(), "node-b").await?;
+
+    let create_a = create_workspace(&fleet.api_url, "owned-a", "node-a", 0).await?;
+    let create_b = create_workspace(&fleet.api_url, "owned-b", "node-b", 0).await?;
+    wait_for_job_status(&fleet.api_url, &create_a, "succeeded").await?;
+    wait_for_job_status(&fleet.api_url, &create_b, "succeeded").await?;
+
+    let client = reqwest::Client::new();
+    let unauthorized = client
+        .get(format!(
+            "{}/worker/workspaces?node_id=node-a",
+            fleet.api_url
+        ))
+        .send()
+        .await?;
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let workspaces = client
+        .get(format!(
+            "{}/worker/workspaces?node_id=node-a",
+            fleet.api_url
+        ))
+        .bearer_auth(WORKER_TOKEN)
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Vec<Value>>()
+        .await?;
+    let names = workspaces
+        .iter()
+        .filter_map(|workspace| workspace.get("name").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["owned-a"]);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn recover_host_reassigns_and_restores_latest_backup_on_target_node() -> Result<()> {
+    let fleet = TestFleet::start().await?;
+    let node_a = spawn_worker("node-a", &fleet.api_url)?;
+    let node_b = spawn_worker("node-b", &fleet.api_url)?;
+    wait_for_node(fleet.api_state.path(), "node-a").await?;
+    wait_for_node(fleet.api_state.path(), "node-b").await?;
+
+    let create = create_workspace(&fleet.api_url, "recover-me", "node-a", 0).await?;
+    wait_for_job_status(&fleet.api_url, &create, "succeeded").await?;
+    let backup = create_job(&fleet.api_url, "recover-me", "backup").await?;
+    wait_for_job_status(&fleet.api_url, &backup, "succeeded").await?;
+    wait_for_backup_count(fleet.api_state.path(), "recover-me", 1).await?;
+
+    run_recover_host(fleet.api_state.path(), "node-a", "node-b")?;
+
+    wait_for_workspace_node(&fleet.api_url, "recover-me", "node-b").await?;
+    wait_for_workspace_status(&fleet.api_url, "recover-me", "running").await?;
+    assert!(
+        node_a.msb_home.path().join("fake/recover-me").exists(),
+        "source worker's local fake volume remains as lost-host residue"
+    );
+    let restored_from = node_b.msb_home.path().join("fake/recover-me/restored-from");
+    wait_until("workspace restored on node-b", || {
+        let restored_from = restored_from.clone();
+        async move { restored_from.exists() }
+    })
+    .await?;
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn worker_service_open_rejects_spoofed_sandbox_identity() -> Result<()> {
     let fleet = TestFleet::start().await?;
     let node = spawn_worker("node-a", &fleet.api_url)?;
@@ -423,6 +498,19 @@ fn spawn_worker_with_options(
         worker_url: format!("http://{bind}"),
         _process: ChildGuard { child },
     })
+}
+
+fn run_recover_host(api_state: &Path, from: &str, to: &str) -> Result<()> {
+    let status = Command::new(MOM_BIN)
+        .args(["fleet", "recover-host", "--from", from, "--to", to])
+        .env("MOM_STATE_DIR", api_state)
+        .env("MOM_WORKER_TOKEN", WORKER_TOKEN)
+        .status()
+        .context("run fleet recover-host")?;
+    if !status.success() {
+        bail!("fleet recover-host exited with {status}");
+    }
+    Ok(())
 }
 
 async fn create_workspace(
