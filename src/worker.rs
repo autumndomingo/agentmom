@@ -435,8 +435,14 @@ async fn worker_reconcile_workspace(
                     handle.stop_with_timeout(Duration::from_secs(10)).await?;
                 }
             }
-            api.update_workspace(&record.name, Some("idle-stopped"), None, false, false)
-                .await?;
+            api.update_workspace(
+                &record.name,
+                Some("idle-stopped"),
+                Some("stopped"),
+                false,
+                false,
+            )
+            .await?;
             api.event(
                 &record.name,
                 "workspace_idle_stopped",
