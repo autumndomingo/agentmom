@@ -110,6 +110,7 @@ enum Command {
     /// Run basic tool checks inside a VM.
     Doctor { name: String },
     /// Manage durable user workspaces backed by named volumes.
+    #[command(alias = "ws")]
     Workspace {
         #[command(subcommand)]
         command: WorkspaceCommand,
@@ -123,8 +124,6 @@ enum Command {
     Api(ApiArgs),
     /// Run a worker that claims jobs from a central API.
     Worker(WorkerArgs),
-    /// Run the single-host scheduler and backup worker.
-    Daemon(DaemonArgs),
 }
 
 #[derive(Debug, Args)]
@@ -243,7 +242,7 @@ struct WorkspaceCreateArgs {
     /// Auto-stop after this many idle seconds.
     #[arg(long, default_value_t = 1800)]
     idle_timeout: u64,
-    /// Back up at most this often. Set 0 to disable daemon backups.
+    /// Back up at most this often. Set 0 to disable worker-scheduled backups.
     #[arg(long, default_value_t = 900)]
     backup_interval: u64,
     /// Rebuild the base snapshot before creating the VM.
@@ -252,16 +251,6 @@ struct WorkspaceCreateArgs {
     /// Provision directly from Alpine instead of the base snapshot.
     #[arg(long)]
     no_snapshot: bool,
-}
-
-#[derive(Debug, Args)]
-struct DaemonArgs {
-    /// Scheduler loop interval in seconds.
-    #[arg(long, default_value_t = 30)]
-    interval: u64,
-    /// Run one reconciliation pass and exit.
-    #[arg(long)]
-    once: bool,
 }
 
 #[derive(Debug, Args)]
@@ -573,7 +562,6 @@ async fn main() -> Result<()> {
         Command::Node { command } => node_command(command).await,
         Command::Api(args) => api::api(args).await,
         Command::Worker(args) => worker::worker(args).await,
-        Command::Daemon(args) => daemon(args).await,
     }
 }
 
@@ -895,24 +883,6 @@ async fn node_status() -> Result<()> {
     Ok(())
 }
 
-async fn daemon(args: DaemonArgs) -> Result<()> {
-    ensure_fleet_schema()?;
-    log_record("info", "daemon_start", None, "Agent Mom daemon starting");
-    loop {
-        daemon_once().await?;
-        if args.once {
-            log_record(
-                "info",
-                "daemon_once_complete",
-                None,
-                "daemon one-shot pass complete",
-            );
-            return Ok(());
-        }
-        tokio::time::sleep(Duration::from_secs(args.interval)).await;
-    }
-}
-
 fn node_capacity() -> NodeCapacity {
     NodeCapacity {
         cpus: env_u32("MOM_CAPACITY_CPUS", 0),
@@ -990,11 +960,18 @@ async fn disk_available_mib() -> Result<u64> {
     available.parse().context("parse df available MiB")
 }
 
-async fn daemon_once() -> Result<()> {
+pub(crate) async fn worker_reconcile_once(node: &str) -> Result<()> {
     let records = workspace_all()?;
     let now = now_epoch()?;
     for record in records {
-        if let Err(error) = daemon_reconcile_workspace(&record, now).await {
+        if record
+            .node_id
+            .as_deref()
+            .is_some_and(|assigned| assigned != node)
+        {
+            continue;
+        }
+        if let Err(error) = worker_reconcile_workspace(&record, now).await {
             log_record(
                 "error",
                 "workspace_reconcile_failed",
@@ -1015,7 +992,7 @@ async fn daemon_once() -> Result<()> {
     Ok(())
 }
 
-async fn daemon_reconcile_workspace(record: &WorkspaceRecord, now: i64) -> Result<()> {
+async fn worker_reconcile_workspace(record: &WorkspaceRecord, now: i64) -> Result<()> {
     if record.desired_state == "running" {
         workspace_ensure_running(record).await?;
         if record.idle_timeout_secs > 0

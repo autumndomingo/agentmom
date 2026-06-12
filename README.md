@@ -43,17 +43,19 @@ mom workspace rm alice --force
 mom node status
 ```
 
-Run the single scheduler/backup worker:
+Run the worker against a local or central API:
 
 ```sh
-mom daemon
+mom api
+MOM_API_URL=http://127.0.0.1:8080 mom worker
 ```
 
-The daemon:
+The worker:
 
 - starts workspaces whose desired state is `running`
 - stops idle workspaces after their configured idle timeout
 - backs up workspace volumes when their backup interval is due
+- claims and runs queued workspace jobs from `mom api`
 
 Backups use restic. Set `RESTIC_REPOSITORY` and the usual restic credentials in
 the service environment before enabling scheduled backups. Each backup is tagged
@@ -70,7 +72,8 @@ For local testing without touching the default microsandbox home:
 export MOM_STATE_DIR="$PWD/.state/mom"
 export MSB_HOME="$PWD/.state/msb"
 cargo run --bin mom -- workspace list
-cargo run --bin mom -- daemon --once
+cargo run --bin mom -- api --bind 127.0.0.1:8080
+MOM_API_URL=http://127.0.0.1:8080 cargo run --bin mom -- worker --once
 ```
 
 ## Host Config

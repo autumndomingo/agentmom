@@ -166,12 +166,6 @@ in
       description = "Agent Mom config.json containing Codex/Hermes seed configuration.";
     };
 
-    intervalSeconds = lib.mkOption {
-      type = lib.types.ints.positive;
-      default = 30;
-      description = "Scheduler and backup loop interval.";
-    };
-
     capacity = {
       cpus = lib.mkOption {
         type = lib.types.ints.unsigned;
@@ -419,24 +413,6 @@ in
         message = "services.agentmom.credentialProxy.package is required when credentialProxy.enable is true.";
       }
     ];
-
-    systemd.services.agentmom = lib.mkIf (!cfg.api.enable && !cfg.worker.enable) {
-      description = "Agent Mom microsandbox workspace worker";
-      wantedBy = [ "multi-user.target" ];
-      after = [ "network-online.target" ];
-      wants = [ "network-online.target" ];
-      path = commonPath;
-      environment = commonEnvironment;
-      serviceConfig = {
-        Type = "simple";
-        User = cfg.user;
-        Group = cfg.group;
-        ExecStart = "${cfg.package}/bin/mom daemon --interval ${toString cfg.intervalSeconds}";
-        Restart = "always";
-        RestartSec = "10s";
-        WorkingDirectory = cfg.stateDir;
-      };
-    };
 
     systemd.services.agentmom-api = lib.mkIf cfg.api.enable {
       description = "Agent Mom central API";

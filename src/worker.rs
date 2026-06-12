@@ -35,12 +35,14 @@ pub(crate) async fn worker(args: WorkerArgs) -> Result<()> {
 
     log_record("info", "worker_start", None, "Agent Mom worker starting");
     loop {
-        if worker_claim_once(&client, &api_url, &node, &worker_url).await? && args.once {
-            return Ok(());
-        }
+        let claimed = worker_claim_once(&client, &api_url, &node, &worker_url).await?;
+        worker_reconcile_once(&node).await?;
         if args.once {
             worker_http.abort();
             return Ok(());
+        }
+        if claimed {
+            continue;
         }
         tokio::select! {
             _ = wake_rx.recv() => {},
