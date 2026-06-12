@@ -576,6 +576,7 @@ in
         ExecStart = "${cfg.package}/bin/mom api --bind ${cfg.api.bind}";
         Restart = "always";
         RestartSec = "5s";
+        TimeoutStopSec = "10s";
         WorkingDirectory = cfg.stateDir;
       };
     };

@@ -458,6 +458,40 @@ async fn idle_stopped_workspace_does_not_count_against_capacity() -> Result<()> 
 }
 
 #[tokio::test]
+async fn worker_reconcile_ignores_unassigned_and_idle_stopped_workspaces() -> Result<()> {
+    let fleet = TestFleet::start().await?;
+    insert_unassigned_workspace(fleet.api_state.path(), "legacy")?;
+    insert_workspace_with_state(
+        fleet.api_state.path(),
+        "cold",
+        "node-a",
+        "running",
+        "idle-stopped",
+    )?;
+
+    let node = spawn_worker("node-a", &fleet.api_url)?;
+    wait_for_node(fleet.api_state.path(), "node-a").await?;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(
+        !node.msb_home.path().join("fake/legacy").exists(),
+        "worker should not reconcile unassigned legacy workspaces"
+    );
+    assert!(
+        !node.msb_home.path().join("fake/cold").exists(),
+        "idle-stopped workspace should remain cold until a job wakes it"
+    );
+
+    let start = create_job(&fleet.api_url, "cold", "start").await?;
+    wait_for_job_status(&fleet.api_url, &start, "succeeded").await?;
+    assert_eq!(
+        std::fs::read_to_string(node.msb_home.path().join("fake/cold/state"))?,
+        "running"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn offline_node_is_not_reenabled_by_stale_heartbeat() -> Result<()> {
     let fleet = TestFleet::start().await?;
     let client = reqwest::Client::new();
@@ -1094,6 +1128,27 @@ INSERT INTO workspaces (
             node,
             desired_state,
             status,
+            now,
+        ),
+    )?;
+    Ok(())
+}
+
+fn insert_unassigned_workspace(api_state: &Path, name: &str) -> Result<()> {
+    let now = now_epoch()?;
+    let db = Connection::open(api_state.join("fleet.db"))?;
+    db.execute(
+        r#"
+INSERT INTO workspaces (
+    name, user_id, sandbox_name, volume_name, node_id, desired_state, cpus, memory_mib,
+    volume_quota_mib, status, idle_timeout_secs, backup_interval_secs,
+    last_used_at, last_backup_at, created_at, updated_at
+) VALUES (?1, ?1, ?2, ?3, NULL, 'running', 1, 2048, 10240, 'running', 1800, 0, ?4, NULL, ?4, ?4)
+"#,
+        (
+            name,
+            format!("mom-{name}"),
+            format!("mom-{name}-workspace"),
             now,
         ),
     )?;
