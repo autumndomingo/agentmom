@@ -30,6 +30,25 @@
           rustToolchain = pkgs.rust-bin.stable.latest.default;
           craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
           src = craneLib.cleanCargoSource ./.;
+          microsandboxVersion = "0.5.6";
+          microsandboxBundleHashes = {
+            x86_64-linux = "sha256-tVCx9fB4XY+2+eEyLCFq+m/k6DAg6n82ThIwgFDYTlU=";
+            aarch64-linux = "sha256-kpbLJI9u3phg625gKeMtlszwm6NOKy5vazPAiZvHjoc=";
+            aarch64-darwin = "sha256-RifDi+7vNI9g8tQIyHhhjJ6firQzmjAgQFgEFXs98t4=";
+          };
+          microsandboxBundlePlatforms = {
+            x86_64-linux = "linux-x86_64";
+            aarch64-linux = "linux-aarch64";
+            aarch64-darwin = "darwin-aarch64";
+          };
+          microsandboxBundleSrc =
+            if builtins.hasAttr system microsandboxBundleHashes then
+              pkgs.fetchurl {
+                url = "https://github.com/superradcompany/microsandbox/releases/download/v${microsandboxVersion}/microsandbox-${microsandboxBundlePlatforms.${system}}.tar.gz";
+                hash = microsandboxBundleHashes.${system};
+              }
+            else
+              null;
           agentdPrebuilt = {
             x86_64-linux = pkgs.fetchurl {
               url = "https://github.com/superradcompany/microsandbox/releases/download/v0.5.6/agentd-x86_64";
@@ -63,6 +82,10 @@
                     substituteInPlace crates/filesystem/build.rs \
                       --replace-fail 'download_to(&url, &dest);' \
                       'std::fs::copy("${agentdPrebuilt}", &dest).expect("failed to copy Nix-provided agentd");'
+                  '' + nixpkgs.lib.optionalString (microsandboxBundleSrc != null) ''
+                    substituteInPlace crates/microsandbox/build.rs \
+                      --replace-fail 'let data = download(&url).expect("failed to download microsandbox bundle");' \
+                      'let data = std::fs::read("${microsandboxBundleSrc}").expect("failed to read Nix-provided microsandbox bundle");'
                   '';
                 })
               else
@@ -134,24 +157,10 @@
               runHook postInstall
             '';
           };
-          microsandboxVersion = "0.5.6";
-          microsandboxBundleHashes = {
-            x86_64-linux = "sha256-tVCx9fB4XY+2+eEyLCFq+m/k6DAg6n82ThIwgFDYTlU=";
-            aarch64-linux = "sha256-kpbLJI9u3phg625gKeMtlszwm6NOKy5vazPAiZvHjoc=";
-            aarch64-darwin = "sha256-RifDi+7vNI9g8tQIyHhhjJ6firQzmjAgQFgEFXs98t4=";
-          };
-          microsandboxBundlePlatforms = {
-            x86_64-linux = "linux-x86_64";
-            aarch64-linux = "linux-aarch64";
-            aarch64-darwin = "darwin-aarch64";
-          };
           microsandbox-runtime = pkgs.stdenv.mkDerivation {
             pname = "microsandbox-runtime";
             version = microsandboxVersion;
-            src = pkgs.fetchurl {
-              url = "https://github.com/superradcompany/microsandbox/releases/download/v${microsandboxVersion}/microsandbox-${microsandboxBundlePlatforms.${system}}.tar.gz";
-              hash = microsandboxBundleHashes.${system};
-            };
+            src = microsandboxBundleSrc;
             sourceRoot = ".";
             nativeBuildInputs = nixpkgs.lib.optionals pkgs.stdenv.isLinux [
               pkgs.autoPatchelfHook
