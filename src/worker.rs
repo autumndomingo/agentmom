@@ -700,7 +700,7 @@ async fn ensure_workspace_running_local(
                 json!({ "sandbox": workspace.sandbox_name, "volume": workspace.volume_name }),
             )
             .await?;
-            create_workspace_sandbox(workspace, false)
+            create_workspace_sandbox(workspace, true)
                 .await
                 .with_context(|| {
                     format!(
@@ -931,7 +931,7 @@ async fn restore_workspace_local(
     if desired_state == "running" {
         ensure_workspace_running_local(api, workspace).await?;
     } else if Sandbox::get(&workspace.sandbox_name).await.is_err() {
-        create_workspace_sandbox(workspace, false).await?;
+        create_workspace_sandbox(workspace, true).await?;
         api.update_workspace(
             &workspace.name,
             Some("stopped"),
