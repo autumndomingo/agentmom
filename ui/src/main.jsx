@@ -145,9 +145,12 @@ function LandingPage({ onSubmit }) {
 function BuildersTableBrand() {
   return (
     <div className="landingHeader">
-      <div className="brandMark">A</div>
       <h1>
-        <span>Let's start building with</span>
+        <span className="terminalPrompt" aria-label="Let's start building with...">
+          <span className="typedPrompt" aria-hidden="true">
+            $ Let's start building with...
+          </span>
+        </span>
         <strong>Agent Mom</strong>
       </h1>
     </div>
@@ -581,10 +584,43 @@ function AdminPage() {
     loadUsers().catch((error) => setAdminError(formatError(error)));
   }, []);
 
-  function updateRole(userId, role) {
+  async function updateRole(userId, role) {
+    if (!userSession?.token) {
+      setAdminError('Sign in as an admin to update roles.');
+      return;
+    }
+
+    const previousUsers = users;
     setUsers((current) =>
       current.map((user) => (user.id === userId ? { ...user, role } : user)),
     );
+    setAdminError('');
+
+    try {
+      const response = await fetch(`${API_BASE}/users/${userId}/role`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeaders(userSession),
+        },
+        body: JSON.stringify({ role }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw data;
+      }
+      const updatedUser = normalizeAdminUser(data);
+      setUsers((current) =>
+        current.map((user) => (user.id === updatedUser.id ? updatedUser : user)),
+      );
+      if (updatedUser.email === userSession.email) {
+        const updatedSession = { ...userSession, role: updatedUser.role };
+        window.localStorage.setItem(USER_SESSION_KEY, JSON.stringify(updatedSession));
+      }
+    } catch (error) {
+      setUsers(previousUsers);
+      setAdminError(formatError(error));
+    }
   }
 
   async function refreshAccessCode() {

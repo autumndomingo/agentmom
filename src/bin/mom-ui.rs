@@ -14,7 +14,7 @@ use axum::{
     extract::{Path, Query},
     http::{HeaderMap, StatusCode, header::AUTHORIZATION},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, patch, post},
 };
 use microsandbox::{Sandbox, sandbox::SandboxStatus};
 use rand::Rng;
@@ -92,6 +92,11 @@ struct CreateAccessCodeRequest {
     label: Option<String>,
     max_uses: Option<i64>,
     expires_at: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateUserRoleRequest {
+    role: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -201,6 +206,7 @@ async fn main() -> Result<()> {
         .route("/auth/login", post(login))
         .route("/auth/session", get(current_session))
         .route("/users", get(list_users))
+        .route("/users/{id}/role", patch(update_user_role))
         .route("/access-codes", post(create_access_code))
         .route("/vms", get(list_vms).post(create_vm))
         .route("/vms/{name}/start", post(start_vm))
@@ -301,6 +307,49 @@ ORDER BY
         .collect();
 
     Ok(Json(UsersResponse { users }))
+}
+
+async fn update_user_role(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(request): Json<UpdateUserRoleRequest>,
+) -> Result<Json<UserRecord>, ApiError> {
+    authorize_admin(&state, &headers).await?;
+    let role = request.role.trim().to_uppercase();
+    if role != "ADMN" && role != "PAR" {
+        return Err(ApiError::BadRequest(
+            "Role must be ADMN or PAR.".to_string(),
+        ));
+    }
+
+    let now = now_epoch();
+    let Some(row) = sqlx::query(
+        r#"
+UPDATE users
+SET role = ?1, updated_at = ?2
+WHERE id = ?3
+RETURNING id, name, email, role, status, last_active_at
+"#,
+    )
+    .bind(role)
+    .bind(now)
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await
+    .context("update user role")?
+    else {
+        return Err(ApiError::NotFound);
+    };
+
+    Ok(Json(UserRecord {
+        id: row.get("id"),
+        name: row.get("name"),
+        email: row.get("email"),
+        role: row.get("role"),
+        status: row.get("status"),
+        last_active_at: row.get("last_active_at"),
+    }))
 }
 
 async fn create_access_code(
@@ -1196,6 +1245,8 @@ fn default_memory() -> u64 {
 enum ApiError {
     Unauthorized,
     Forbidden,
+    NotFound,
+    BadRequest(String),
     Anyhow(anyhow::Error),
     Command(CommandResult),
 }
@@ -1223,6 +1274,16 @@ impl IntoResponse for ApiError {
                 }),
             )
                 .into_response(),
+            ApiError::NotFound => (
+                StatusCode::NOT_FOUND,
+                Json(ErrorBody {
+                    error: "User not found.".to_string(),
+                }),
+            )
+                .into_response(),
+            ApiError::BadRequest(error) => {
+                (StatusCode::BAD_REQUEST, Json(ErrorBody { error })).into_response()
+            }
             ApiError::Anyhow(error) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorBody {
