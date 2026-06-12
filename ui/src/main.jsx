@@ -146,7 +146,10 @@ function BuildersTableBrand() {
   return (
     <div className="landingHeader">
       <div className="brandMark">A</div>
-      <h1>Let's start building with Agent Mom</h1>
+      <h1>
+        <span>Let's start building with</span>
+        <strong>Agent Mom</strong>
+      </h1>
     </div>
   );
 }
