@@ -144,17 +144,9 @@ function LandingPage({ onSubmit }) {
 
 function BuildersTableBrand() {
   return (
-    <div className="landingBrand">
-      <div className="terminalLine">
-        <span>~/builders-table</span>
-        <strong>$ agent-mom --meetup</strong>
-      </div>
-      <p className="meetupDate">// THE BUILDERS' TABLE</p>
-      <h1>
-        <span>Agent Mom</span>
-        <small>brought to you by</small>
-        <strong>the builders' table</strong>
-      </h1>
+    <div className="landingHeader">
+      <div className="brandMark">A</div>
+      <h1>Let's start building with Agent Mom</h1>
     </div>
   );
 }
