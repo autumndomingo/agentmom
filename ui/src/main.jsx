@@ -9,6 +9,7 @@ import {
   Search,
   Send,
   Sparkles,
+  Users,
 } from 'lucide-react';
 import './styles.css';
 
@@ -59,6 +60,10 @@ function App() {
       setSelectedName('');
     }
     return nextVms;
+  }
+
+  function openAdminPage() {
+    window.location.href = '/admin';
   }
 
   async function createWorkspace(event) {
@@ -194,6 +199,12 @@ function App() {
             <p>{selectedVm ? friendlyStatus(selectedVm.status) : 'Create a workspace to begin.'}</p>
           </div>
           <div className="headerActions">
+            {userSession.role === 'ADMN' && (
+              <button className="refreshButton" type="button" onClick={openAdminPage}>
+                <Users size={17} />
+                Admin
+              </button>
+            )}
             <button className="refreshButton" onClick={refresh} disabled={busy}>
               <RefreshCcw size={17} />
               Refresh
