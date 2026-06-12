@@ -18,6 +18,14 @@ struct ChildGuard {
     child: Child,
 }
 
+impl ChildGuard {
+    fn stop(&mut self) -> Result<()> {
+        let _ = self.child.kill();
+        self.child.wait().context("wait for child process")?;
+        Ok(())
+    }
+}
+
 impl Drop for ChildGuard {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -34,8 +42,9 @@ struct TestNode {
 
 struct TestFleet {
     api_state: TempDir,
+    api_addr: String,
     api_url: String,
-    _api: ChildGuard,
+    api: ChildGuard,
 }
 
 #[tokio::test]
@@ -716,6 +725,23 @@ async fn sse_wakes_worker_without_waiting_for_poll_interval() -> Result<()> {
 }
 
 #[tokio::test]
+async fn worker_survives_transient_api_outage_and_claims_after_recovery() -> Result<()> {
+    let mut fleet = TestFleet::start().await?;
+    let _node = spawn_worker("node-a", &fleet.api_url)?;
+    wait_for_node(fleet.api_state.path(), "node-a").await?;
+
+    fleet.stop_api()?;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    fleet.start_api(&[]).await?;
+
+    let job_id = create_workspace(&fleet.api_url, "api-recovered", "node-a", 0).await?;
+    wait_for_job_status(&fleet.api_url, &job_id, "succeeded").await?;
+    wait_for_workspace_status(&fleet.api_url, "api-recovered", "running").await?;
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn service_open_routes_to_assigned_worker_url() -> Result<()> {
     let fleet = TestFleet::start().await?;
     let node_a =
@@ -774,9 +800,19 @@ impl TestFleet {
         wait_ready(&api_url).await?;
         Ok(Self {
             api_state,
+            api_addr,
             api_url,
-            _api: api,
+            api,
         })
+    }
+
+    fn stop_api(&mut self) -> Result<()> {
+        self.api.stop()
+    }
+
+    async fn start_api(&mut self, envs: &[(&str, &str)]) -> Result<()> {
+        self.api = spawn_api(self.api_state.path(), &self.api_addr, envs)?;
+        wait_ready(&self.api_url).await
     }
 }
 

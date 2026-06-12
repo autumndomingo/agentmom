@@ -21,7 +21,8 @@ struct OpenServiceRequest {
 
 pub(crate) async fn worker(args: WorkerArgs) -> Result<()> {
     let node = node_id()?;
-    let client = reqwest::Client::new();
+    let client = worker_api_client()?;
+    let sse_client = worker_sse_client()?;
     let api_url = args.api_url.trim_end_matches('/').to_string();
     let worker_api = WorkerApi {
         client: client.clone(),
@@ -46,7 +47,6 @@ pub(crate) async fn worker(args: WorkerArgs) -> Result<()> {
     let worker_http = tokio::spawn(run_worker_http(listener, state));
     register_worker(&client, &api_url, &node, &worker_url).await?;
     let (wake_tx, mut wake_rx) = mpsc::channel::<()>(32);
-    let sse_client = client.clone();
     let sse_url = api_url.clone();
     let sse_node = node.clone();
     let sse_task = tokio::spawn(async move {
@@ -56,8 +56,28 @@ pub(crate) async fn worker(args: WorkerArgs) -> Result<()> {
     log_record("info", "worker_start", None, "Agent Mom worker starting");
     let mut shutdown = Box::pin(shutdown_signal());
     loop {
-        let claimed = worker_claim_once(&worker_api, &worker_url).await?;
-        worker_reconcile_once(&worker_api).await?;
+        let mut claimed = false;
+        match worker_claim_once(&worker_api, &worker_url).await {
+            Ok(value) => claimed = value,
+            Err(error) => {
+                log_record(
+                    "error",
+                    "worker_claim_failed",
+                    None,
+                    &format!("worker claim failed: {error:#}"),
+                );
+                eprintln!("worker claim failed: {error:#}");
+            }
+        }
+        if let Err(error) = worker_reconcile_once(&worker_api).await {
+            log_record(
+                "error",
+                "worker_reconcile_cycle_failed",
+                None,
+                &format!("worker reconcile cycle failed: {error:#}"),
+            );
+            eprintln!("worker reconcile cycle failed: {error:#}");
+        }
         if args.once {
             sse_task.abort();
             worker_http.abort();
@@ -77,6 +97,21 @@ pub(crate) async fn worker(args: WorkerArgs) -> Result<()> {
             _ = tokio::time::sleep(Duration::from_secs(args.interval)) => {},
         }
     }
+}
+
+fn worker_api_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .context("build worker API HTTP client")
+}
+
+fn worker_sse_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .build()
+        .context("build worker SSE HTTP client")
 }
 
 async fn run_worker_http(listener: tokio::net::TcpListener, state: Arc<WorkerState>) -> Result<()> {

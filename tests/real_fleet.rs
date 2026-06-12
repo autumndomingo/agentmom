@@ -202,15 +202,24 @@ if [ -z "$mom_bin" ]; then
   mom_bin="$(systemctl show -p ExecStart --value agentmom-api.service | sed -n 's/.*path=\([^ ;]*\/mom\).*/\1/p')"
 fi
 test -x "$mom_bin"
-"$mom_bin" db status
+service_user="${{AGENTMOM_REAL_API_SERVICE_USER:-}}"
+if [ -z "$service_user" ]; then
+  service_user="$(systemctl show -p User --value agentmom-api.service || true)"
+fi
+if [ -n "$service_user" ]; then
+  run_as_service() {{ sudo -u "$service_user" "$@"; }}
+else
+  run_as_service() {{ "$@"; }}
+fi
+run_as_service env MOM_STATE_DIR="$MOM_STATE_DIR" "$mom_bin" db status
 sudo systemctl start agentmom-catalog-backup.service
-latest="$(ls -1t "$MOM_STATE_DIR"/catalog-backups/fleet-*.db | head -1)"
+latest="$(run_as_service sh -c 'ls -1t "$1"/catalog-backups/fleet-*.db | head -1' sh "$MOM_STATE_DIR")"
 test -n "$latest"
-tmpdir="$(mktemp -d "$MOM_STATE_DIR"/catalog-restore-drill.XXXXXX)"
-cleanup() {{ rm -rf "$tmpdir"; }}
+tmpdir="$(run_as_service mktemp -d "$MOM_STATE_DIR"/catalog-restore-drill.XXXXXX)"
+cleanup() {{ run_as_service rm -rf "$tmpdir"; }}
 trap cleanup EXIT
-cp "$latest" "$tmpdir/fleet.db"
-MOM_STATE_DIR="$tmpdir" "$mom_bin" db status
+run_as_service cp "$latest" "$tmpdir/fleet.db"
+run_as_service env MOM_STATE_DIR="$tmpdir" "$mom_bin" db status
 "#,
     );
     let output = Command::new("ssh")
