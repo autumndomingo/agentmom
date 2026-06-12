@@ -49,15 +49,17 @@ pub(crate) async fn worker(args: WorkerArgs) -> Result<()> {
     let sse_client = client.clone();
     let sse_url = api_url.clone();
     let sse_node = node.clone();
-    tokio::spawn(async move {
+    let sse_task = tokio::spawn(async move {
         worker_sse_loop(sse_client, sse_url, sse_node, wake_tx).await;
     });
 
     log_record("info", "worker_start", None, "Agent Mom worker starting");
+    let mut shutdown = Box::pin(shutdown_signal());
     loop {
         let claimed = worker_claim_once(&worker_api, &worker_url).await?;
         worker_reconcile_once(&worker_api).await?;
         if args.once {
+            sse_task.abort();
             worker_http.abort();
             return Ok(());
         }
@@ -65,6 +67,12 @@ pub(crate) async fn worker(args: WorkerArgs) -> Result<()> {
             continue;
         }
         tokio::select! {
+            _ = &mut shutdown => {
+                log_record("info", "worker_shutdown", None, "Agent Mom worker shutting down");
+                sse_task.abort();
+                worker_http.abort();
+                return Ok(());
+            },
             _ = wake_rx.recv() => {},
             _ = tokio::time::sleep(Duration::from_secs(args.interval)) => {},
         }

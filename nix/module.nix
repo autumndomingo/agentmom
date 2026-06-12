@@ -469,6 +469,7 @@ in
         ExecStart = "${cfg.package}/bin/mom worker --interval ${toString cfg.worker.intervalSeconds}";
         Restart = "always";
         RestartSec = "5s";
+        TimeoutStopSec = "10s";
         WorkingDirectory = cfg.stateDir;
       } // lib.optionalAttrs (cfg.worker.resticEnvFile != null) {
         EnvironmentFile = cfg.worker.resticEnvFile;
