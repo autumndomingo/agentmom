@@ -12,8 +12,8 @@ Run Agent Mom across a handful of Hetzner/Latitude-style hosts without Kubernete
 - Keep microsandbox VMs host-local; do not share live VM state across hosts.
 - Treat workspace data as durable named volumes plus backup artifacts.
 - Use SSE for fast worker notification, with transactional HTTP job claiming as the source of truth.
-- Use iron-proxy for credential injection so long-lived provider credentials are never copied into sandboxes.
-- Use systemd/NixOS deployment on `pika-build` and similar hosts.
+- Use iron-proxy for OpenRouter credential injection so long-lived provider credentials are not copied into sandboxes.
+- Use systemd/NixOS deployment on `mom-ctrl`, `mom-1`, `mom-2`, and similar hosts.
 - Keep the architecture compatible with a future k3s wrapper, but do not require k3s now.
 
 Out of scope for this phase:
@@ -26,12 +26,12 @@ Out of scope for this phase:
 ## Approach
 
 - Keep Agent Mom's object model narrow: workspace, node, job, event, backup.
-- Split the current single-host daemon into API and worker roles while preserving a single-process/local mode for development.
+- Run a central API role and one worker role per VM host.
 - Use a central API database for multi-host state. Start with SQLite only if there is exactly one API process; move to Postgres when API HA or multiple API writers are required.
 - Workers keep local SQLite only for host-local cache/state if needed; central job/workspace ownership lives in the API.
 - Workers connect to the API via SSE for wake notifications and claim jobs over normal HTTP.
 - Jobs are durable and idempotent. SSE is only a low-latency nudge.
-- Backups are taken from stopped workspace volumes using restic/kopia or a configured command.
+- Backups are taken from workspace volumes using restic.
 - Logs are structured and support workspace-level incident review.
 
 ## Steps
@@ -64,14 +64,14 @@ Out of scope for this phase:
 - [~] Integrate iron-proxy for credentials and egress.
   - [x] Support explicit `vm-auth-json` mode that copies Codex/Hermes OAuth auth into the VM for compatibility testing.
   - [x] Support explicit `openrouter-proxy` mode that removes VM auth files and points OpenRouter-capable clients through iron-proxy.
-  - [~] Configure placeholder secret injection for OpenRouter first.
+  - [x] Configure OpenRouter secret injection for worker hosts.
   - [x] Mount or bake the iron-proxy CA into sandbox trust when configured.
   - [x] Add NixOS service wiring for iron-proxy next to Agent Mom.
   - [~] Add a smoke test proving the sandbox has no real provider key but can call through the proxy.
 
 - [~] Add central API mode.
   - [x] Add `mom api` service with HTTP endpoints for workspaces, jobs, nodes, and events.
-  - [ ] Keep single-host mode working without the API for local development.
+  - [x] Remove local mode as a production path; workers report through API endpoints.
   - [x] Define API database schema for nodes, workspaces, jobs, events, and backups.
   - [x] Add authenticated worker registration and heartbeat.
 
@@ -110,8 +110,9 @@ Out of scope for this phase:
 - [~] Add deployment flow for multiple systemd hosts.
   - [x] Document host bootstrap for `pika-build` style NixOS boxes.
   - [x] Add deploy script or Nix flake app for API and worker rollout.
-  - [x] Deploy first Nix-native API plus worker pair to `pika-build`.
-  - [x] Deploy `agentmom-ui` on `pika-build` against the local fleet API.
+  - [x] Deploy Nix-native API on `mom-ctrl`.
+  - [x] Deploy worker-only hosts `mom-1` and `mom-2`.
+  - [x] Serve the embedded UI from the API process; do not run a separate UI daemon.
   - [x] Keep per-host worker config small: node ID, API URL, state dirs, MSB_HOME, proxy config.
   - [x] Add runbooks for worker down, API down, backup failing, disk pressure, and proxy blocked request spikes.
 
@@ -135,19 +136,19 @@ Out of scope for this phase:
   `openrouter-proxy` keeps provider keys on the host and uses iron-proxy to inject OpenRouter auth.
 - Use iron-proxy rather than maintaining a custom API-key credential-injection proxy.
 - Defer subscription OAuth/token-broker integration until OpenRouter proxy mode is stable.
-- The current `mom daemon` is the seed of `agentmom-worker`.
-- Current slice adds local operator reporting before central API/SSE: node ID, workspace events, inspect/events commands, node status, and JSON daemon logs.
-- `pika-build` is running Agent Mom through the NixOS module, not an imperative user service. Durable state is `/var/lib/agentmom`, microsandbox state is `/var/lib/agentmom/microsandbox`, and the service uses Nix-declared config.
-- `pika-build` now runs the split `agentmom-api.service` and `agentmom-worker.service` units from the NixOS config. The API binds to `127.0.0.1:8080`; the local worker points at that API, uses SSE plus fallback polling, and registers as node `pika-build`.
-- `pika-build` also runs `agentmom-ui.service` on `127.0.0.1:8787`; it uses `MOM_API_URL=http://127.0.0.1:8080` and can be reached with SSH port forwarding.
+- The current worker code is the successor to the original `mom daemon`; production workers report all job, workspace, event, and backup state through the central API.
+- `mom-ctrl` runs `agentmom-api.service` and Caddy for `agentmom.xyz`. The API binds to `127.0.0.1:8080` and owns the central SQLite database at `/var/lib/agentmom/fleet.db`.
+- `mom-1` and `mom-2` run worker-only Agent Mom services from NixOS. Durable state is `/var/lib/agentmom`, microsandbox state is `/var/lib/agentmom/microsandbox`, and services use Nix-declared config.
+- `agentmom.xyz` points at `77.42.80.210`. Public mutating API routes are protected by Basic Auth; worker routes currently bypass Caddy auth so workers can register, poll, and report state.
 - The deployed worker registration currently reports 32 CPUs, 131072 MiB memory, 48 max active workspaces, and 102400 MiB disk reserve.
-- `pika-build` runs `agentmom-credential-proxy.service` using iron-proxy. The service has a generated CA under `/var/lib/agentmom/iron-proxy`, listens on `:1080`, and writes `openrouter-proxy` guest config via Agent Mom.
-- `openrouter-proxy` workspaces no longer receive raw Codex/Hermes auth files. Provider calls still need a real `/var/lib/agentmom/secrets/openrouter-api-key` wired into the Nix config before the end-to-end provider smoke can pass.
+- Worker hosts run `agentmom-credential-proxy.service` using iron-proxy. The service has a generated CA under `/var/lib/agentmom/iron-proxy`, listens on `:1080`, and writes `openrouter-proxy` guest config via Agent Mom.
+- `openrouter-proxy` workspaces no longer receive raw Codex/Hermes auth files. Worker hosts get the OpenRouter key from agenix-managed NixOS secrets.
 - Base snapshots are now credential/proxy agnostic. Normal workspace creates clone the existing tool snapshot and then apply current auth/proxy config, so proxy/config iteration no longer rebuilds Alpine/Codex/Hermes. The measured no-rebuild create on `pika-build` was 9 seconds.
 - `mom workspace refresh-config <workspace>` re-applies Codex/Hermes/proxy config to an existing workspace without rebuilding the base snapshot.
 - Current API smoke tests cover `/health/live`, `/health/ready`, `/metrics`, workspace job creation, worker registration, transactional claim, and SSE `job_available` notification.
 - Worker endpoints support shared bearer-token auth through `MOM_WORKER_TOKEN` or `MOM_WORKER_TOKEN_FILE`; local smoke tests cover 401 without the token and success with the token.
-- SSH deployment to `pika-build` uses the Tailscale address `100.81.250.67` with `HostKeyAlias=65.108.234.158`; public SSH to `65.108.234.158:22` was timing out during this slice.
-- Current remote verification: `agentmom-api`, `agentmom-worker`, and `agentmom-ui` are active, `systemctl --failed` is empty, `/health/ready` returns ok, `/metrics` returns Prometheus text, `http://127.0.0.1:8787/` serves HTML, and `http://127.0.0.1:8787/api/vms` returns the fleet workspace list.
+- SSH deployment to `mom-1` uses the Tailscale address `100.81.250.67`. SSH to `mom-2` currently works through its current Tailscale address from `tailscale status`.
+- Current remote verification: `mom-ctrl` has active `agentmom-api`, Caddy, and Tailscale; `mom-1` and `mom-2` have active `agentmom-worker` and inactive local API/Caddy. The control DB shows both nodes `ready`.
+- Step 6 remote QA created one workspace per worker, stopped both, restarted both, backed both up to Cloudflare R2 via restic, and stopped both again. All create/start/stop/backup jobs succeeded and were claimed by the expected worker.
 - `~/configs` now references Agent Mom as `path:/Users/justin/code/agentmom-fleet`; the accidental `~/configs/agentmom` source mirror has been removed. The `pika-build` deploy path evaluates locally and copies Nix store paths to the remote build/target host rather than rsyncing application source into configs.
 - Operational runbooks live in `todos/multi-host-runbooks.md`.
