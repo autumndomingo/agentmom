@@ -234,6 +234,42 @@ pub(crate) fn workspace_mark_backup(name: &str) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn workspace_update_from_worker(
+    name: &str,
+    status: Option<&str>,
+    desired_state: Option<&str>,
+    touch: bool,
+    mark_backup: bool,
+) -> Result<()> {
+    let now = now_epoch()?;
+    let db = fleet_db()?;
+    if let Some(status) = status {
+        db.execute(
+            "UPDATE workspaces SET status = ?2, updated_at = ?3 WHERE name = ?1",
+            params![name, status, now],
+        )?;
+    }
+    if let Some(desired_state) = desired_state {
+        db.execute(
+            "UPDATE workspaces SET desired_state = ?2, updated_at = ?3 WHERE name = ?1",
+            params![name, desired_state, now],
+        )?;
+    }
+    if touch {
+        db.execute(
+            "UPDATE workspaces SET last_used_at = ?2, updated_at = ?2 WHERE name = ?1",
+            params![name, now],
+        )?;
+    }
+    if mark_backup {
+        db.execute(
+            "UPDATE workspaces SET last_backup_at = ?2, updated_at = ?2 WHERE name = ?1",
+            params![name, now],
+        )?;
+    }
+    Ok(())
+}
+
 pub(crate) fn record_workspace_event(
     workspace_name: &str,
     event_type: &str,
@@ -252,6 +288,35 @@ INSERT INTO workspace_events (
         params![
             workspace_name,
             node_id()?,
+            event_type,
+            status,
+            message,
+            serde_json::to_string(&metadata)?,
+            now_epoch()?,
+        ],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn record_workspace_event_for_node(
+    workspace_name: &str,
+    node: &str,
+    event_type: &str,
+    status: &str,
+    message: &str,
+    metadata: Value,
+) -> Result<()> {
+    ensure_fleet_schema()?;
+    let db = fleet_db()?;
+    db.execute(
+        r#"
+INSERT INTO workspace_events (
+    workspace_name, node_id, event_type, status, message, metadata_json, created_at
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+"#,
+        params![
+            workspace_name,
+            node,
             event_type,
             status,
             message,
@@ -331,6 +396,35 @@ INSERT INTO workspace_backups (
             id,
             workspace.name,
             node_id()?,
+            artifact.kind,
+            artifact.location,
+            status,
+            artifact.size_bytes,
+            now_epoch()?,
+        ],
+    )?;
+    Ok(id)
+}
+
+pub(crate) fn record_backup_artifact_for_node(
+    workspace_name: &str,
+    node: &str,
+    artifact: &BackupArtifact,
+    status: &str,
+) -> Result<String> {
+    ensure_fleet_schema()?;
+    let id = new_id("bak")?;
+    let db = fleet_db()?;
+    db.execute(
+        r#"
+INSERT INTO workspace_backups (
+    id, workspace_name, node_id, kind, location, status, size_bytes, created_at
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+"#,
+        params![
+            id,
+            workspace_name,
+            node,
             artifact.kind,
             artifact.location,
             status,

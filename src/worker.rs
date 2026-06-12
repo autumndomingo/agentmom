@@ -5,6 +5,13 @@ struct WorkerState {
     services: service::ServiceState,
 }
 
+#[derive(Clone)]
+struct WorkerApi {
+    client: reqwest::Client,
+    api_url: String,
+    node: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct OpenServiceRequest {
     workspace_name: String,
@@ -12,10 +19,14 @@ struct OpenServiceRequest {
 }
 
 pub(crate) async fn worker(args: WorkerArgs) -> Result<()> {
-    ensure_fleet_schema()?;
     let node = node_id()?;
     let client = reqwest::Client::new();
     let api_url = args.api_url.trim_end_matches('/').to_string();
+    let worker_api = WorkerApi {
+        client: client.clone(),
+        api_url: api_url.clone(),
+        node: node.clone(),
+    };
     let worker_url = args
         .worker_url
         .clone()
@@ -35,8 +46,8 @@ pub(crate) async fn worker(args: WorkerArgs) -> Result<()> {
 
     log_record("info", "worker_start", None, "Agent Mom worker starting");
     loop {
-        let claimed = worker_claim_once(&client, &api_url, &node, &worker_url).await?;
-        worker_reconcile_once(&node).await?;
+        let claimed = worker_claim_once(&worker_api, &worker_url).await?;
+        worker_reconcile_once(&worker_api).await?;
         if args.once {
             worker_http.abort();
             return Ok(());
@@ -140,19 +151,15 @@ async fn worker_sse_loop(
     }
 }
 
-async fn worker_claim_once(
-    client: &reqwest::Client,
-    api_url: &str,
-    node: &str,
-    worker_url: &str,
-) -> Result<bool> {
-    let records = workspace_all()?;
+async fn worker_claim_once(api: &WorkerApi, worker_url: &str) -> Result<bool> {
+    let records = api.workspaces().await?;
     let pressure = node_pressure(&records).await?;
-    let response = client
-        .post(format!("{api_url}/worker/claim"))
+    let response = api
+        .client
+        .post(format!("{}/worker/claim", api.api_url))
         .with_worker_token()
         .json(&json!({
-            "node_id": node,
+            "node_id": api.node,
             "capacity": node_capacity(),
             "pressure": pressure,
             "worker_url": worker_url
@@ -165,20 +172,15 @@ async fn worker_claim_once(
     let Some(job) = response else {
         return Ok(false);
     };
-    run_claimed_job(client, api_url, node, job).await?;
+    run_claimed_job(api, job).await?;
     Ok(true)
 }
 
-async fn run_claimed_job(
-    client: &reqwest::Client,
-    api_url: &str,
-    node: &str,
-    job: JobRecord,
-) -> Result<()> {
+async fn run_claimed_job(api: &WorkerApi, job: JobRecord) -> Result<()> {
     worker_job_event(
-        client,
-        api_url,
-        node,
+        &api.client,
+        &api.api_url,
+        &api.node,
         &job.id,
         "job_running",
         "running",
@@ -186,14 +188,14 @@ async fn run_claimed_job(
         json!({ "kind": job.kind }),
     )
     .await?;
-    let result = execute_job(&job).await;
+    let result = execute_job(api, &job).await;
     match result {
         Ok(output) => {
-            client
-                .post(format!("{api_url}/worker/jobs/{}/complete", job.id))
+            api.client
+                .post(format!("{}/worker/jobs/{}/complete", api.api_url, job.id))
                 .with_worker_token()
                 .json(&json!({
-                    "node_id": node,
+                    "node_id": api.node,
                     "status": "succeeded",
                     "output": output
                 }))
@@ -204,11 +206,12 @@ async fn run_claimed_job(
         }
         Err(error) => {
             let message = format!("{error:#}");
-            let _ = client
-                .post(format!("{api_url}/worker/jobs/{}/complete", job.id))
+            let _ = api
+                .client
+                .post(format!("{}/worker/jobs/{}/complete", api.api_url, job.id))
                 .with_worker_token()
                 .json(&json!({
-                    "node_id": node,
+                    "node_id": api.node,
                     "status": "failed",
                     "output": { "error": message }
                 }))
@@ -245,65 +248,39 @@ async fn worker_job_event(
     Ok(())
 }
 
-async fn execute_job(job: &JobRecord) -> Result<Value> {
+async fn execute_job(api: &WorkerApi, job: &JobRecord) -> Result<Value> {
     let payload: Value = serde_json::from_str(&job.payload_json)?;
     match job.kind.as_str() {
         "create" => {
-            let args = WorkspaceCreateArgs {
-                name: job.workspace_name.clone(),
-                user: payload
-                    .get("user")
-                    .and_then(Value::as_str)
-                    .map(ToString::to_string),
-                replace: false,
-                cpus: payload
-                    .get("cpus")
-                    .and_then(Value::as_u64)
-                    .and_then(|value| u8::try_from(value).ok())
-                    .unwrap_or_else(default_workspace_cpus),
-                memory: payload
-                    .get("memory")
-                    .and_then(Value::as_u64)
-                    .unwrap_or_else(default_workspace_memory),
-                volume_quota: payload
-                    .get("volume_quota")
-                    .and_then(Value::as_u64)
-                    .and_then(|value| u32::try_from(value).ok())
-                    .unwrap_or_else(default_workspace_volume_quota),
-                idle_timeout: payload
-                    .get("idle_timeout")
-                    .and_then(Value::as_u64)
-                    .unwrap_or_else(default_workspace_idle_timeout),
-                backup_interval: payload
-                    .get("backup_interval")
-                    .and_then(Value::as_u64)
-                    .unwrap_or_else(default_workspace_backup_interval),
-                rebuild_snapshot: false,
-                no_snapshot: false,
-            };
-            workspace_create(args).await?;
+            let workspace = api.workspace(&job.workspace_name).await?;
+            create_workspace_local(api, &workspace, &payload).await?;
             Ok(json!({ "created": true }))
         }
         "start" | "warm" => {
-            let workspace = workspace_get(&job.workspace_name)?;
-            workspace_touch(&workspace.name)?;
-            workspace_set_desired(&workspace.name, "running")?;
-            workspace_ensure_running(&workspace).await?;
+            let workspace = api.workspace(&job.workspace_name).await?;
+            api.update_workspace(
+                &workspace.name,
+                Some("starting"),
+                Some("running"),
+                true,
+                false,
+            )
+            .await?;
+            ensure_workspace_running_local(api, &workspace).await?;
             Ok(json!({ "started": true }))
         }
         "stop" => {
-            workspace_stop(&job.workspace_name).await?;
+            let workspace = api.workspace(&job.workspace_name).await?;
+            stop_workspace_local(api, &workspace).await?;
             Ok(json!({ "stopped": true }))
         }
         "backup" => {
-            let workspace = workspace_get(&job.workspace_name)?;
-            backup::backup_workspace(&workspace, false).await?;
+            let workspace = api.workspace(&job.workspace_name).await?;
+            backup_workspace_local(api, &workspace, false).await?;
             Ok(json!({ "backed_up": true }))
         }
         "restore" => {
-            let backup_id = payload.get("backup_id").and_then(Value::as_str);
-            backup::workspace_restore(&job.workspace_name, backup_id).await?;
-            Ok(json!({ "restored": true }))
+            bail!("distributed restore is not implemented yet")
         }
         "execute" => {
             let command = payload
@@ -318,9 +295,10 @@ async fn execute_job(job: &JobRecord) -> Result<Value> {
                         .ok_or_else(|| anyhow!("command entries must be strings"))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let workspace = workspace_get(&job.workspace_name)?;
-            workspace_touch(&workspace.name)?;
-            let sandbox = workspace_running_sandbox(&workspace).await?;
+            let workspace = api.workspace(&job.workspace_name).await?;
+            api.update_workspace(&workspace.name, None, None, true, false)
+                .await?;
+            let sandbox = workspace_running_sandbox_local(api, &workspace).await?;
             let output = capture_guest_command(&sandbox, command).await?;
             Ok(output)
         }
@@ -329,9 +307,10 @@ async fn execute_job(job: &JobRecord) -> Result<Value> {
                 .get("prompt")
                 .and_then(Value::as_str)
                 .ok_or_else(|| anyhow!("codex job payload requires prompt"))?;
-            let workspace = workspace_get(&job.workspace_name)?;
-            workspace_touch(&workspace.name)?;
-            let sandbox = workspace_running_sandbox(&workspace).await?;
+            let workspace = api.workspace(&job.workspace_name).await?;
+            api.update_workspace(&workspace.name, None, None, true, false)
+                .await?;
+            let sandbox = workspace_running_sandbox_local(api, &workspace).await?;
             run_codex(&sandbox, prompt).await?;
             Ok(json!({ "ok": true }))
         }
@@ -349,9 +328,10 @@ async fn execute_job(job: &JobRecord) -> Result<Value> {
                         .ok_or_else(|| anyhow!("args entries must be strings"))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let workspace = workspace_get(&job.workspace_name)?;
-            workspace_touch(&workspace.name)?;
-            let sandbox = workspace_running_sandbox(&workspace).await?;
+            let workspace = api.workspace(&job.workspace_name).await?;
+            api.update_workspace(&workspace.name, None, None, true, false)
+                .await?;
+            let sandbox = workspace_running_sandbox_local(api, &workspace).await?;
             let mut command = vec!["hermes".to_string()];
             command.extend(args);
             let output = capture_guest_command(&sandbox, command).await?;
@@ -359,4 +339,423 @@ async fn execute_job(job: &JobRecord) -> Result<Value> {
         }
         other => bail!("unknown job kind: {other}"),
     }
+}
+
+async fn worker_reconcile_once(api: &WorkerApi) -> Result<()> {
+    let records = api.workspaces().await?;
+    let now = now_epoch()?;
+    for record in records {
+        if record
+            .node_id
+            .as_deref()
+            .is_some_and(|assigned| assigned != api.node)
+        {
+            continue;
+        }
+        if let Err(error) = worker_reconcile_workspace(api, &record, now).await {
+            log_record(
+                "error",
+                "workspace_reconcile_failed",
+                Some(&record.name),
+                "workspace reconciliation failed",
+            );
+            api.update_workspace(&record.name, Some("error"), None, false, false)
+                .await?;
+            api.event(
+                &record.name,
+                "workspace_reconcile_failed",
+                "failed",
+                &format!("{error:#}"),
+                json!({ "sandbox": record.sandbox_name, "volume": record.volume_name }),
+            )
+            .await?;
+            eprintln!("reconcile {} failed: {error:#}", record.name);
+        }
+    }
+    Ok(())
+}
+
+async fn worker_reconcile_workspace(
+    api: &WorkerApi,
+    record: &WorkspaceRecord,
+    now: i64,
+) -> Result<()> {
+    if record.desired_state == "running" {
+        ensure_workspace_running_local(api, record).await?;
+        if record.idle_timeout_secs > 0
+            && now.saturating_sub(record.last_used_at) >= record.idle_timeout_secs as i64
+        {
+            log_record(
+                "info",
+                "workspace_idle_stop",
+                Some(&record.name),
+                "workspace idle timeout reached",
+            );
+            if let Ok(handle) = Sandbox::get(&record.sandbox_name).await {
+                if handle.status() == SandboxStatus::Running
+                    || handle.status() == SandboxStatus::Draining
+                {
+                    handle.stop_with_timeout(Duration::from_secs(10)).await?;
+                }
+            }
+            api.update_workspace(&record.name, Some("idle-stopped"), None, false, false)
+                .await?;
+            api.event(
+                &record.name,
+                "workspace_idle_stopped",
+                "succeeded",
+                "workspace stopped after idle timeout",
+                json!({ "idle_seconds": now.saturating_sub(record.last_used_at) }),
+            )
+            .await?;
+        }
+    }
+
+    if backup_due(record, now) {
+        if let Err(error) = backup_workspace_local(api, record, false).await {
+            log_record(
+                "error",
+                "workspace_backup_failed",
+                Some(&record.name),
+                "workspace backup failed",
+            );
+            api.event(
+                &record.name,
+                "workspace_backup_failed",
+                "failed",
+                &format!("{error:#}"),
+                json!({}),
+            )
+            .await?;
+            eprintln!("backup {} failed: {error:#}", record.name);
+        }
+    }
+    Ok(())
+}
+
+impl WorkerApi {
+    async fn workspaces(&self) -> Result<Vec<WorkspaceRecord>> {
+        self.client
+            .get(format!("{}/api/workspaces", self.api_url))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Vec<WorkspaceRecord>>()
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn workspace(&self, name: &str) -> Result<WorkspaceRecord> {
+        self.workspaces()
+            .await?
+            .into_iter()
+            .find(|workspace| workspace.name == name)
+            .ok_or_else(|| anyhow!("workspace not found in API: {name}"))
+    }
+
+    async fn update_workspace(
+        &self,
+        name: &str,
+        status: Option<&str>,
+        desired_state: Option<&str>,
+        touch: bool,
+        mark_backup: bool,
+    ) -> Result<()> {
+        self.client
+            .post(format!("{}/worker/workspaces/{name}/state", self.api_url))
+            .with_worker_token()
+            .json(&json!({
+                "node_id": self.node,
+                "status": status,
+                "desired_state": desired_state,
+                "touch": touch,
+                "mark_backup": mark_backup
+            }))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    async fn event(
+        &self,
+        name: &str,
+        event_type: &str,
+        status: &str,
+        message: &str,
+        metadata: Value,
+    ) -> Result<()> {
+        self.client
+            .post(format!("{}/worker/workspaces/{name}/events", self.api_url))
+            .with_worker_token()
+            .json(&json!({
+                "node_id": self.node,
+                "event_type": event_type,
+                "status": status,
+                "message": message,
+                "metadata": metadata
+            }))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    async fn record_backup(&self, name: &str, artifact: &BackupArtifact) -> Result<String> {
+        let response = self
+            .client
+            .post(format!("{}/worker/workspaces/{name}/backups", self.api_url))
+            .with_worker_token()
+            .json(&json!({
+                "node_id": self.node,
+                "kind": artifact.kind,
+                "location": artifact.location,
+                "status": "succeeded",
+                "size_bytes": artifact.size_bytes
+            }))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        response
+            .get("id")
+            .and_then(Value::as_str)
+            .map(ToString::to_string)
+            .ok_or_else(|| anyhow!("backup artifact response did not include id"))
+    }
+}
+
+async fn create_workspace_local(
+    api: &WorkerApi,
+    workspace: &WorkspaceRecord,
+    payload: &Value,
+) -> Result<()> {
+    api.event(
+        &workspace.name,
+        "workspace_create_started",
+        "running",
+        "workspace create requested",
+        json!({
+            "sandbox": workspace.sandbox_name,
+            "volume": workspace.volume_name,
+            "cpus": workspace.cpus,
+            "memory_mib": workspace.memory_mib,
+            "volume_quota_mib": workspace.volume_quota_mib
+        }),
+    )
+    .await?;
+    let create_args = CreateArgs {
+        name: workspace.sandbox_name.clone(),
+        replace: false,
+        cpus: workspace.cpus,
+        memory: u64::from(workspace.memory_mib),
+        rebuild_snapshot: false,
+        no_snapshot: false,
+    };
+    let mount = WorkspaceMount {
+        volume_name: workspace.volume_name.clone(),
+        volume_quota_mib: workspace.volume_quota_mib,
+        workspace_name: workspace.name.clone(),
+    };
+    if let Err(error) = create_sandbox(create_args, Some(mount)).await {
+        api.update_workspace(&workspace.name, Some("create-failed"), None, false, false)
+            .await?;
+        api.event(
+            &workspace.name,
+            "workspace_create_failed",
+            "failed",
+            &format!("{error:#}"),
+            json!({ "sandbox": workspace.sandbox_name, "volume": workspace.volume_name }),
+        )
+        .await?;
+        return Err(error);
+    }
+    api.update_workspace(&workspace.name, Some("stopped"), None, false, false)
+        .await?;
+    api.event(
+        &workspace.name,
+        "workspace_created",
+        "succeeded",
+        "workspace VM created and stopped with persistent volume",
+        json!({
+            "sandbox": workspace.sandbox_name,
+            "volume": workspace.volume_name,
+            "user": payload.get("user")
+        }),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn stop_workspace_local(api: &WorkerApi, workspace: &WorkspaceRecord) -> Result<()> {
+    api.update_workspace(&workspace.name, None, Some("stopped"), false, false)
+        .await?;
+    if let Ok(handle) = Sandbox::get(&workspace.sandbox_name).await {
+        if handle.status() == SandboxStatus::Running || handle.status() == SandboxStatus::Draining {
+            handle.stop_with_timeout(Duration::from_secs(10)).await?;
+        }
+    }
+    api.update_workspace(&workspace.name, Some("stopped"), None, false, false)
+        .await?;
+    api.event(
+        &workspace.name,
+        "workspace_stopped",
+        "succeeded",
+        "workspace stopped",
+        json!({ "sandbox": workspace.sandbox_name }),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn ensure_workspace_running_local(
+    api: &WorkerApi,
+    workspace: &WorkspaceRecord,
+) -> Result<()> {
+    match Sandbox::get(&workspace.sandbox_name).await {
+        Ok(handle) if handle.status() == SandboxStatus::Running => {
+            api.update_workspace(&workspace.name, Some("running"), None, false, false)
+                .await
+        }
+        Ok(handle) => {
+            api.event(
+                &workspace.name,
+                "sandbox_starting",
+                "running",
+                "starting workspace sandbox",
+                json!({ "sandbox": workspace.sandbox_name }),
+            )
+            .await?;
+            handle.start_detached().await?;
+            api.update_workspace(&workspace.name, Some("running"), None, false, false)
+                .await?;
+            api.event(
+                &workspace.name,
+                "sandbox_started",
+                "succeeded",
+                "workspace sandbox started",
+                json!({ "sandbox": workspace.sandbox_name }),
+            )
+            .await
+        }
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "workspace {} has no sandbox {}; recreate it",
+                workspace.name, workspace.sandbox_name
+            )
+        }),
+    }
+}
+
+async fn workspace_running_sandbox_local(
+    api: &WorkerApi,
+    workspace: &WorkspaceRecord,
+) -> Result<Sandbox> {
+    match Sandbox::get(&workspace.sandbox_name).await {
+        Ok(handle) => match handle.status() {
+            SandboxStatus::Running | SandboxStatus::Draining => handle
+                .connect_with_timeout(Duration::from_secs(30))
+                .await
+                .with_context(|| {
+                    format!("connect to running sandbox '{}'", workspace.sandbox_name)
+                }),
+            SandboxStatus::Stopped | SandboxStatus::Crashed | SandboxStatus::Paused => {
+                api.event(
+                    &workspace.name,
+                    "sandbox_starting",
+                    "running",
+                    "starting workspace sandbox",
+                    json!({ "sandbox": workspace.sandbox_name }),
+                )
+                .await?;
+                let sandbox = handle
+                    .start()
+                    .await
+                    .with_context(|| format!("start sandbox '{}'", workspace.sandbox_name))?;
+                api.update_workspace(&workspace.name, Some("running"), None, false, false)
+                    .await?;
+                api.event(
+                    &workspace.name,
+                    "sandbox_started",
+                    "succeeded",
+                    "workspace sandbox started",
+                    json!({ "sandbox": workspace.sandbox_name }),
+                )
+                .await?;
+                Ok(sandbox)
+            }
+        },
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "workspace {} has no sandbox {}; recreate it",
+                workspace.name, workspace.sandbox_name
+            )
+        }),
+    }
+}
+
+async fn backup_workspace_local(
+    api: &WorkerApi,
+    workspace: &WorkspaceRecord,
+    leave_stopped: bool,
+) -> Result<()> {
+    let was_running = match Sandbox::get(&workspace.sandbox_name).await {
+        Ok(handle) => {
+            let running = handle.status() == SandboxStatus::Running
+                || handle.status() == SandboxStatus::Draining;
+            if running {
+                api.event(
+                    &workspace.name,
+                    "backup_stop_started",
+                    "running",
+                    "stopping workspace before backup",
+                    json!({ "sandbox": workspace.sandbox_name }),
+                )
+                .await?;
+                handle.stop_with_timeout(Duration::from_secs(20)).await?;
+                api.update_workspace(&workspace.name, Some("backup-stopped"), None, false, false)
+                    .await?;
+            }
+            running
+        }
+        Err(_) => false,
+    };
+    let volume_path = microsandbox_volume_path(&workspace.volume_name)?;
+    if !volume_path.exists() {
+        bail!(
+            "workspace volume {} does not exist at {}",
+            workspace.volume_name,
+            volume_path.display()
+        );
+    }
+    api.event(
+        &workspace.name,
+        "workspace_backup_started",
+        "running",
+        "workspace volume backup started",
+        json!({ "volume": workspace.volume_name }),
+    )
+    .await?;
+    let artifact = backup::run_restic_backup(workspace, &volume_path).await?;
+    let backup_id = api.record_backup(&workspace.name, &artifact).await?;
+    api.update_workspace(&workspace.name, None, None, false, true)
+        .await?;
+    api.event(
+        &workspace.name,
+        "workspace_backup_succeeded",
+        "succeeded",
+        "workspace volume backup completed",
+        json!({
+            "volume": workspace.volume_name,
+            "backup_id": backup_id,
+            "kind": artifact.kind,
+            "location": artifact.location
+        }),
+    )
+    .await?;
+    if was_running && !leave_stopped && workspace.desired_state == "running" {
+        ensure_workspace_running_local(api, workspace).await?;
+    }
+    Ok(())
 }

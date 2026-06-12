@@ -46,7 +46,7 @@ pub(crate) async fn backup_workspace(
         "workspace volume backup started",
         json!({ "volume": workspace.volume_name }),
     )?;
-    let artifact = run_backup_command(workspace, &volume_path).await?;
+    let artifact = run_restic_backup(workspace, &volume_path).await?;
     let backup_id = record_backup_artifact(workspace, &artifact, "succeeded")?;
     workspace_mark_backup(&workspace.name)?;
     record_workspace_event(
@@ -68,7 +68,7 @@ pub(crate) async fn backup_workspace(
     Ok(())
 }
 
-async fn run_backup_command(
+pub(crate) async fn run_restic_backup(
     workspace: &WorkspaceRecord,
     volume_path: &Path,
 ) -> Result<BackupArtifact> {

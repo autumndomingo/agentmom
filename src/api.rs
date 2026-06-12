@@ -20,6 +20,18 @@ pub(crate) async fn api(args: ApiArgs) -> Result<()> {
         .route("/worker/claim", post(api_worker_claim))
         .route("/worker/jobs/{id}/events", post(api_worker_job_event))
         .route("/worker/jobs/{id}/complete", post(api_worker_job_complete))
+        .route(
+            "/worker/workspaces/{name}/state",
+            post(api_worker_workspace_state),
+        )
+        .route(
+            "/worker/workspaces/{name}/events",
+            post(api_worker_workspace_event),
+        )
+        .route(
+            "/worker/workspaces/{name}/backups",
+            post(api_worker_backup_artifact),
+        )
         .route("/worker/events", get(api_worker_events))
         .merge(ui::api_routes())
         .with_state(Arc::new(state));
@@ -198,6 +210,70 @@ async fn api_worker_job_complete(
     require_worker_token(&headers).map_err(ApiError::Unauthorized)?;
     let job = complete_job(&id, &request.node_id, &request.status, request.output)?;
     Ok(Json(JobResponse { job }))
+}
+
+async fn api_worker_workspace_state(
+    AxumPath(name): AxumPath<String>,
+    headers: HeaderMap,
+    Json(request): Json<WorkerWorkspaceStateRequest>,
+) -> Result<Json<Value>, ApiError> {
+    require_worker_token(&headers).map_err(ApiError::Unauthorized)?;
+    require_assigned_worker(&name, &request.node_id)?;
+    workspace_update_from_worker(
+        &name,
+        request.status.as_deref(),
+        request.desired_state.as_deref(),
+        request.touch,
+        request.mark_backup,
+    )?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn api_worker_workspace_event(
+    AxumPath(name): AxumPath<String>,
+    headers: HeaderMap,
+    Json(request): Json<WorkerWorkspaceEventRequest>,
+) -> Result<Json<Value>, ApiError> {
+    require_worker_token(&headers).map_err(ApiError::Unauthorized)?;
+    require_assigned_worker(&name, &request.node_id)?;
+    record_workspace_event_for_node(
+        &name,
+        &request.node_id,
+        &request.event_type,
+        &request.status,
+        &request.message,
+        request.metadata,
+    )?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn api_worker_backup_artifact(
+    AxumPath(name): AxumPath<String>,
+    headers: HeaderMap,
+    Json(request): Json<WorkerBackupArtifactRequest>,
+) -> Result<Json<Value>, ApiError> {
+    require_worker_token(&headers).map_err(ApiError::Unauthorized)?;
+    require_assigned_worker(&name, &request.node_id)?;
+    let artifact = BackupArtifact {
+        kind: request.kind,
+        location: request.location,
+        size_bytes: request.size_bytes,
+    };
+    let id = record_backup_artifact_for_node(&name, &request.node_id, &artifact, &request.status)?;
+    Ok(Json(json!({ "id": id })))
+}
+
+fn require_assigned_worker(workspace_name: &str, node: &str) -> Result<(), ApiError> {
+    let workspace = workspace_get(workspace_name)?;
+    match workspace.node_id.as_deref() {
+        Some(assigned) if assigned == node => Ok(()),
+        Some(assigned) => Err(ApiError::Unauthorized(anyhow!(
+            "workspace {workspace_name} is assigned to node {assigned}, not {node}"
+        ))),
+        None => Err(ApiError::Unauthorized(anyhow!(
+            "workspace {workspace_name} has no assigned node"
+        ))),
+    }
 }
 
 async fn api_worker_events(

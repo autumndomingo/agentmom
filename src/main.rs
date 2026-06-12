@@ -286,7 +286,7 @@ struct WorkspaceMount {
     workspace_name: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct WorkspaceRecord {
     name: String,
     user_id: String,
@@ -449,8 +449,41 @@ struct ApiState {
 
 #[derive(Debug)]
 struct BackupArtifact {
+    pub(crate) kind: String,
+    pub(crate) location: String,
+    pub(crate) size_bytes: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkerWorkspaceStateRequest {
+    node_id: String,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    desired_state: Option<String>,
+    #[serde(default)]
+    touch: bool,
+    #[serde(default)]
+    mark_backup: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkerWorkspaceEventRequest {
+    node_id: String,
+    event_type: String,
+    status: String,
+    message: String,
+    #[serde(default)]
+    metadata: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkerBackupArtifactRequest {
+    node_id: String,
     kind: String,
     location: String,
+    status: String,
+    #[serde(default)]
     size_bytes: Option<i64>,
 }
 
@@ -958,94 +991,6 @@ async fn disk_available_mib() -> Result<u64> {
         .get(3)
         .ok_or_else(|| anyhow!("df row missing available column: {data}"))?;
     available.parse().context("parse df available MiB")
-}
-
-pub(crate) async fn worker_reconcile_once(node: &str) -> Result<()> {
-    let records = workspace_all()?;
-    let now = now_epoch()?;
-    for record in records {
-        if record
-            .node_id
-            .as_deref()
-            .is_some_and(|assigned| assigned != node)
-        {
-            continue;
-        }
-        if let Err(error) = worker_reconcile_workspace(&record, now).await {
-            log_record(
-                "error",
-                "workspace_reconcile_failed",
-                Some(&record.name),
-                "workspace reconciliation failed",
-            );
-            workspace_mark_status(&record.name, "error")?;
-            record_workspace_event(
-                &record.name,
-                "workspace_reconcile_failed",
-                "failed",
-                &format!("{error:#}"),
-                json!({ "sandbox": record.sandbox_name, "volume": record.volume_name }),
-            )?;
-            eprintln!("reconcile {} failed: {error:#}", record.name);
-        }
-    }
-    Ok(())
-}
-
-async fn worker_reconcile_workspace(record: &WorkspaceRecord, now: i64) -> Result<()> {
-    if record.desired_state == "running" {
-        workspace_ensure_running(record).await?;
-        if record.idle_timeout_secs > 0
-            && now.saturating_sub(record.last_used_at) >= record.idle_timeout_secs as i64
-        {
-            log_record(
-                "info",
-                "workspace_idle_stop",
-                Some(&record.name),
-                "workspace idle timeout reached",
-            );
-            println!(
-                "workspace {} idle for {}s; stopping",
-                record.name,
-                now.saturating_sub(record.last_used_at)
-            );
-            if let Ok(handle) = Sandbox::get(&record.sandbox_name).await {
-                if handle.status() == SandboxStatus::Running
-                    || handle.status() == SandboxStatus::Draining
-                {
-                    handle.stop_with_timeout(Duration::from_secs(10)).await?;
-                }
-            }
-            workspace_mark_status(&record.name, "idle-stopped")?;
-            record_workspace_event(
-                &record.name,
-                "workspace_idle_stopped",
-                "succeeded",
-                "workspace stopped after idle timeout",
-                json!({ "idle_seconds": now.saturating_sub(record.last_used_at) }),
-            )?;
-        }
-    }
-
-    if backup_due(record, now) {
-        if let Err(error) = backup::backup_workspace(record, false).await {
-            log_record(
-                "error",
-                "workspace_backup_failed",
-                Some(&record.name),
-                "workspace backup failed",
-            );
-            record_workspace_event(
-                &record.name,
-                "workspace_backup_failed",
-                "failed",
-                &format!("{error:#}"),
-                json!({}),
-            )?;
-            eprintln!("backup {} failed: {error:#}", record.name);
-        }
-    }
-    Ok(())
 }
 
 async fn workspace_ensure_running(workspace: &WorkspaceRecord) -> Result<()> {
