@@ -15,7 +15,6 @@ import './styles.css';
 const API_BASE = import.meta.env.VITE_API_BASE ?? '/api';
 const CHAT_STORAGE_KEY = 'agent-mom-chats';
 const USER_SESSION_KEY = 'agent-mom-user-session';
-const ADMIN_EMAIL = 'autumndomingo@gmail.com';
 
 function Root() {
   const [userSession, setUserSession] = useState(null);
@@ -71,7 +70,7 @@ function Root() {
 }
 
 function LandingPage({ onSubmit }) {
-  const [form, setForm] = useState({ email: ADMIN_EMAIL, accessCode: '' });
+  const [form, setForm] = useState({ email: '', accessCode: '' });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 

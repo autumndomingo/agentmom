@@ -50,26 +50,37 @@ input:disabled {
 }
 
 .landingPage {
+  position: relative;
   min-height: 100vh;
   padding: clamp(24px, 7vw, 96px);
   display: grid;
   place-items: center;
   background:
-    radial-gradient(circle at 90% 6%, rgb(220 121 55 / 18%), transparent 22%),
-    radial-gradient(circle at 2% 88%, rgb(70 128 148 / 18%), transparent 24%),
     linear-gradient(rgb(255 255 255 / 3%) 1px, transparent 1px),
     linear-gradient(90deg, rgb(255 255 255 / 3%) 1px, transparent 1px),
     var(--bg);
   background-size:
-    auto,
-    auto,
     56px 56px,
     56px 56px,
     auto;
+  overflow: hidden;
+}
+
+.landingPage::before {
+  position: absolute;
+  inset: -28%;
+  content: "";
+  background:
+    radial-gradient(circle at 16% 74%, rgb(220 121 55 / 22%), transparent 25%),
+    radial-gradient(circle at 78% 18%, rgb(70 128 148 / 20%), transparent 28%),
+    radial-gradient(circle at 44% 42%, rgb(225 148 78 / 10%), transparent 30%);
+  filter: blur(2px);
+  pointer-events: none;
 }
 
 .landingPanel {
   position: relative;
+  z-index: 1;
   width: min(910px, 100%);
   min-height: min(568px, calc(100vh - 72px));
   padding: clamp(26px, 4.8vw, 68px);
@@ -119,9 +130,7 @@ input:disabled {
 .landingHeader {
   position: relative;
   z-index: 1;
-  display: inline-flex;
-  align-items: flex-start;
-  gap: 14px;
+  display: block;
 }
 
 .landingHeader h1 {
@@ -134,13 +143,33 @@ input:disabled {
   line-height: 0.96;
 }
 
-.landingHeader h1 span,
+.landingHeader h1 > span,
 .landingHeader h1 strong {
   display: block;
 }
 
-.landingHeader h1 span {
-  font-style: italic;
+.landingHeader h1 .terminalPrompt {
+  width: fit-content;
+  max-width: 100%;
+  color: #f3eedf;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: clamp(16px, 1.75vw, 24px);
+  font-style: normal;
+  font-weight: 750;
+  letter-spacing: 0;
+  line-height: 1.35;
+}
+
+.typedPrompt {
+  display: inline-block;
+  width: 30ch;
+  max-width: 100%;
+  border-right: 0.12em solid #f3eedf;
+  overflow: hidden;
+  white-space: nowrap;
+  animation:
+    typePrompt 2.7s steps(30, end) both,
+    blinkCursor 900ms step-end infinite;
 }
 
 .landingHeader h1 strong {
@@ -148,10 +177,27 @@ input:disabled {
   font-size: 1.12em;
 }
 
+@keyframes typePrompt {
+  from {
+    width: 0;
+  }
+
+  to {
+    width: 30ch;
+  }
+}
+
+@keyframes blinkCursor {
+  50% {
+    border-color: transparent;
+  }
+}
+
 .landingForm {
   position: relative;
   z-index: 1;
-  width: min(470px, 100%);
+  width: 100%;
+  max-width: 470px;
   place-self: center;
   display: grid;
   gap: 28px;
@@ -197,6 +243,28 @@ input:disabled {
 
 .landingForm button:hover:not(:disabled) {
   background: #f0aa61;
+}
+
+@media (max-width: 560px) {
+  .landingPage {
+    padding: 16px;
+  }
+
+  .landingPanel {
+    width: calc(100vw - 32px);
+    padding: 22px;
+  }
+
+  .landingForm {
+    max-width: none;
+    justify-self: stretch;
+  }
+
+  .landingForm input {
+    min-width: 0;
+    padding: 0 18px;
+    font-size: 20px;
+  }
 }
 
 .sidebar {
