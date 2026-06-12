@@ -34,6 +34,10 @@ struct CreateRequest {
     idle_timeout: u64,
     #[serde(default = "default_workspace_backup_interval")]
     backup_interval: u64,
+    #[serde(default)]
+    rebuild_snapshot: bool,
+    #[serde(default)]
+    no_snapshot: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -170,7 +174,9 @@ async fn create_vm(
             "memory": request.memory,
             "volume_quota": request.volume_quota,
             "idle_timeout": request.idle_timeout,
-            "backup_interval": request.backup_interval
+            "backup_interval": request.backup_interval,
+            "rebuild_snapshot": request.rebuild_snapshot,
+            "no_snapshot": request.no_snapshot
         }),
     })?;
     let _ = state.notifier.send("job_available".to_string());
@@ -247,7 +253,7 @@ async fn open_workspace_service(name: &str, service: &str) -> Result<Json<Comman
     let workspace = workspace_get(name)?;
     let worker_url = workspace_worker_url(&workspace)?;
     let response = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(120))
         .build()?
         .post(format!(
             "{}/worker/services/{service}/open",

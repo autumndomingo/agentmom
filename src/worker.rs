@@ -653,7 +653,17 @@ async fn create_workspace_local(
         }),
     )
     .await?;
-    if let Err(error) = create_workspace_sandbox(workspace, false).await {
+    let rebuild_snapshot = payload
+        .get("rebuild_snapshot")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let no_snapshot = payload
+        .get("no_snapshot")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if let Err(error) =
+        create_workspace_sandbox(workspace, false, rebuild_snapshot, no_snapshot).await
+    {
         let volume_path = microsandbox_volume_path(&workspace.volume_name)?;
         if volume_path.exists() {
             api.event(
@@ -668,7 +678,7 @@ async fn create_workspace_local(
                 }),
             )
             .await?;
-            create_workspace_sandbox(workspace, true).await.with_context(|| {
+            create_workspace_sandbox(workspace, true, false, no_snapshot).await.with_context(|| {
                 format!(
                     "initial create failed with {error:#}; retry around existing volume also failed"
                 )
@@ -770,7 +780,7 @@ async fn ensure_workspace_running_local(
                 json!({ "sandbox": workspace.sandbox_name, "volume": workspace.volume_name }),
             )
             .await?;
-            create_workspace_sandbox(workspace, true)
+            create_workspace_sandbox(workspace, true, false, false)
                 .await
                 .with_context(|| {
                     format!(
@@ -804,14 +814,19 @@ async fn ensure_workspace_running_local(
     }
 }
 
-async fn create_workspace_sandbox(workspace: &WorkspaceRecord, replace: bool) -> Result<()> {
+async fn create_workspace_sandbox(
+    workspace: &WorkspaceRecord,
+    replace: bool,
+    rebuild_snapshot: bool,
+    no_snapshot: bool,
+) -> Result<()> {
     let create_args = CreateArgs {
         name: workspace.sandbox_name.clone(),
         replace,
         cpus: workspace.cpus,
         memory: u64::from(workspace.memory_mib),
-        rebuild_snapshot: false,
-        no_snapshot: false,
+        rebuild_snapshot,
+        no_snapshot,
     };
     let mount = WorkspaceMount {
         volume_name: workspace.volume_name.clone(),
@@ -1001,7 +1016,7 @@ async fn restore_workspace_local(
     if desired_state == "running" {
         ensure_workspace_running_local(api, workspace).await?;
     } else if Sandbox::get(&workspace.sandbox_name).await.is_err() {
-        create_workspace_sandbox(workspace, true).await?;
+        create_workspace_sandbox(workspace, true, false, false).await?;
         api.update_workspace(
             &workspace.name,
             Some("stopped"),
