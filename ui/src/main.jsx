@@ -697,8 +697,10 @@ function AdminPage() {
       if (!response.ok) {
         throw data;
       }
-      window.localStorage.removeItem(USER_SESSION_KEY);
-      window.location.href = '/';
+      if (user.email === userSession.email) {
+        window.localStorage.removeItem(USER_SESSION_KEY);
+        window.location.href = '/';
+      }
     } catch (error) {
       setUsers(previousUsers);
       setAdminError(formatError(error));
