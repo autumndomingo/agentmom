@@ -319,7 +319,11 @@ async fn execute_job(api: &WorkerApi, job: &JobRecord) -> Result<Value> {
         }
         "backup" => {
             let workspace = api.workspace(&job.workspace_name).await?;
-            backup_workspace_local(api, &workspace, false).await?;
+            let leave_stopped = payload
+                .get("leave_stopped")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            backup_workspace_local(api, &workspace, leave_stopped).await?;
             Ok(json!({ "backed_up": true }))
         }
         "restore" => {

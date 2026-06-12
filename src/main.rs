@@ -1086,9 +1086,21 @@ fn workspace_list() -> Result<()> {
 
 async fn workspace_inspect(name: &str) -> Result<()> {
     let record = workspace_get(name)?;
-    let sandbox_status = match Sandbox::get(&record.sandbox_name).await {
-        Ok(handle) => format!("{:?}", handle.status()),
-        Err(_) => "missing".to_string(),
+    let local_node = node_id().unwrap_or_else(|_| "-".to_string());
+    let runtime_is_local = record
+        .node_id
+        .as_deref()
+        .is_none_or(|assigned| assigned == local_node);
+    let sandbox_status = if runtime_is_local {
+        match Sandbox::get(&record.sandbox_name).await {
+            Ok(handle) => format!("{:?}", handle.status()),
+            Err(_) => "missing".to_string(),
+        }
+    } else {
+        format!(
+            "not checked locally; assigned to {}",
+            record.node_id.as_deref().unwrap_or("-")
+        )
     };
     let volume_path = microsandbox_volume_path(&record.volume_name)?;
     let events = workspace_recent_events(name, 5)?;
@@ -1096,6 +1108,7 @@ async fn workspace_inspect(name: &str) -> Result<()> {
     println!("Workspace: {}", record.name);
     println!("User: {}", record.user_id);
     println!("Node: {}", record.node_id.as_deref().unwrap_or("-"));
+    println!("Inspecting node: {local_node}");
     println!("Desired: {}", record.desired_state);
     println!("Status: {}", record.status);
     println!("Sandbox: {}", record.sandbox_name);

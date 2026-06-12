@@ -4,6 +4,11 @@ pub(crate) async fn backup_workspace(
     workspace: &WorkspaceRecord,
     leave_stopped: bool,
 ) -> Result<()> {
+    let volume_path = microsandbox_volume_path(&workspace.volume_name)?;
+    if !volume_path.exists() {
+        return backup_workspace_via_worker(workspace, leave_stopped, &volume_path).await;
+    }
+
     let was_running = match Sandbox::get(&workspace.sandbox_name).await {
         Ok(handle) => {
             let running = handle.status() == SandboxStatus::Running
@@ -25,14 +30,6 @@ pub(crate) async fn backup_workspace(
         Err(_) => false,
     };
 
-    let volume_path = microsandbox_volume_path(&workspace.volume_name)?;
-    if !volume_path.exists() {
-        bail!(
-            "workspace volume {} does not exist at {}",
-            workspace.volume_name,
-            volume_path.display()
-        );
-    }
     log_record(
         "info",
         "workspace_backup_started",
@@ -66,6 +63,71 @@ pub(crate) async fn backup_workspace(
         workspace_ensure_running(workspace).await?;
     }
     Ok(())
+}
+
+async fn backup_workspace_via_worker(
+    workspace: &WorkspaceRecord,
+    leave_stopped: bool,
+    missing_volume_path: &Path,
+) -> Result<()> {
+    let Some(node_id) = workspace.node_id.as_deref() else {
+        bail!(
+            "workspace volume {} does not exist at {}, and workspace {} is not assigned to a worker node",
+            workspace.volume_name,
+            missing_volume_path.display(),
+            workspace.name
+        );
+    };
+    if !node_allows_worker_claims(node_id)? {
+        bail!(
+            "workspace volume {} does not exist at {}, and assigned node {node_id} is not accepting jobs",
+            workspace.volume_name,
+            missing_volume_path.display()
+        );
+    }
+    let job = create_job(CreateJobRequest {
+        workspace_name: workspace.name.clone(),
+        node_id: Some(node_id.to_string()),
+        kind: "backup".to_string(),
+        payload: json!({ "leave_stopped": leave_stopped }),
+    })?;
+    println!(
+        "queued backup job {} for workspace {} on node {}",
+        job.id, workspace.name, node_id
+    );
+    wait_for_backup_job(&job.id).await?;
+    Ok(())
+}
+
+async fn wait_for_backup_job(job_id: &str) -> Result<()> {
+    let deadline = now_epoch()?.saturating_add(900);
+    loop {
+        let job = job_get(job_id)?;
+        match job.status.as_str() {
+            "succeeded" => {
+                println!("backup job {job_id} succeeded");
+                return Ok(());
+            }
+            "failed" | "canceled" => {
+                bail!(
+                    "backup job {job_id} ended with status {}: {}",
+                    job.status,
+                    job.output_json
+                        .as_deref()
+                        .unwrap_or("no job output was recorded")
+                );
+            }
+            _ => {
+                if now_epoch()? >= deadline {
+                    bail!(
+                        "timed out waiting for backup job {job_id}; current status is {}",
+                        job.status
+                    );
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
+    }
 }
 
 pub(crate) async fn run_restic_backup(

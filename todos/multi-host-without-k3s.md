@@ -107,7 +107,7 @@ Out of scope for this phase:
   - [x] Monitor/report when backup age exceeds RPO through `mom monitor check`.
   - [x] Add `mom workspace backups`.
   - [x] Add `mom workspace restore`.
-  - [ ] Make `mom workspace backup` queue a worker job when the workspace is assigned to a remote node.
+  - [x] Make `mom workspace backup` queue a worker job when the workspace is assigned to a remote node.
   - [x] Add explicit SQLite catalog backup/status commands.
   - [x] Add NixOS timer for catalog backups on the API host.
   - [x] Upload API catalog backups to the configured restic repository.
@@ -179,5 +179,5 @@ Out of scope for this phase:
 - Reviewer-driven hardening on 2026-06-12 added transactional host recovery, safer restic restore swap/rollback behavior, catalog-backup restic upload, backup RPO/failure monitor checks, Caddy IP allowlisting for worker routes, and a narrow `mom-2` credential-proxy bind on `192.168.83.1:1080`.
 - Current live QA on 2026-06-12: `mom-ctrl`, `mom-1`, and `mom-2` all switched to the hardened Agent Mom commit; `agentmom.xyz` returns 403 for public `/worker/*`, 401 for public Basic Auth routes, both workers are ready, and strict monitor passes with two ready nodes and zero stale/failed/backup-alert counts.
 - Current live QA on 2026-06-12: read-only real-fleet tests passed, mutating real-fleet tests passed against `mom-2`, catalog backup uploaded a restic snapshot, and a fresh `mom-2 -> mom-1` host-loss recovery restored two newly backed workspaces.
-- CLI gap found during recovery QA: `mom workspace backup <workspace>` still tries to read local volumes on the invoking host. In distributed mode it should queue a `backup` job through the API for the owning worker.
-- CLI gap found during recovery QA: `mom workspace inspect <workspace>` reports local sandbox status from the invoking host, which is misleading on `mom-ctrl` for remote workspaces. Distributed inspect should use worker-reported state or clearly label host-local runtime checks.
+- CLI cleanup after recovery QA: `mom workspace backup <workspace>` now falls back to a central worker `backup` job when the local volume is absent and the workspace is assigned to a node that can claim jobs. The command waits for the job to finish.
+- CLI cleanup after recovery QA: `mom workspace inspect <workspace>` now labels the local inspecting node and reports remote runtime as `not checked locally` instead of showing a false `missing` sandbox from `mom-ctrl`.

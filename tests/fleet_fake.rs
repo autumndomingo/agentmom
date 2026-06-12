@@ -72,6 +72,56 @@ async fn fake_worker_start_stop_backup_jobs_update_central_state() -> Result<()>
 }
 
 #[tokio::test]
+async fn workspace_backup_cli_queues_remote_worker_job_when_volume_is_not_local() -> Result<()> {
+    let fleet = TestFleet::start().await?;
+    let _node = spawn_worker("node-a", &fleet.api_url)?;
+    wait_for_node(fleet.api_state.path(), "node-a").await?;
+
+    let create = create_workspace(&fleet.api_url, "remote-backup", "node-a", 0).await?;
+    wait_for_job_status(&fleet.api_url, &create, "succeeded").await?;
+
+    let local_msb = tempfile::tempdir()?;
+    run_mom_with_env(
+        fleet.api_state.path(),
+        &["workspace", "backup", "remote-backup", "--leave-stopped"],
+        &[("MSB_HOME", local_msb.path().to_str().unwrap_or(""))],
+    )?;
+    wait_for_backup_count(fleet.api_state.path(), "remote-backup", 1).await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn workspace_inspect_labels_remote_runtime_as_not_checked_locally() -> Result<()> {
+    let fleet = TestFleet::start().await?;
+    let _node = spawn_worker("node-a", &fleet.api_url)?;
+    wait_for_node(fleet.api_state.path(), "node-a").await?;
+
+    let create = create_workspace(&fleet.api_url, "remote-inspect", "node-a", 0).await?;
+    wait_for_job_status(&fleet.api_url, &create, "succeeded").await?;
+
+    let local_msb = tempfile::tempdir()?;
+    let output = run_mom_output_with_env(
+        fleet.api_state.path(),
+        &["workspace", "inspect", "remote-inspect"],
+        &[
+            ("MOM_NODE_ID", "control"),
+            ("MSB_HOME", local_msb.path().to_str().unwrap_or("")),
+        ],
+    )?;
+    assert!(
+        output.contains("Inspecting node: control"),
+        "inspect output should identify the local inspecting node: {output}"
+    );
+    assert!(
+        output.contains("Sandbox status: not checked locally; assigned to node-a"),
+        "inspect output should not report remote sandbox as missing: {output}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn fake_workers_create_assigned_workspace_without_shared_sqlite() -> Result<()> {
     let fleet = TestFleet::start().await?;
 
@@ -806,6 +856,42 @@ fn run_mom(api_state: &Path, args: &[&str]) -> Result<()> {
         bail!("mom {} exited with {status}", args.join(" "));
     }
     Ok(())
+}
+
+fn run_mom_with_env(api_state: &Path, args: &[&str], envs: &[(&str, &str)]) -> Result<()> {
+    let output = run_mom_output_with_env(api_state, args, envs)
+        .with_context(|| format!("run mom {}", args.join(" ")))?;
+    let _ = output;
+    Ok(())
+}
+
+fn run_mom_output_with_env(
+    api_state: &Path,
+    args: &[&str],
+    envs: &[(&str, &str)],
+) -> Result<String> {
+    let mut command = Command::new(MOM_BIN);
+    command
+        .args(args)
+        .env("MOM_STATE_DIR", api_state)
+        .env("MOM_WORKER_TOKEN", WORKER_TOKEN)
+        .stdin(Stdio::null());
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let output = command
+        .output()
+        .with_context(|| format!("run mom {}", args.join(" ")))?;
+    if !output.status.success() {
+        bail!(
+            "mom {} exited with {}\nstdout:\n{}\nstderr:\n{}",
+            args.join(" "),
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 fn run_mom_status(api_state: &Path, args: &[&str]) -> Result<std::process::ExitStatus> {
