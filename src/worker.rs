@@ -96,6 +96,12 @@ async fn worker_open_service(
     Json(request): Json<OpenServiceRequest>,
 ) -> Result<Json<Value>, ApiError> {
     require_worker_token(&headers).map_err(ApiError::Unauthorized)?;
+    if fake_runtime_enabled() {
+        let url = fake_open_service(&request.workspace_name, &service)
+            .await
+            .map_err(ApiError::Anyhow)?;
+        return Ok(Json(json!({ "url": url })));
+    }
     let url = service::open_workspace_service(
         &state.services,
         &request.workspace_name,
@@ -871,4 +877,18 @@ async fn fake_backup_workspace(api: &WorkerApi, workspace: &WorkspaceRecord) -> 
         json!({ "runtime": "fake", "backup_id": backup_id }),
     )
     .await
+}
+
+async fn fake_open_service(workspace_name: &str, service: &str) -> Result<String> {
+    let dir = microsandbox_home()?.join("fake").join(workspace_name);
+    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    fs::write(dir.join(format!("service-{service}")), b"opened")?;
+    let base = env::var("MOM_FAKE_SERVICE_BASE_URL")
+        .unwrap_or_else(|_| "http://fake.agentmom.local".to_string());
+    Ok(format!(
+        "{}/{}/{}",
+        base.trim_end_matches('/'),
+        workspace_name,
+        service
+    ))
 }
