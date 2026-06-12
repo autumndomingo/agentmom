@@ -450,8 +450,8 @@ in
     systemd.services.agentmom-worker = lib.mkIf cfg.worker.enable {
       description = "Agent Mom central API worker";
       wantedBy = [ "multi-user.target" ];
-      after = [ "network-online.target" ];
-      wants = [ "network-online.target" ];
+      after = [ "network-online.target" ] ++ lib.optionals cfg.api.enable [ "agentmom-api.service" ];
+      wants = [ "network-online.target" ] ++ lib.optionals cfg.api.enable [ "agentmom-api.service" ];
       path = commonPath;
       environment = commonEnvironment // {
         MOM_API_URL = cfg.worker.apiUrl;
