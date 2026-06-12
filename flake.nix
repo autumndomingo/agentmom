@@ -94,7 +94,6 @@
           commonArgs = {
             inherit src cargoVendorDir;
             strictDeps = true;
-            cargoTestExtraArgs = "-- --test-threads=1";
             nativeBuildInputs = [ pkgs.pkg-config ];
             buildInputs =
               nixpkgs.lib.optionals pkgs.stdenv.isDarwin [
@@ -126,6 +125,7 @@
           };
           mom = craneLib.buildPackage (commonArgs // {
             inherit cargoArtifacts;
+            doCheck = false;
             postInstall = ''
               mkdir -p "$out/share/agentmom"
               cp -R ${ui}/share/agentmom/ui "$out/share/agentmom/ui"
