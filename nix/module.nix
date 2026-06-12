@@ -629,13 +629,21 @@ in
         WorkingDirectory = cfg.stateDir;
         ExecStart = pkgs.writeShellScript "agentmom-monitor-check" ''
           set -eu
-          exec ${cfg.package}/bin/mom monitor check \
-            --api-url ${lib.escapeShellArg cfg.monitorCheck.apiUrl} \
-            --min-ready-nodes ${toString cfg.monitorCheck.minReadyNodes} \
-            --max-stale-nodes ${toString cfg.monitorCheck.maxStaleNodes} \
-            --max-queued-age-secs ${toString cfg.monitorCheck.maxQueuedAgeSeconds} \
-            --failed-job-lookback-secs ${toString cfg.monitorCheck.failedJobLookbackSeconds} \
-            --max-recent-failed-jobs ${toString cfg.monitorCheck.maxRecentFailedJobs}
+          for attempt in 1 2 3 4 5 6; do
+            if ${cfg.package}/bin/mom monitor check \
+              --api-url ${lib.escapeShellArg cfg.monitorCheck.apiUrl} \
+              --min-ready-nodes ${toString cfg.monitorCheck.minReadyNodes} \
+              --max-stale-nodes ${toString cfg.monitorCheck.maxStaleNodes} \
+              --max-queued-age-secs ${toString cfg.monitorCheck.maxQueuedAgeSeconds} \
+              --failed-job-lookback-secs ${toString cfg.monitorCheck.failedJobLookbackSeconds} \
+              --max-recent-failed-jobs ${toString cfg.monitorCheck.maxRecentFailedJobs}; then
+              exit 0
+            fi
+            if [ "$attempt" = 6 ]; then
+              exit 1
+            fi
+            sleep 2
+          done
         '';
       };
     };
