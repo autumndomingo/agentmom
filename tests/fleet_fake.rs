@@ -370,6 +370,100 @@ async fn explicit_create_rejects_full_node() -> Result<()> {
 }
 
 #[tokio::test]
+async fn idle_stopped_workspace_does_not_count_against_capacity() -> Result<()> {
+    let fleet = TestFleet::start().await?;
+    insert_node_with_capacity(fleet.api_state.path(), "node-a", now_epoch()?, 1)?;
+    insert_workspace_with_state(
+        fleet.api_state.path(),
+        "idle",
+        "node-a",
+        "stopped",
+        "idle-stopped",
+    )?;
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/api/workspaces", fleet.api_url))
+        .json(&json!({
+            "name": "replacement",
+            "node_id": "node-a"
+        }))
+        .send()
+        .await?;
+    assert!(
+        response.status().is_success(),
+        "idle-stopped workspace should not consume active placement capacity: {}",
+        response.text().await.unwrap_or_default()
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn offline_node_is_not_reenabled_by_stale_heartbeat() -> Result<()> {
+    let fleet = TestFleet::start().await?;
+    insert_node_with_status(
+        fleet.api_state.path(),
+        "lost-node",
+        now_epoch()?,
+        24,
+        "offline",
+    )?;
+
+    reqwest::Client::new()
+        .post(format!("{}/worker/register", fleet.api_url))
+        .bearer_auth(WORKER_TOKEN)
+        .json(&json!({
+            "node_id": "lost-node",
+            "capacity": {
+                "cpus": 8,
+                "memory_mib": 32768,
+                "max_active_workspaces": 24,
+                "disk_reserve_mib": 1024
+            },
+            "worker_url": "http://100.64.0.42:9090"
+        }))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    assert_eq!(node_status(fleet.api_state.path(), "lost-node")?, "offline");
+    let response = reqwest::Client::new()
+        .post(format!("{}/api/workspaces", fleet.api_url))
+        .json(&json!({
+            "name": "should-not-place",
+            "node_id": "lost-node"
+        }))
+        .send()
+        .await?;
+    assert!(!response.status().is_success());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn worker_register_rejects_unspecified_worker_url() -> Result<()> {
+    let fleet = TestFleet::start().await?;
+    let response = reqwest::Client::new()
+        .post(format!("{}/worker/register", fleet.api_url))
+        .bearer_auth(WORKER_TOKEN)
+        .json(&json!({
+            "node_id": "bad-node",
+            "capacity": {
+                "cpus": 8,
+                "memory_mib": 32768,
+                "max_active_workspaces": 24,
+                "disk_reserve_mib": 1024
+            },
+            "worker_url": "http://0.0.0.0:9090"
+        }))
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn sse_wakes_worker_without_waiting_for_poll_interval() -> Result<()> {
     let fleet = TestFleet::start().await?;
     let _node = spawn_worker_with_options("node-a", &fleet.api_url, "30", None)?;
@@ -450,6 +544,7 @@ impl TestFleet {
 fn spawn_api(state_dir: &Path, bind: &str) -> Result<ChildGuard> {
     let child = Command::new(MOM_BIN)
         .args(["api", "--bind", bind])
+        .env("MOM_RUNTIME", "fake")
         .env("MOM_STATE_DIR", state_dir)
         .env("MOM_UI_DIST", state_dir.join("missing-ui"))
         .env("MOM_WORKER_TOKEN", WORKER_TOKEN)
@@ -603,25 +698,52 @@ fn insert_node_with_capacity(
     last_seen_at: i64,
     max_active_workspaces: i64,
 ) -> Result<()> {
+    insert_node_with_status(
+        api_state,
+        node,
+        last_seen_at,
+        max_active_workspaces,
+        "ready",
+    )
+}
+
+fn insert_node_with_status(
+    api_state: &Path,
+    node: &str,
+    last_seen_at: i64,
+    max_active_workspaces: i64,
+    status: &str,
+) -> Result<()> {
     let db = Connection::open(api_state.join("fleet.db"))?;
     db.execute(
         r#"
 INSERT INTO nodes (
     node_id, worker_url, cpus, memory_mib, max_active_workspaces, disk_reserve_mib,
     last_seen_at, status
-) VALUES (?1, ?2, 16, 65536, ?3, 1024, ?4, 'ready')
+) VALUES (?1, ?2, 16, 65536, ?3, 1024, ?4, ?5)
 "#,
         (
             node,
             format!("http://{node}.invalid:9090"),
             max_active_workspaces,
             last_seen_at,
+            status,
         ),
     )?;
     Ok(())
 }
 
 fn insert_workspace(api_state: &Path, name: &str, node: &str) -> Result<()> {
+    insert_workspace_with_state(api_state, name, node, "running", "running")
+}
+
+fn insert_workspace_with_state(
+    api_state: &Path,
+    name: &str,
+    node: &str,
+    desired_state: &str,
+    status: &str,
+) -> Result<()> {
     let now = now_epoch()?;
     let db = Connection::open(api_state.join("fleet.db"))?;
     db.execute(
@@ -630,17 +752,28 @@ INSERT INTO workspaces (
     name, user_id, sandbox_name, volume_name, node_id, desired_state, cpus, memory_mib,
     volume_quota_mib, status, idle_timeout_secs, backup_interval_secs,
     last_used_at, last_backup_at, created_at, updated_at
-) VALUES (?1, ?1, ?2, ?3, ?4, 'running', 1, 2048, 10240, 'running', 1800, 0, ?5, NULL, ?5, ?5)
+) VALUES (?1, ?1, ?2, ?3, ?4, ?5, 1, 2048, 10240, ?6, 1800, 0, ?7, NULL, ?7, ?7)
 "#,
         (
             name,
             format!("mom-{name}"),
             format!("mom-{name}-workspace"),
             node,
+            desired_state,
+            status,
             now,
         ),
     )?;
     Ok(())
+}
+
+fn node_status(api_state: &Path, node: &str) -> Result<String> {
+    let db = Connection::open(api_state.join("fleet.db"))?;
+    Ok(db.query_row(
+        "SELECT status FROM nodes WHERE node_id = ?1",
+        [node],
+        |row| row.get(0),
+    )?)
 }
 
 fn now_epoch() -> Result<i64> {

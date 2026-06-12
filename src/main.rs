@@ -745,6 +745,7 @@ fn fleet_recover_host(from: &str, to: &str, dry_run: bool) -> Result<()> {
             payload: json!({
                 "backup_id": backup.id,
                 "backup_location": backup.location,
+                "desired_state": workspace.desired_state,
                 "from_node": from,
                 "to_node": to
             }),

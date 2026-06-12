@@ -249,7 +249,6 @@ pub(crate) fn workspace_reassign_for_restore(name: &str, node: &str) -> Result<(
         r#"
 UPDATE workspaces
 SET node_id = ?2,
-    desired_state = 'running',
     status = 'restore-queued',
     updated_at = ?3
 WHERE name = ?1
@@ -571,7 +570,7 @@ WHERE node_id = ?1
           SELECT COUNT(*)
           FROM workspaces
           WHERE workspaces.node_id = nodes.node_id
-            AND workspaces.status NOT IN ('stopped', 'removed', 'error')
+            AND workspaces.desired_state = 'running'
       ) < max_active_workspaces
   )
 "#,
@@ -595,7 +594,7 @@ WHERE status = 'ready'
           SELECT COUNT(*)
           FROM workspaces
           WHERE workspaces.node_id = nodes.node_id
-            AND workspaces.status NOT IN ('stopped', 'removed', 'error')
+            AND workspaces.desired_state = 'running'
       ) < max_active_workspaces
   )
 ORDER BY last_seen_at DESC
@@ -704,6 +703,9 @@ pub(crate) fn register_node(
     worker_url: Option<&str>,
 ) -> Result<()> {
     ensure_fleet_schema()?;
+    if let Some(worker_url) = worker_url {
+        validate_worker_url(worker_url)?;
+    }
     let db = fleet_db()?;
     db.execute(
         r#"
@@ -717,7 +719,10 @@ ON CONFLICT(node_id) DO UPDATE SET
     max_active_workspaces = excluded.max_active_workspaces,
     disk_reserve_mib = excluded.disk_reserve_mib,
     last_seen_at = excluded.last_seen_at,
-    status = excluded.status
+    status = CASE
+        WHEN nodes.status IN ('offline', 'disabled', 'quarantined') THEN nodes.status
+        ELSE excluded.status
+    END
 "#,
         params![
             node,
@@ -745,13 +750,44 @@ pub(crate) fn node_mark_offline(node: &str) -> Result<()> {
 pub(crate) fn node_worker_url(node: &str) -> Result<Option<String>> {
     ensure_fleet_schema()?;
     let db = fleet_db()?;
-    db.query_row(
-        "SELECT worker_url FROM nodes WHERE node_id = ?1",
-        params![node],
-        |row| row.get(0),
-    )
-    .optional()
-    .map_err(Into::into)
+    let url: Option<String> = db
+        .query_row(
+            "SELECT worker_url FROM nodes WHERE node_id = ?1",
+            params![node],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    if let Some(url) = &url {
+        validate_worker_url(url)?;
+    }
+    Ok(url)
+}
+
+fn validate_worker_url(worker_url: &str) -> Result<()> {
+    let url = reqwest::Url::parse(worker_url)
+        .with_context(|| format!("parse worker_url {worker_url:?}"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        bail!("worker_url must use http or https: {worker_url}");
+    }
+    if url.port().is_none() {
+        bail!("worker_url must include an explicit port: {worker_url}");
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| anyhow!("worker_url must include a host: {worker_url}"))?;
+    if host.eq_ignore_ascii_case("localhost") && env::var("MOM_RUNTIME").as_deref() != Ok("fake") {
+        bail!("worker_url may not use localhost outside fake runtime: {worker_url}");
+    }
+    if let Ok(addr) = host.parse::<std::net::IpAddr>() {
+        if addr.is_unspecified() {
+            bail!("worker_url may not use an unspecified host: {worker_url}");
+        }
+        if addr.is_loopback() && env::var("MOM_RUNTIME").as_deref() != Ok("fake") {
+            bail!("worker_url may not use loopback host outside fake runtime: {worker_url}");
+        }
+    }
+    Ok(())
 }
 
 fn requeue_stale_claims(db: &Connection, now: i64) -> Result<()> {
@@ -764,7 +800,7 @@ fn requeue_stale_claims(db: &Connection, now: i64) -> Result<()> {
         r#"
 UPDATE jobs
 SET status = 'queued', claimed_by = NULL, claimed_at = NULL, updated_at = ?1
-WHERE status = 'claimed' AND claimed_at IS NOT NULL AND claimed_at < ?2
+WHERE status IN ('claimed', 'running') AND claimed_at IS NOT NULL AND claimed_at < ?2
 "#,
         params![now, cutoff],
     )?;

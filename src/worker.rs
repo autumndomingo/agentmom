@@ -875,6 +875,10 @@ async fn restore_workspace_local(
         .get("backup_location")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("restore job payload requires backup_location"))?;
+    let desired_state = payload
+        .get("desired_state")
+        .and_then(Value::as_str)
+        .unwrap_or(&workspace.desired_state);
     if fake_runtime_enabled() {
         return fake_restore_workspace(api, workspace, backup_id, backup_location).await;
     }
@@ -898,7 +902,7 @@ async fn restore_workspace_local(
     api.update_workspace(
         &workspace.name,
         Some("restored"),
-        Some("running"),
+        Some(desired_state),
         false,
         false,
     )
@@ -908,10 +912,35 @@ async fn restore_workspace_local(
         "workspace_restored",
         "succeeded",
         "workspace volume restored from backup",
-        json!({ "backup_id": backup_id, "location": backup_location }),
+        json!({
+            "backup_id": backup_id,
+            "location": backup_location,
+            "desired_state": desired_state
+        }),
     )
     .await?;
-    ensure_workspace_running_local(api, workspace).await?;
+    if desired_state == "running" {
+        ensure_workspace_running_local(api, workspace).await?;
+    } else if Sandbox::get(&workspace.sandbox_name).await.is_err() {
+        create_workspace_sandbox(workspace, false).await?;
+        api.update_workspace(
+            &workspace.name,
+            Some("stopped"),
+            Some("stopped"),
+            false,
+            false,
+        )
+        .await?;
+    } else {
+        api.update_workspace(
+            &workspace.name,
+            Some("stopped"),
+            Some("stopped"),
+            false,
+            false,
+        )
+        .await?;
+    }
     Ok(())
 }
 

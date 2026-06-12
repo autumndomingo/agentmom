@@ -184,18 +184,83 @@ pub(crate) async fn run_restic_restore(
         .parent()
         .ok_or_else(|| anyhow!("volume path has no parent: {}", volume_path.display()))?;
     fs::create_dir_all(parent)?;
+    let volume_name = volume_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            anyhow!(
+                "volume path has no final component: {}",
+                volume_path.display()
+            )
+        })?;
+    let restore_tmp = parent.join(format!(".restore-{backup_id}"));
+    if restore_tmp.exists() {
+        fs::remove_dir_all(&restore_tmp)
+            .with_context(|| format!("remove stale restore dir {}", restore_tmp.display()))?;
+    }
+    fs::create_dir_all(&restore_tmp)
+        .with_context(|| format!("create restore dir {}", restore_tmp.display()))?;
     let status = TokioCommand::new("restic")
         .arg("restore")
         .arg(snapshot)
         .arg("--target")
-        .arg(parent)
+        .arg(&restore_tmp)
         .stdin(Stdio::null())
         .status()
         .await?;
     if !status.success() {
         bail!("restic restore exited with {status}");
     }
+    let restored_volume = restored_volume_path(&restore_tmp, volume_path, volume_name)?;
+    fs::rename(&restored_volume, volume_path).with_context(|| {
+        format!(
+            "move restored volume {} to {}",
+            restored_volume.display(),
+            volume_path.display()
+        )
+    })?;
+    fs::remove_dir_all(&restore_tmp)
+        .with_context(|| format!("remove restore dir {}", restore_tmp.display()))?;
     Ok(())
+}
+
+fn restored_volume_path(root: &Path, original_path: &Path, volume_name: &str) -> Result<PathBuf> {
+    if let Ok(relative) = original_path.strip_prefix("/") {
+        let path = root.join(relative);
+        if path.exists() {
+            return Ok(path);
+        }
+    }
+    if !original_path.is_absolute() {
+        let path = root.join(original_path);
+        if path.exists() {
+            return Ok(path);
+        }
+    }
+    find_dir_named(root, volume_name)?.ok_or_else(|| {
+        anyhow!(
+            "restic restore did not contain volume {} under {}",
+            volume_name,
+            root.display()
+        )
+    })
+}
+
+fn find_dir_named(root: &Path, name: &str) -> Result<Option<PathBuf>> {
+    for entry in fs::read_dir(root).with_context(|| format!("read {}", root.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if path.file_name().and_then(|part| part.to_str()) == Some(name) {
+            return Ok(Some(path));
+        }
+        if let Some(found) = find_dir_named(&path, name)? {
+            return Ok(Some(found));
+        }
+    }
+    Ok(None)
 }
 
 async fn command_exists(name: &str) -> bool {
