@@ -454,6 +454,19 @@ async fn create_access_code(
 
     sqlx::query(
         r#"
+UPDATE access_codes
+SET revoked_at = ?1
+WHERE role = 'PAR'
+  AND revoked_at IS NULL
+"#,
+    )
+    .bind(now)
+    .execute(&state.db)
+    .await
+    .context("revoke previous participant access codes")?;
+
+    sqlx::query(
+        r#"
 INSERT INTO access_codes (
   code_hash, label, role, max_uses, used_count, created_by_user_id, created_at, expires_at
 )

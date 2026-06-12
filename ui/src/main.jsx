@@ -820,7 +820,7 @@ function AdminPage({ userSession }) {
               Workspace
             </button>
             <div className="accessCodeControl" aria-label="Access code">
-              <code>{accessCodeStatus}</code>
+              <code>{busy ? 'Generating...' : accessCodeStatus}</code>
               <button
                 type="button"
                 onClick={refreshAccessCode}
