@@ -1093,7 +1093,7 @@ async fn accept_access_code(
     access_code: &str,
 ) -> Result<AuthUser, ApiError> {
     let email = normalize_email(email);
-    if email.is_empty() || access_code.trim().is_empty() {
+    if !is_valid_email(&email) || access_code.trim().is_empty() {
         return Err(ApiError::Unauthorized);
     }
 
@@ -1237,6 +1237,36 @@ fn parse_vms(stdout: &str) -> Vec<Vm> {
 
 fn normalize_email(email: &str) -> String {
     email.trim().to_lowercase()
+}
+
+fn is_valid_email(email: &str) -> bool {
+    if email.is_empty() || email.chars().any(char::is_whitespace) {
+        return false;
+    }
+
+    let Some((local, domain)) = email.split_once('@') else {
+        return false;
+    };
+    if local.is_empty() || domain.is_empty() || domain.contains('@') {
+        return false;
+    }
+
+    let mut labels = domain.split('.');
+    let Some(first) = labels.next() else {
+        return false;
+    };
+    if first.is_empty() {
+        return false;
+    }
+
+    let mut has_tld = false;
+    for label in labels {
+        if label.is_empty() {
+            return false;
+        }
+        has_tld = true;
+    }
+    has_tld
 }
 
 fn access_code_hash(access_code: &str) -> String {
