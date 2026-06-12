@@ -129,6 +129,7 @@
             postInstall = ''
               mkdir -p "$out/share/agentmom"
               cp -R ${ui}/share/agentmom/ui "$out/share/agentmom/ui"
+              chmod -R u+w "$out/share/agentmom/ui"
             '';
           });
           ironProxyVersion = "0.42.0";
