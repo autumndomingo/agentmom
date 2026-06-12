@@ -531,6 +531,9 @@ async fn create_workspace_local(
     workspace: &WorkspaceRecord,
     payload: &Value,
 ) -> Result<()> {
+    if fake_runtime_enabled() {
+        return fake_create_workspace(api, workspace, payload).await;
+    }
     api.event(
         &workspace.name,
         "workspace_create_started",
@@ -589,6 +592,9 @@ async fn create_workspace_local(
 }
 
 async fn stop_workspace_local(api: &WorkerApi, workspace: &WorkspaceRecord) -> Result<()> {
+    if fake_runtime_enabled() {
+        return fake_stop_workspace(api, workspace).await;
+    }
     api.update_workspace(&workspace.name, None, Some("stopped"), false, false)
         .await?;
     if let Ok(handle) = Sandbox::get(&workspace.sandbox_name).await {
@@ -613,6 +619,9 @@ async fn ensure_workspace_running_local(
     api: &WorkerApi,
     workspace: &WorkspaceRecord,
 ) -> Result<()> {
+    if fake_runtime_enabled() {
+        return fake_start_workspace(api, workspace).await;
+    }
     match Sandbox::get(&workspace.sandbox_name).await {
         Ok(handle) if handle.status() == SandboxStatus::Running => {
             api.update_workspace(&workspace.name, Some("running"), None, false, false)
@@ -652,6 +661,9 @@ async fn workspace_running_sandbox_local(
     api: &WorkerApi,
     workspace: &WorkspaceRecord,
 ) -> Result<Sandbox> {
+    if fake_runtime_enabled() {
+        bail!("MOM_RUNTIME=fake does not support guest command execution yet");
+    }
     match Sandbox::get(&workspace.sandbox_name).await {
         Ok(handle) => match handle.status() {
             SandboxStatus::Running | SandboxStatus::Draining => handle
@@ -700,6 +712,10 @@ async fn backup_workspace_local(
     workspace: &WorkspaceRecord,
     leave_stopped: bool,
 ) -> Result<()> {
+    if fake_runtime_enabled() {
+        let _ = leave_stopped;
+        return fake_backup_workspace(api, workspace).await;
+    }
     let was_running = match Sandbox::get(&workspace.sandbox_name).await {
         Ok(handle) => {
             let running = handle.status() == SandboxStatus::Running
@@ -758,4 +774,101 @@ async fn backup_workspace_local(
         ensure_workspace_running_local(api, workspace).await?;
     }
     Ok(())
+}
+
+fn fake_runtime_enabled() -> bool {
+    env::var("MOM_RUNTIME").is_ok_and(|value| value == "fake")
+}
+
+fn fake_workspace_dir(workspace: &WorkspaceRecord) -> Result<PathBuf> {
+    Ok(microsandbox_home()?.join("fake").join(&workspace.name))
+}
+
+async fn fake_create_workspace(
+    api: &WorkerApi,
+    workspace: &WorkspaceRecord,
+    payload: &Value,
+) -> Result<()> {
+    let dir = fake_workspace_dir(workspace)?;
+    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    fs::write(
+        dir.join("metadata.json"),
+        serde_json::to_vec_pretty(&json!({
+            "workspace": workspace.name,
+            "sandbox": workspace.sandbox_name,
+            "volume": workspace.volume_name,
+            "payload": payload
+        }))?,
+    )?;
+    api.update_workspace(&workspace.name, Some("stopped"), None, false, false)
+        .await?;
+    api.event(
+        &workspace.name,
+        "workspace_created",
+        "succeeded",
+        "fake workspace created",
+        json!({ "runtime": "fake" }),
+    )
+    .await
+}
+
+async fn fake_start_workspace(api: &WorkerApi, workspace: &WorkspaceRecord) -> Result<()> {
+    let dir = fake_workspace_dir(workspace)?;
+    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    fs::write(dir.join("state"), b"running")?;
+    api.update_workspace(&workspace.name, Some("running"), None, false, false)
+        .await?;
+    api.event(
+        &workspace.name,
+        "sandbox_started",
+        "succeeded",
+        "fake workspace started",
+        json!({ "runtime": "fake" }),
+    )
+    .await
+}
+
+async fn fake_stop_workspace(api: &WorkerApi, workspace: &WorkspaceRecord) -> Result<()> {
+    let dir = fake_workspace_dir(workspace)?;
+    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    fs::write(dir.join("state"), b"stopped")?;
+    api.update_workspace(
+        &workspace.name,
+        Some("stopped"),
+        Some("stopped"),
+        false,
+        false,
+    )
+    .await?;
+    api.event(
+        &workspace.name,
+        "workspace_stopped",
+        "succeeded",
+        "fake workspace stopped",
+        json!({ "runtime": "fake" }),
+    )
+    .await
+}
+
+async fn fake_backup_workspace(api: &WorkerApi, workspace: &WorkspaceRecord) -> Result<()> {
+    let dir = fake_workspace_dir(workspace)?;
+    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    let snapshot = format!("fake-{}-{}", workspace.name, now_epoch()?);
+    fs::write(dir.join("last-backup"), snapshot.as_bytes())?;
+    let artifact = BackupArtifact {
+        kind: "restic".to_string(),
+        location: format!("fake-restic#{snapshot}"),
+        size_bytes: Some(0),
+    };
+    let backup_id = api.record_backup(&workspace.name, &artifact).await?;
+    api.update_workspace(&workspace.name, None, None, false, true)
+        .await?;
+    api.event(
+        &workspace.name,
+        "workspace_backup_succeeded",
+        "succeeded",
+        "fake workspace backup completed",
+        json!({ "runtime": "fake", "backup_id": backup_id }),
+    )
+    .await
 }
