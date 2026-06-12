@@ -265,6 +265,29 @@ async fn worker_ignores_unassigned_legacy_workspaces() -> Result<()> {
 }
 
 #[tokio::test]
+async fn worker_does_not_rewarm_idle_stopped_workspace_during_reconcile() -> Result<()> {
+    let fleet = TestFleet::start().await?;
+    insert_workspace_with_status(fleet.api_state.path(), "cold", "node-a", "idle-stopped", 1)?;
+
+    let node = spawn_worker("node-a", &fleet.api_url)?;
+    wait_for_node(fleet.api_state.path(), "node-a").await?;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(
+        !node.msb_home.path().join("fake/cold").exists(),
+        "idle-stopped workspace should remain cold until a job wakes it"
+    );
+
+    let start = create_job(&fleet.api_url, "cold", "start").await?;
+    wait_for_job_status(&fleet.api_url, &start, "succeeded").await?;
+    assert_eq!(
+        std::fs::read_to_string(node.msb_home.path().join("fake/cold/state"))?,
+        "running"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn worker_events_requires_worker_token() -> Result<()> {
     let fleet = TestFleet::start().await?;
 
@@ -652,6 +675,16 @@ INSERT INTO nodes (
 }
 
 fn insert_workspace(api_state: &Path, name: &str, node: &str) -> Result<()> {
+    insert_workspace_with_status(api_state, name, node, "running", 1800)
+}
+
+fn insert_workspace_with_status(
+    api_state: &Path,
+    name: &str,
+    node: &str,
+    status: &str,
+    idle_timeout_secs: i64,
+) -> Result<()> {
     let now = now_epoch()?;
     let db = Connection::open(api_state.join("fleet.db"))?;
     db.execute(
@@ -660,13 +693,15 @@ INSERT INTO workspaces (
     name, user_id, sandbox_name, volume_name, node_id, desired_state, cpus, memory_mib,
     volume_quota_mib, status, idle_timeout_secs, backup_interval_secs,
     last_used_at, last_backup_at, created_at, updated_at
-) VALUES (?1, ?1, ?2, ?3, ?4, 'running', 1, 2048, 10240, 'running', 1800, 0, ?5, NULL, ?5, ?5)
+) VALUES (?1, ?1, ?2, ?3, ?4, 'running', 1, 2048, 10240, ?5, ?6, 0, ?7, NULL, ?7, ?7)
 "#,
         (
             name,
             format!("mom-{name}"),
             format!("mom-{name}-workspace"),
             node,
+            status,
+            idle_timeout_secs,
             now,
         ),
     )?;

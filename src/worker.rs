@@ -434,7 +434,7 @@ async fn worker_reconcile_workspace(
     record: &WorkspaceRecord,
     now: i64,
 ) -> Result<()> {
-    if record.desired_state == "running" {
+    if record.desired_state == "running" && record.status != "idle-stopped" {
         ensure_workspace_running_local(api, record).await?;
         if record.idle_timeout_secs > 0
             && now.saturating_sub(record.last_used_at) >= record.idle_timeout_secs as i64
