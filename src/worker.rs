@@ -905,6 +905,7 @@ async fn restore_workspace_local(
         json!({ "backup_id": backup_id, "location": backup_location }),
     )
     .await?;
+    ensure_workspace_volume_registered_for_restore(workspace).await?;
     let volume_path = microsandbox_volume_path(&workspace.volume_name)?;
     backup::run_restic_restore(backup_id, backup_location, &volume_path).await?;
     api.update_workspace(
@@ -950,6 +951,36 @@ async fn restore_workspace_local(
         .await?;
     }
     Ok(())
+}
+
+async fn ensure_workspace_volume_registered_for_restore(workspace: &WorkspaceRecord) -> Result<()> {
+    match Volume::get(&workspace.volume_name).await {
+        Ok(_) => Ok(()),
+        Err(MicrosandboxError::VolumeNotFound(_)) => {
+            let volume_path = microsandbox_volume_path(&workspace.volume_name)?;
+            if volume_path.exists() {
+                fs::remove_dir_all(&volume_path).with_context(|| {
+                    format!(
+                        "remove orphaned restored volume path {} before registering volume",
+                        volume_path.display()
+                    )
+                })?;
+            }
+            Volume::builder(&workspace.volume_name)
+                .quota(workspace.volume_quota_mib)
+                .label("mom.workspace", &workspace.name)
+                .create()
+                .await
+                .with_context(|| format!("register restored volume {}", workspace.volume_name))?;
+            Ok(())
+        }
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "inspect restored volume registration for {}",
+                workspace.volume_name
+            )
+        }),
+    }
 }
 
 fn fake_runtime_enabled() -> bool {
