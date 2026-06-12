@@ -41,11 +41,31 @@
                 pkgs.libcap_ng
                 pkgs.openssl
               ];
+            postPatch = nixpkgs.lib.optionalString (builtins.hasAttr system microsandboxBundleHashes && builtins.hasAttr system microsandboxAgentdHashes) ''
+              mkdir -p "$TMPDIR/nix-vendor"
+              cp -R -L "$cargoVendorDir"/. "$TMPDIR/nix-vendor"/
+              sed -i.bak "s|$cargoVendorDir|$TMPDIR/nix-vendor|g" "$TMPDIR/nix-vendor/config.toml"
+              rm "$TMPDIR/nix-vendor/config.toml.bak"
+              chmod -R u+w "$TMPDIR/nix-vendor"
+
+              mkdir -p "$TMPDIR/nix-vendor/build"
+              touch "$TMPDIR/nix-vendor/Cargo.toml"
+              cp ${microsandbox-runtime}/bin/msb "$TMPDIR/nix-vendor/build/msb"
+              cp ${microsandbox-runtime}/lib/libkrunfw.*.*.* "$TMPDIR/nix-vendor/build/"
+              cp ${microsandbox-agentd}/bin/agentd "$TMPDIR/nix-vendor/build/agentd"
+              cargoVendorDir="$TMPDIR/nix-vendor"
+            '';
             preBuild = ''
               export HOME="$TMPDIR/home"
               export MSB_HOME="$TMPDIR/microsandbox"
               export XDG_CACHE_HOME="$TMPDIR/cache"
               mkdir -p "$HOME" "$MSB_HOME" "$XDG_CACHE_HOME"
+            '' + nixpkgs.lib.optionalString (builtins.hasAttr system microsandboxBundleHashes && builtins.hasAttr system microsandboxAgentdHashes) ''
+              export CI=1
+              mkdir -p build
+              cp ${microsandbox-runtime}/bin/msb build/msb
+              cp ${microsandbox-runtime}/lib/libkrunfw.*.*.* build/
+              cp ${microsandbox-agentd}/bin/agentd build/agentd
             '';
           };
           cargoArtifacts = craneLib.buildDepsOnly commonArgs;
@@ -66,6 +86,7 @@
             postInstall = ''
               mkdir -p "$out/share/agentmom"
               cp -R ${ui}/share/agentmom/ui "$out/share/agentmom/ui"
+              chmod -R u+w "$out/share/agentmom/ui"
             '';
           });
           ironProxyVersion = "0.42.0";
@@ -106,6 +127,30 @@
             aarch64-linux = "linux-aarch64";
             aarch64-darwin = "darwin-aarch64";
           };
+          microsandboxAgentdHashes = {
+            x86_64-linux = "sha256-7LRrjBMjQoPkyItM+MMrcVCYWCaxgE8s0KVbfTcEQ+o=";
+            aarch64-linux = "sha256-BHBGigWM/ydms0Or7E6A6/8SUo8/43mjSJgx2lIWhRg=";
+            aarch64-darwin = "sha256-BHBGigWM/ydms0Or7E6A6/8SUo8/43mjSJgx2lIWhRg=";
+          };
+          microsandboxAgentdPlatforms = {
+            x86_64-linux = "x86_64";
+            aarch64-linux = "aarch64";
+            aarch64-darwin = "aarch64";
+          };
+          microsandbox-agentd = pkgs.stdenv.mkDerivation {
+            pname = "microsandbox-agentd";
+            version = microsandboxVersion;
+            src = pkgs.fetchurl {
+              url = "https://github.com/superradcompany/microsandbox/releases/download/v${microsandboxVersion}/agentd-${microsandboxAgentdPlatforms.${system}}";
+              hash = microsandboxAgentdHashes.${system};
+            };
+            dontUnpack = true;
+            installPhase = ''
+              runHook preInstall
+              install -Dm755 "$src" "$out/bin/agentd"
+              runHook postInstall
+            '';
+          };
           microsandbox-runtime = pkgs.stdenv.mkDerivation {
             pname = "microsandbox-runtime";
             version = microsandboxVersion;
@@ -145,6 +190,8 @@
           iron-proxy = iron-proxy;
         } // nixpkgs.lib.optionalAttrs (builtins.hasAttr system microsandboxBundleHashes) {
           microsandbox-runtime = microsandbox-runtime;
+        } // nixpkgs.lib.optionalAttrs (builtins.hasAttr system microsandboxAgentdHashes) {
+          microsandbox-agentd = microsandbox-agentd;
         });
 
       apps = eachSystem (system: {
