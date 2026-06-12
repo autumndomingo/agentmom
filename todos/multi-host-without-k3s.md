@@ -109,7 +109,7 @@ Out of scope for this phase:
   - [x] Add `mom workspace restore`.
   - [x] Add explicit SQLite catalog backup/status commands.
   - [x] Add NixOS timer for catalog backups on the API host.
-  - [~] Add restore drill command for random workspace verification.
+  - [x] Add host-loss recovery drill path with `mom fleet recover-host`.
 
 - [~] Add deployment flow for multiple systemd hosts.
   - [x] Document host bootstrap for `pika-build` style NixOS boxes.
@@ -129,7 +129,7 @@ Out of scope for this phase:
   - [x] Integrate ignored real-host test harness.
   - [x] Integrate runbook updates for catalog backup, monitoring, idle wake, and rolling updates.
   - [x] Defer managed skills until the core fleet safety work lands.
-  - [x] Defer API move/recover endpoints until restore ownership transfer is fully transactional.
+  - [x] Add guarded host-loss recovery that requires successful restic backups before workspace reassignment.
 
 - [ ] Preserve k3s migration path.
   - [x] Keep all runtime config available via env vars/files.
@@ -155,17 +155,19 @@ Out of scope for this phase:
 - `mom-ctrl` runs `agentmom-api.service` and Caddy for `agentmom.xyz`. The API binds to `127.0.0.1:8080` and owns the central SQLite database at `/var/lib/agentmom/fleet.db`.
 - `mom-1` and `mom-2` run worker-only Agent Mom services from NixOS. Durable state is `/var/lib/agentmom`, microsandbox state is `/var/lib/agentmom/microsandbox`, and services use Nix-declared config.
 - `agentmom.xyz` points at `77.42.80.210`. Public mutating API routes are protected by Basic Auth; worker routes currently bypass Caddy auth so workers can register, poll, and report state.
-- The deployed worker registration currently reports 32 CPUs, 131072 MiB memory, 48 max active workspaces, and 102400 MiB disk reserve.
+- The deployed worker registration currently reports `mom-1` as 32 CPUs, 131072 MiB memory, 48 max active workspaces, and `mom-2` as 8 CPUs, 65536 MiB memory, 24 max active workspaces.
 - Worker hosts run `agentmom-credential-proxy.service` using iron-proxy. The service has a generated CA under `/var/lib/agentmom/iron-proxy`, listens on `:1080`, and writes `openrouter-proxy` guest config via Agent Mom.
 - `openrouter-proxy` workspaces no longer receive raw Codex/Hermes auth files. Worker hosts get the OpenRouter key from agenix-managed NixOS secrets.
 - Base snapshots are now credential/proxy agnostic. Normal workspace creates clone the existing tool snapshot and then apply current auth/proxy config, so proxy/config iteration no longer rebuilds Alpine/Codex/Hermes. The measured no-rebuild create on `pika-build` was 9 seconds.
 - `mom workspace refresh-config <workspace>` re-applies Codex/Hermes/proxy config to an existing workspace without rebuilding the base snapshot.
 - Current API smoke tests cover `/health/live`, `/health/ready`, `/metrics`, workspace job creation, worker registration, transactional claim, and SSE `job_available` notification.
 - Worker endpoints support shared bearer-token auth through `MOM_WORKER_TOKEN` or `MOM_WORKER_TOKEN_FILE`; local smoke tests cover 401 without the token and success with the token.
-- SSH deployment to `mom-1` uses the Tailscale address `100.81.250.67`. `mom-2` is currently unreachable by the deploy script and is marked offline in the control catalog.
-- Current remote verification: `mom-ctrl` has active `agentmom-api`, Caddy, and Tailscale; `mom-1` has active `agentmom-worker` and credential proxy. The control DB shows `mom-1` ready and `mom-2` offline.
+- SSH deployment to `mom-1` uses the Tailscale address `100.81.250.67`. `mom-2` deploys through `mom-1` as a Tailscale ProxyJump to `100.92.189.28`.
+- Current remote verification: `mom-ctrl` has active `agentmom-api`, Caddy, monitor timer, and catalog backup timer; `mom-1` and `mom-2` both have active `agentmom-worker` and credential proxy. The control DB shows both worker nodes ready and eligible.
 - Step 6 remote QA created one workspace per worker, stopped both, restarted both, backed both up to Cloudflare R2 via restic, and stopped both again. All create/start/stop/backup jobs succeeded and were claimed by the expected worker.
 - `~/configs` now references Agent Mom as `path:/Users/justin/code/agentmom-fleet`; the accidental `~/configs/agentmom` source mirror has been removed. The `pika-build` deploy path evaluates locally and copies Nix store paths to the remote build/target host rather than rsyncing application source into configs.
 - Operational runbooks live in `todos/multi-host-runbooks.md`.
 - Production ops integration pass should prioritize operator safety and test coverage over broad feature import. The old ops worktree is useful reference material, but selected changes must be rebased onto the current trust-boundary and restore semantics.
-- Production ops integration imported catalog schema/version checks, SQLite catalog backup, richer metrics, monitor checks, node lifecycle controls, an ignored real-host test harness, and runbook updates. Managed skills and API-level move/recover were intentionally left out of this pass.
+- Production ops integration imported catalog schema/version checks, SQLite catalog backup, richer metrics, monitor checks, node lifecycle controls, host-loss recovery, an ignored real-host test harness, and runbook updates. Managed skills remain intentionally deferred.
+- Live recovery QA on 2026-06-12 found and fixed two restore bugs: target-host restic restores must register the named volume in the local microsandbox DB before sandbox recreation, and stale/unusable sandbox records need replace semantics during recovery recreation. After the fixes, a clean `mom-2 -> mom-1` recovery restored two backed workspaces and returned both nodes to strict monitor health.
+- nixbuild.net currently rejects builds because billing/free build time is exhausted. All NixOS hosts now keep nixbuild.net configured but allow `max-jobs = 2` local fallback so deploys do not wedge when the remote builder is unavailable.
