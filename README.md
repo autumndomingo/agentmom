@@ -197,8 +197,8 @@ nix build
 
 ## UI
 
-The UI is a React app served by `mom api`. The browser uses same-origin `/api`
-routes, so the public service can be a single `agentmom-api` process.
+The meetup UI is a React app served by the Rust `mom-ui` backend. The browser
+uses same-origin `/api` routes for login, admin, and workspace actions.
 
 ```sh
 nix develop
@@ -206,7 +206,7 @@ cd ui
 npm install
 npm run build
 cd ..
-MOM_UI_DIST=ui/dist cargo run --bin mom -- api --bind 127.0.0.1:8080
+MOM_UI_PORT=8080 cargo run --bin mom-ui
 ```
 
 Open <http://127.0.0.1:8080>. Hermes/OpenCode launch requests are routed from

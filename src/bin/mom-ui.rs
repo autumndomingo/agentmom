@@ -22,18 +22,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{Row, SqlitePool, sqlite::SqliteConnectOptions, sqlite::SqlitePoolOptions};
 use tokio::{process::Command, sync::Mutex, task::JoinHandle};
-use tower_http::{
-    cors::CorsLayer,
-    services::{ServeDir, ServeFile},
-};
+use tower_http::services::{ServeDir, ServeFile};
 
 const OPENCODE_GUEST_PORT: u16 = 4096;
 const ADMIN_EMAIL: &str = "autumndomingo@gmail.com";
 const ADMIN_NAME: &str = "Autumn Domingo";
 const DEFAULT_ACCESS_CODE: &str = "AD-8KQ-4MZ";
 const DEFAULT_ADMIN_ACCESS_CODE: &str = "ADMIN-8KQ-4MZ";
-const ACCESS_CODE_HEADER: &str = "x-agent-mom-access-code";
-const ACCESS_EMAIL_HEADER: &str = "x-agent-mom-email";
 
 #[derive(Clone)]
 struct AppState {
@@ -228,10 +223,7 @@ async fn main() -> Result<()> {
         .with_state(state);
 
     let ui = ServeDir::new("ui/dist").fallback(ServeFile::new("ui/dist/index.html"));
-    let app = Router::new()
-        .nest("/api", api)
-        .fallback_service(ui)
-        .layer(CorsLayer::permissive());
+    let app = Router::new().nest("/api", api).fallback_service(ui);
 
     println!("Agent Mom UI backend listening on http://{addr}");
     println!("Using mom binary: {}", resolve_mom_bin()?.display());
@@ -996,19 +988,9 @@ ON CONFLICT(code_hash) DO NOTHING
 }
 
 async fn authorize_headers(state: &AppState, headers: &HeaderMap) -> Result<AuthUser, ApiError> {
-    if let Some(user) = authorize_session(state, headers).await? {
-        return Ok(user);
-    }
-
-    let email = headers
-        .get(ACCESS_EMAIL_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default();
-    let access_code = headers
-        .get(ACCESS_CODE_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default();
-    accept_access_code(state, email, access_code).await
+    authorize_session(state, headers)
+        .await?
+        .ok_or(ApiError::Unauthorized)
 }
 
 async fn authorize_admin(state: &AppState, headers: &HeaderMap) -> Result<AuthUser, ApiError> {
@@ -1037,6 +1019,7 @@ JOIN users ON users.id = sessions.user_id
 WHERE sessions.token_hash = ?1
   AND sessions.revoked_at IS NULL
   AND (sessions.expires_at IS NULL OR sessions.expires_at > ?2)
+  AND users.status = 'active'
 "#,
     )
     .bind(token_hash)
@@ -1101,7 +1084,7 @@ async fn accept_access_code(
     let code_hash = access_code_hash(access_code);
     let code = sqlx::query(
         r#"
-SELECT id, role, max_uses, used_count
+SELECT id, role, max_uses
 FROM access_codes
 WHERE code_hash = ?1
   AND revoked_at IS NULL
@@ -1115,12 +1098,6 @@ WHERE code_hash = ?1
     .context("look up access code")?
     .ok_or(ApiError::Unauthorized)?;
 
-    let max_uses: Option<i64> = code.get("max_uses");
-    let used_count: i64 = code.get("used_count");
-    if max_uses.is_some_and(|limit| used_count >= limit) {
-        return Err(ApiError::Unauthorized);
-    }
-
     let role = code.get::<String, _>("role");
     if role == "ADMN" && !email.eq_ignore_ascii_case(&state.admin_email) {
         return Err(ApiError::Unauthorized);
@@ -1128,6 +1105,23 @@ WHERE code_hash = ?1
     if role != "ADMN" && email.eq_ignore_ascii_case(&state.admin_email) {
         return Err(ApiError::Unauthorized);
     }
+
+    let update = sqlx::query(
+        r#"
+UPDATE access_codes
+SET used_count = used_count + 1
+WHERE id = ?1
+  AND (max_uses IS NULL OR used_count < max_uses)
+"#,
+    )
+    .bind(code.get::<i64, _>("id"))
+    .execute(&state.db)
+    .await
+    .context("increment access code use count")?;
+    if update.rows_affected() != 1 {
+        return Err(ApiError::Unauthorized);
+    }
+
     let name = email
         .split('@')
         .next()
@@ -1159,18 +1153,6 @@ ON CONFLICT(email) DO UPDATE SET
         .await
         .context("read access-code user")?;
     let user_id: i64 = user.get("id");
-
-    sqlx::query(
-        r#"
-UPDATE access_codes
-SET used_count = used_count + 1
-WHERE id = ?1
-"#,
-    )
-    .bind(code.get::<i64, _>("id"))
-    .execute(&state.db)
-    .await
-    .context("increment access code use count")?;
 
     sqlx::query(
         r#"

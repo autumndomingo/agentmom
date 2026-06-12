@@ -39,7 +39,7 @@ function Root() {
   }, []);
 
   useEffect(() => {
-    if (!userSession?.token || window.location.pathname === '/admin') return undefined;
+    if (!userSession?.token) return undefined;
 
     let cancelled = false;
     const checkSession = async () => {
@@ -72,10 +72,6 @@ function Root() {
     setUserSession(session);
   }
 
-  if (window.location.pathname === '/admin') {
-    return <AdminPage />;
-  }
-
   if (checkingSession) {
     return (
       <main className="landingPage">
@@ -88,6 +84,14 @@ function Root() {
 
   if (!userSession) {
     return <LandingPage onSubmit={enterUserFlow} />;
+  }
+
+  if (window.location.pathname === '/admin') {
+    if (userSession.role !== 'ADMN') {
+      window.history.replaceState({}, '', '/');
+    } else {
+      return <AdminPage userSession={userSession} />;
+    }
   }
 
   if (!userSession.userName || !userSession.agentName) {
@@ -592,17 +596,25 @@ function App({ userSession }) {
   );
 }
 
-function AdminPage() {
-  const [previewMode, setPreviewMode] = useState('ADMN');
+function AdminPage({ userSession }) {
   const [users, setUsers] = useState([]);
   const [accessCodeStatus, setAccessCodeStatus] = useState('Generate code');
   const [adminError, setAdminError] = useState('');
   const [busy, setBusy] = useState(false);
-  const userSession = loadUserSession();
+
+  function endAdminSession() {
+    window.localStorage.removeItem(USER_SESSION_KEY);
+    window.location.href = '/';
+  }
+
+  function leaveAdminView(updatedSession = userSession) {
+    window.localStorage.setItem(USER_SESSION_KEY, JSON.stringify(updatedSession));
+    window.location.href = '/';
+  }
 
   async function loadUsers() {
     if (!userSession?.token) {
-      setAdminError('Sign in as an admin to view users.');
+      endAdminSession();
       return;
     }
 
@@ -612,6 +624,10 @@ function AdminPage() {
     });
     const data = await response.json();
     if (!response.ok) {
+      if (response.status === 401 || response.status === 403) {
+        endAdminSession();
+        return;
+      }
       throw data;
     }
     setUsers((data.users ?? []).map(normalizeAdminUser));
@@ -619,7 +635,35 @@ function AdminPage() {
 
   useEffect(() => {
     loadUsers().catch((error) => setAdminError(formatError(error)));
-  }, []);
+  }, [userSession?.token]);
+
+  useEffect(() => {
+    if (!userSession?.token) {
+      endAdminSession();
+      return undefined;
+    }
+
+    let cancelled = false;
+    const checkAdminSession = async () => {
+      try {
+        const refreshedSession = await validateSession(userSession);
+        if (cancelled) return;
+        if (refreshedSession.role !== 'ADMN') {
+          leaveAdminView(refreshedSession);
+        }
+      } catch {
+        if (!cancelled) {
+          endAdminSession();
+        }
+      }
+    };
+
+    const interval = window.setInterval(checkAdminSession, 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [userSession?.token]);
 
   async function updateRole(userId, role) {
     if (!userSession?.token) {
@@ -650,11 +694,12 @@ function AdminPage() {
       setUsers((current) =>
         current.map((user) => (user.id === updatedUser.id ? updatedUser : user)),
       );
-      if (updatedUser.email === userSession.email) {
+      if (sameEmail(updatedUser.email, userSession.email)) {
         const updatedSession = { ...userSession, role: updatedUser.role };
-        window.localStorage.setItem(USER_SESSION_KEY, JSON.stringify(updatedSession));
         if (updatedUser.role !== 'ADMN') {
-          window.location.href = '/';
+          leaveAdminView(updatedSession);
+        } else {
+          window.localStorage.setItem(USER_SESSION_KEY, JSON.stringify(updatedSession));
         }
       }
     } catch (error) {
@@ -715,9 +760,8 @@ function AdminPage() {
       if (!response.ok) {
         throw data;
       }
-      if (user.email === userSession.email) {
-        window.localStorage.removeItem(USER_SESSION_KEY);
-        window.location.href = '/';
+      if (sameEmail(user.email, userSession.email)) {
+        endAdminSession();
       }
     } catch (error) {
       setUsers(previousUsers);
@@ -760,14 +804,6 @@ function AdminPage() {
     <main className="adminPage">
       <section className="adminPanel" aria-label="Admin user management preview">
         <header className="adminTopBar">
-          <label className="adminPreviewControl">
-            <span>Preview:</span>
-            <select value={previewMode} onChange={(event) => setPreviewMode(event.target.value)}>
-              <option value="ADMN">ADMN</option>
-              <option value="PAR">PAR</option>
-            </select>
-          </label>
-
           <div className="adminTopActions">
             <button className="adminNavButton" type="button" onClick={openWorkspace}>
               Workspace
@@ -937,6 +973,10 @@ function loadUserSession() {
 
 function userIdentity(email) {
   return String(email ?? '').trim().toLowerCase();
+}
+
+function sameEmail(left, right) {
+  return userIdentity(left) === userIdentity(right);
 }
 
 function authHeaders(session = loadUserSession()) {

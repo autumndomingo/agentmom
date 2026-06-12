@@ -910,20 +910,12 @@ input:disabled {
   gap: 12px;
 }
 
-.adminPreviewControl,
 .accessCodeControl {
   display: inline-flex;
   align-items: center;
   gap: 12px;
 }
 
-.adminPreviewControl span {
-  font-size: 18px;
-  font-weight: 750;
-  color: #f3eedf;
-}
-
-.adminPreviewControl select,
 .adminUserRow select {
   height: 44px;
   border: 1px solid rgb(255 255 255 / 16%);
@@ -935,14 +927,8 @@ input:disabled {
   outline: 0;
 }
 
-.adminPreviewControl select:focus,
 .adminUserRow select:focus {
   border-color: #e1944e;
-}
-
-.adminPreviewControl select {
-  min-width: 220px;
-  padding: 0 42px 0 18px;
 }
 
 .accessCodeControl {
@@ -1202,7 +1188,6 @@ input:disabled {
     flex-direction: column;
   }
 
-  .adminPreviewControl,
   .accessCodeControl {
     width: 100%;
     justify-content: space-between;
@@ -1210,10 +1195,6 @@ input:disabled {
 
   .adminNavButton {
     width: 100%;
-  }
-
-  .adminPreviewControl select {
-    min-width: 160px;
   }
 
   .accessCodeControl {
