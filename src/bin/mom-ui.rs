@@ -1149,8 +1149,19 @@ fn normalize_email(email: &str) -> String {
 
 fn access_code_hash(access_code: &str) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(access_code.trim().as_bytes());
+    hasher.update(normalize_access_code(access_code).as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+fn normalize_access_code(access_code: &str) -> String {
+    access_code
+        .trim()
+        .chars()
+        .map(|ch| match ch {
+            '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2212}' => '-',
+            _ => ch.to_ascii_uppercase(),
+        })
+        .collect()
 }
 
 fn session_token_hash(token: &str) -> String {
