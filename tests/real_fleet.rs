@@ -197,15 +197,20 @@ async fn real_catalog_backup_and_restore_drill_over_ssh() -> Result<()> {
         r#"
 set -eu
 export MOM_STATE_DIR={state_dir_q}
-mom db status
-systemctl start agentmom-catalog-backup.service
+mom_bin="$(command -v mom || true)"
+if [ -z "$mom_bin" ]; then
+  mom_bin="$(systemctl show -p ExecStart --value agentmom-api.service | sed -n 's/.*path=\([^ ;]*\/mom\).*/\1/p')"
+fi
+test -x "$mom_bin"
+"$mom_bin" db status
+sudo systemctl start agentmom-catalog-backup.service
 latest="$(ls -1t "$MOM_STATE_DIR"/catalog-backups/fleet-*.db | head -1)"
 test -n "$latest"
 tmpdir="$(mktemp -d "$MOM_STATE_DIR"/catalog-restore-drill.XXXXXX)"
 cleanup() {{ rm -rf "$tmpdir"; }}
 trap cleanup EXIT
 cp "$latest" "$tmpdir/fleet.db"
-MOM_STATE_DIR="$tmpdir" mom db status
+MOM_STATE_DIR="$tmpdir" "$mom_bin" db status
 "#,
     );
     let output = Command::new("ssh")
