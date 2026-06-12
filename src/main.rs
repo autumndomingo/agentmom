@@ -1423,7 +1423,7 @@ fn default_workspace_idle_timeout() -> u64 {
 }
 
 fn default_workspace_backup_interval() -> u64 {
-    900
+    0
 }
 
 fn hermes_config_yaml(config: &MomConfig) -> String {

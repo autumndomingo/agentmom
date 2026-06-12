@@ -15,8 +15,8 @@ use tower_http::services::{ServeDir, ServeFile};
 use crate::{
     ApiState, JobResponse, WorkspaceRecord, create_job, default_workspace_backup_interval,
     default_workspace_cpus, default_workspace_idle_timeout, default_workspace_memory,
-    default_workspace_volume_quota, job_get, node_id, node_worker_url, sanitize_workspace_name,
-    worker_token, workspace_all, workspace_get, workspace_upsert_pending,
+    default_workspace_volume_quota, job_get, node_worker_url, sanitize_workspace_name,
+    select_ready_node, worker_token, workspace_all, workspace_get, workspace_upsert_pending,
 };
 
 #[derive(Debug, Deserialize)]
@@ -141,7 +141,10 @@ async fn create_vm(
     Json(request): Json<CreateRequest>,
 ) -> Result<Json<CommandResult>, UiError> {
     let name = sanitize_workspace_name(&request.name)?;
-    let node_id = node_id()?;
+    if workspace_get(&name).is_ok() {
+        return Err(UiError::Anyhow(anyhow!("workspace already exists: {name}")));
+    }
+    let node_id = select_ready_node(None)?;
     let memory =
         u32::try_from(request.memory).map_err(|_| anyhow!("memory must fit in u32 MiB"))?;
     let user_id = request.user.clone().unwrap_or_else(|| name.clone());
@@ -243,7 +246,9 @@ async fn hermes_ui_vm(Path(name): Path<String>) -> Result<Json<CommandResult>, U
 async fn open_workspace_service(name: &str, service: &str) -> Result<Json<CommandResult>, UiError> {
     let workspace = workspace_get(name)?;
     let worker_url = workspace_worker_url(&workspace)?;
-    let response = reqwest::Client::new()
+    let response = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?
         .post(format!(
             "{}/worker/services/{service}/open",
             worker_url.trim_end_matches('/')

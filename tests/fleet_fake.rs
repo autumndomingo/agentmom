@@ -2,7 +2,7 @@ use std::{
     net::TcpListener,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 const MOM_BIN: &str = env!("CARGO_BIN_EXE_mom");
+const WORKER_TOKEN: &str = "test-worker-token";
 
 struct ChildGuard {
     child: Child,
@@ -27,6 +28,7 @@ impl Drop for ChildGuard {
 struct TestNode {
     _state: TempDir,
     msb_home: TempDir,
+    worker_url: String,
     _process: ChildGuard,
 }
 
@@ -97,6 +99,62 @@ async fn fake_workers_create_assigned_workspace_without_shared_sqlite() -> Resul
 }
 
 #[tokio::test]
+async fn ui_create_selects_registered_worker_node() -> Result<()> {
+    let fleet = TestFleet::start().await?;
+    let node = spawn_worker("node-a", &fleet.api_url)?;
+    wait_for_node(fleet.api_state.path(), "node-a").await?;
+
+    reqwest::Client::new()
+        .post(format!("{}/api/vms", fleet.api_url))
+        .json(&json!({ "name": "ui-created" }))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    wait_for_workspace_node(&fleet.api_url, "ui-created", "node-a").await?;
+    wait_for_workspace_status(&fleet.api_url, "ui-created", "running").await?;
+    assert!(
+        node.msb_home.path().join("fake/ui-created").exists(),
+        "UI-created workspace should be created on the registered worker"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn unpinned_jobs_are_pinned_to_workspace_owner() -> Result<()> {
+    let fleet = TestFleet::start().await?;
+    let node_a = spawn_worker("node-a", &fleet.api_url)?;
+    let node_b = spawn_worker("node-b", &fleet.api_url)?;
+    wait_for_node(fleet.api_state.path(), "node-a").await?;
+    wait_for_node(fleet.api_state.path(), "node-b").await?;
+
+    let create = create_workspace(&fleet.api_url, "owner", "node-b", 0).await?;
+    wait_for_job_status(&fleet.api_url, &create, "succeeded").await?;
+
+    let job = create_job_value(&fleet.api_url, "owner", "stop").await?;
+    let job_id = job
+        .pointer("/job/id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("create job response missing job id: {job}"))?;
+    assert_eq!(
+        job.pointer("/job/node_id").and_then(Value::as_str),
+        Some("node-b")
+    );
+    wait_for_job_status(&fleet.api_url, job_id, "succeeded").await?;
+    assert!(
+        !node_a.msb_home.path().join("fake/owner").exists(),
+        "node-a should not claim node-b's unpinned job"
+    );
+    assert_eq!(
+        std::fs::read_to_string(node_b.msb_home.path().join("fake/owner/state"))?,
+        "stopped"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn worker_state_updates_require_assigned_node() -> Result<()> {
     let fleet = TestFleet::start().await?;
     let _node_a = spawn_worker("node-a", &fleet.api_url)?;
@@ -108,6 +166,7 @@ async fn worker_state_updates_require_assigned_node() -> Result<()> {
 
     let response = client
         .post(format!("{}/worker/workspaces/owned/state", fleet.api_url))
+        .bearer_auth(WORKER_TOKEN)
         .json(&json!({
             "node_id": "node-b",
             "status": "running"
@@ -115,6 +174,122 @@ async fn worker_state_updates_require_assigned_node() -> Result<()> {
         .send()
         .await?;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn worker_events_requires_worker_token() -> Result<()> {
+    let fleet = TestFleet::start().await?;
+
+    let response = reqwest::Client::new()
+        .get(format!("{}/worker/events?node_id=node-a", fleet.api_url))
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn worker_service_open_rejects_spoofed_sandbox_identity() -> Result<()> {
+    let fleet = TestFleet::start().await?;
+    let node = spawn_worker("node-a", &fleet.api_url)?;
+    wait_for_node(fleet.api_state.path(), "node-a").await?;
+
+    let job_id = create_workspace(&fleet.api_url, "guard", "node-a", 0).await?;
+    wait_for_job_status(&fleet.api_url, &job_id, "succeeded").await?;
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/worker/services/opencode/open", node.worker_url))
+        .bearer_auth(WORKER_TOKEN)
+        .json(&json!({
+            "workspace_name": "guard",
+            "sandbox_name": "mom-other"
+        }))
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(
+        !node
+            .msb_home
+            .path()
+            .join("fake/guard/service-opencode")
+            .exists(),
+        "worker should not open a service for a mismatched sandbox"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn create_selects_fresh_worker_over_stale_node() -> Result<()> {
+    let fleet = TestFleet::start().await?;
+    insert_node(fleet.api_state.path(), "stale-node", now_epoch()? - 3600)?;
+    let node = spawn_worker("fresh-node", &fleet.api_url)?;
+    wait_for_node(fleet.api_state.path(), "fresh-node").await?;
+
+    reqwest::Client::new()
+        .post(format!("{}/api/vms", fleet.api_url))
+        .json(&json!({ "name": "fresh" }))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    wait_for_workspace_node(&fleet.api_url, "fresh", "fresh-node").await?;
+    wait_for_workspace_status(&fleet.api_url, "fresh", "running").await?;
+    assert!(
+        node.msb_home.path().join("fake/fresh").exists(),
+        "workspace should be placed on the fresh worker"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn duplicate_create_does_not_move_existing_workspace() -> Result<()> {
+    let fleet = TestFleet::start().await?;
+    let node_a = spawn_worker("node-a", &fleet.api_url)?;
+    let node_b = spawn_worker("node-b", &fleet.api_url)?;
+    wait_for_node(fleet.api_state.path(), "node-a").await?;
+    wait_for_node(fleet.api_state.path(), "node-b").await?;
+
+    let create = create_workspace(&fleet.api_url, "dupe", "node-a", 0).await?;
+    wait_for_job_status(&fleet.api_url, &create, "succeeded").await?;
+    let response = reqwest::Client::new()
+        .post(format!("{}/api/workspaces", fleet.api_url))
+        .json(&json!({
+            "name": "dupe",
+            "node_id": "node-b"
+        }))
+        .send()
+        .await?;
+    assert!(!response.status().is_success());
+    wait_for_workspace_node(&fleet.api_url, "dupe", "node-a").await?;
+    assert!(node_a.msb_home.path().join("fake/dupe").exists());
+    assert!(
+        !node_b.msb_home.path().join("fake/dupe").exists(),
+        "duplicate create should not move the workspace to node-b"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn explicit_create_rejects_full_node() -> Result<()> {
+    let fleet = TestFleet::start().await?;
+    insert_node_with_capacity(fleet.api_state.path(), "full-node", now_epoch()?, 1)?;
+    insert_workspace(fleet.api_state.path(), "existing", "full-node")?;
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/api/workspaces", fleet.api_url))
+        .json(&json!({
+            "name": "overflow",
+            "node_id": "full-node"
+        }))
+        .send()
+        .await?;
+    assert!(!response.status().is_success());
 
     Ok(())
 }
@@ -202,6 +377,7 @@ fn spawn_api(state_dir: &Path, bind: &str) -> Result<ChildGuard> {
         .args(["api", "--bind", bind])
         .env("MOM_STATE_DIR", state_dir)
         .env("MOM_UI_DIST", state_dir.join("missing-ui"))
+        .env("MOM_WORKER_TOKEN", WORKER_TOKEN)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -232,6 +408,7 @@ fn spawn_worker_with_options(
         .env("MOM_API_URL", api_url)
         .env("MOM_WORKER_BIND", &bind)
         .env("MOM_WORKER_URL", format!("http://{bind}"))
+        .env("MOM_WORKER_TOKEN", WORKER_TOKEN)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     if let Some(base_url) = fake_service_base_url {
@@ -243,6 +420,7 @@ fn spawn_worker_with_options(
     Ok(TestNode {
         _state: state,
         msb_home,
+        worker_url: format!("http://{bind}"),
         _process: ChildGuard { child },
     })
 }
@@ -273,7 +451,16 @@ async fn create_workspace(
 }
 
 async fn create_job(api_url: &str, workspace: &str, kind: &str) -> Result<String> {
-    let response = reqwest::Client::new()
+    let response = create_job_value(api_url, workspace, kind).await?;
+    response
+        .pointer("/job/id")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .ok_or_else(|| anyhow!("create job response missing job id: {response}"))
+}
+
+async fn create_job_value(api_url: &str, workspace: &str, kind: &str) -> Result<Value> {
+    Ok(reqwest::Client::new()
         .post(format!("{api_url}/api/jobs"))
         .json(&json!({
             "workspace_name": workspace,
@@ -283,12 +470,7 @@ async fn create_job(api_url: &str, workspace: &str, kind: &str) -> Result<String
         .await?
         .error_for_status()?
         .json::<Value>()
-        .await?;
-    response
-        .pointer("/job/id")
-        .and_then(Value::as_str)
-        .map(ToString::to_string)
-        .ok_or_else(|| anyhow!("create job response missing job id: {response}"))
+        .await?)
 }
 
 async fn wait_ready(api_url: &str) -> Result<()> {
@@ -321,6 +503,62 @@ fn node_exists(api_state: &Path, node: &str) -> Result<bool> {
         |row| row.get(0),
     )?;
     Ok(count > 0)
+}
+
+fn insert_node(api_state: &Path, node: &str, last_seen_at: i64) -> Result<()> {
+    insert_node_with_capacity(api_state, node, last_seen_at, 48)
+}
+
+fn insert_node_with_capacity(
+    api_state: &Path,
+    node: &str,
+    last_seen_at: i64,
+    max_active_workspaces: i64,
+) -> Result<()> {
+    let db = Connection::open(api_state.join("fleet.db"))?;
+    db.execute(
+        r#"
+INSERT INTO nodes (
+    node_id, worker_url, cpus, memory_mib, max_active_workspaces, disk_reserve_mib,
+    last_seen_at, status
+) VALUES (?1, ?2, 16, 65536, ?3, 1024, ?4, 'ready')
+"#,
+        (
+            node,
+            format!("http://{node}.invalid:9090"),
+            max_active_workspaces,
+            last_seen_at,
+        ),
+    )?;
+    Ok(())
+}
+
+fn insert_workspace(api_state: &Path, name: &str, node: &str) -> Result<()> {
+    let now = now_epoch()?;
+    let db = Connection::open(api_state.join("fleet.db"))?;
+    db.execute(
+        r#"
+INSERT INTO workspaces (
+    name, user_id, sandbox_name, volume_name, node_id, desired_state, cpus, memory_mib,
+    volume_quota_mib, status, idle_timeout_secs, backup_interval_secs,
+    last_used_at, last_backup_at, created_at, updated_at
+) VALUES (?1, ?1, ?2, ?3, ?4, 'running', 1, 2048, 10240, 'running', 1800, 0, ?5, NULL, ?5, ?5)
+"#,
+        (
+            name,
+            format!("mom-{name}"),
+            format!("mom-{name}-workspace"),
+            node,
+            now,
+        ),
+    )?;
+    Ok(())
+}
+
+fn now_epoch() -> Result<i64> {
+    Ok(i64::try_from(
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
+    )?)
 }
 
 async fn wait_for_backup_count(api_state: &Path, workspace: &str, expected: i64) -> Result<()> {

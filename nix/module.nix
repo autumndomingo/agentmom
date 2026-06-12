@@ -95,11 +95,14 @@ let
     MSB_PATH = "${cfg.microsandboxPackage}/bin/msb";
   }
   // lib.optionalAttrs (cfg.workerTokenFile != null) {
-    MOM_WORKER_TOKEN_FILE = toString cfg.workerTokenFile;
+    MOM_WORKER_TOKEN_FILE = cfg.workerTokenFile;
   };
 
   commonPath = with pkgs; [
     bash
+    coreutils
+    curl
+    openssh
     restic
   ] ++ lib.optional (cfg.microsandboxPackage != null) cfg.microsandboxPackage;
 in
@@ -372,9 +375,9 @@ in
     };
 
     workerTokenFile = lib.mkOption {
-      type = lib.types.nullOr lib.types.path;
+      type = lib.types.nullOr lib.types.str;
       default = null;
-      description = "Optional file containing the bearer token used by API worker endpoints.";
+      description = "Optional runtime file containing the bearer token used by API worker endpoints.";
     };
   };
 
@@ -411,6 +414,10 @@ in
       {
         assertion = !cfg.credentialProxy.enable || cfg.credentialProxy.package != null;
         message = "services.agentmom.credentialProxy.package is required when credentialProxy.enable is true.";
+      }
+      {
+        assertion = !(cfg.api.enable || cfg.worker.enable) || cfg.workerTokenFile != null;
+        message = "services.agentmom.workerTokenFile is required when the Agent Mom API or worker service is enabled.";
       }
     ];
 

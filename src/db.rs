@@ -107,19 +107,7 @@ INSERT INTO workspaces (
     volume_quota_mib, status, idle_timeout_secs, backup_interval_secs,
     last_used_at, last_backup_at, created_at, updated_at
 ) VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7, ?8, 'creating', ?9, ?10, ?11, NULL, ?11, ?11)
-ON CONFLICT(name) DO UPDATE SET
-    user_id = excluded.user_id,
-    sandbox_name = excluded.sandbox_name,
-    volume_name = excluded.volume_name,
-    node_id = excluded.node_id,
-    desired_state = excluded.desired_state,
-    cpus = excluded.cpus,
-    memory_mib = excluded.memory_mib,
-    volume_quota_mib = excluded.volume_quota_mib,
-    status = excluded.status,
-    idle_timeout_secs = excluded.idle_timeout_secs,
-    backup_interval_secs = excluded.backup_interval_secs,
-    updated_at = excluded.updated_at
+ON CONFLICT(name) DO NOTHING
 "#,
         params![
             name,
@@ -135,6 +123,9 @@ ON CONFLICT(name) DO UPDATE SET
             now,
         ],
     )?;
+    if db.changes() == 0 {
+        bail!("workspace already exists: {name}");
+    }
     Ok(())
 }
 
@@ -524,6 +515,62 @@ INSERT INTO jobs (
     job_get(&id)
 }
 
+pub(crate) fn select_ready_node(requested: Option<&str>) -> Result<String> {
+    ensure_fleet_schema()?;
+    let now = now_epoch()?;
+    let stale_cutoff = now.saturating_sub(i64::try_from(env_u64("MOM_NODE_STALE_SECS", 60))?);
+    let db = fleet_db()?;
+    if let Some(node) = requested {
+        let exists = db.query_row(
+            r#"
+SELECT COUNT(*)
+FROM nodes
+WHERE node_id = ?1
+  AND status = 'ready'
+  AND worker_url IS NOT NULL
+  AND last_seen_at >= ?2
+  AND (
+      max_active_workspaces = 0 OR (
+          SELECT COUNT(*)
+          FROM workspaces
+          WHERE workspaces.node_id = nodes.node_id
+            AND workspaces.status NOT IN ('stopped', 'removed', 'error')
+      ) < max_active_workspaces
+  )
+"#,
+            params![node, stale_cutoff],
+            |row| row.get::<_, i64>(0),
+        )? > 0;
+        if !exists {
+            bail!("node is not ready: {node}");
+        }
+        return Ok(node.to_string());
+    }
+    db.query_row(
+        r#"
+SELECT node_id
+FROM nodes
+WHERE status = 'ready'
+  AND worker_url IS NOT NULL
+  AND last_seen_at >= ?1
+  AND (
+      max_active_workspaces = 0 OR (
+          SELECT COUNT(*)
+          FROM workspaces
+          WHERE workspaces.node_id = nodes.node_id
+            AND workspaces.status NOT IN ('stopped', 'removed', 'error')
+      ) < max_active_workspaces
+  )
+ORDER BY last_seen_at DESC
+LIMIT 1
+"#,
+        params![stale_cutoff],
+        |row| row.get(0),
+    )
+    .optional()?
+    .ok_or_else(|| anyhow!("no ready worker nodes are registered"))
+}
+
 pub(crate) fn job_get(id: &str) -> Result<JobRecord> {
     ensure_fleet_schema()?;
     let db = fleet_db()?;
@@ -545,6 +592,7 @@ pub(crate) fn claim_job(node: &str) -> Result<Option<JobRecord>> {
     ensure_fleet_schema()?;
     let now = now_epoch()?;
     let db = fleet_db()?;
+    requeue_stale_claims(&db, now)?;
     db.execute(
         r#"
 UPDATE jobs
@@ -552,7 +600,7 @@ SET status = 'claimed', claimed_by = ?1, claimed_at = ?2, updated_at = ?2
 WHERE id = (
     SELECT id
     FROM jobs
-    WHERE status = 'queued' AND (node_id IS NULL OR node_id = ?1)
+    WHERE status = 'queued' AND node_id = ?1
     ORDER BY created_at ASC
     LIMIT 1
 )
@@ -592,6 +640,23 @@ WHERE id = ?1 AND claimed_by = ?2 AND status IN ('claimed', 'running')
     )?;
     if changed == 0 {
         bail!("job {id} is not claimed by node {node}");
+    }
+    job_get(id)
+}
+
+pub(crate) fn mark_job_running(id: &str, node: &str) -> Result<JobRecord> {
+    let now = now_epoch()?;
+    let db = fleet_db()?;
+    let changed = db.execute(
+        r#"
+UPDATE jobs
+SET status = 'running', claimed_at = ?3, updated_at = ?3
+WHERE id = ?1 AND claimed_by = ?2 AND status = 'claimed'
+"#,
+        params![id, node, now],
+    )?;
+    if changed == 0 {
+        bail!("job {id} is not newly claimed by node {node}");
     }
     job_get(id)
 }
@@ -640,6 +705,23 @@ pub(crate) fn node_worker_url(node: &str) -> Result<Option<String>> {
     )
     .optional()
     .map_err(Into::into)
+}
+
+fn requeue_stale_claims(db: &Connection, now: i64) -> Result<()> {
+    let timeout = env_u64("MOM_JOB_CLAIM_TIMEOUT_SECS", 1800);
+    if timeout == 0 {
+        return Ok(());
+    }
+    let cutoff = now.saturating_sub(i64::try_from(timeout).context("job claim timeout too large")?);
+    db.execute(
+        r#"
+UPDATE jobs
+SET status = 'queued', claimed_by = NULL, claimed_at = NULL, updated_at = ?1
+WHERE status = 'claimed' AND claimed_at IS NOT NULL AND claimed_at < ?2
+"#,
+        params![now, cutoff],
+    )?;
+    Ok(())
 }
 
 pub(crate) fn job_counts() -> Result<Vec<(String, i64)>> {
@@ -793,12 +875,9 @@ pub(crate) fn env_u64(name: &str, default: u64) -> u64 {
 }
 
 pub(crate) fn require_worker_token(headers: &HeaderMap) -> Result<()> {
-    if env::var_os("MOM_WORKER_TOKEN").is_none() && env::var_os("MOM_WORKER_TOKEN_FILE").is_none() {
-        return Ok(());
-    }
     let expected = worker_token()?;
     if expected.trim().is_empty() {
-        return Ok(());
+        bail!("worker token is empty");
     }
     let actual = headers
         .get("authorization")

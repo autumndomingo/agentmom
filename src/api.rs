@@ -94,8 +94,30 @@ async fn api_metrics() -> Result<String, ApiError> {
 
 async fn api_create_job(
     State(state): State<Arc<ApiState>>,
-    Json(request): Json<CreateJobRequest>,
+    Json(mut request): Json<CreateJobRequest>,
 ) -> Result<Json<JobResponse>, ApiError> {
+    let workspace = workspace_get(&request.workspace_name)?;
+    match (&request.node_id, &workspace.node_id) {
+        (Some(requested), Some(assigned)) if requested != assigned => {
+            return Err(ApiError::Anyhow(anyhow!(
+                "workspace {} is assigned to node {}, not {}",
+                workspace.name,
+                assigned,
+                requested
+            )));
+        }
+        (None, Some(assigned)) => request.node_id = Some(assigned.clone()),
+        (Some(requested), None) => {
+            select_ready_node(Some(requested))?;
+        }
+        (None, None) => {
+            return Err(ApiError::Anyhow(anyhow!(
+                "workspace {} does not have an assigned node",
+                workspace.name
+            )));
+        }
+        _ => {}
+    }
     let job = create_job(request)?;
     let _ = state.notifier.send("job_available".to_string());
     Ok(Json(JobResponse { job }))
@@ -114,7 +136,12 @@ async fn api_create_workspace(
     Json(request): Json<CreateWorkspaceRequest>,
 ) -> Result<Json<JobResponse>, ApiError> {
     let name = sanitize_workspace_name(&request.name)?;
-    let assigned_node = request.node_id.clone().unwrap_or(node_id()?);
+    if workspace_get(&name).is_ok() {
+        return Err(ApiError::Anyhow(anyhow!(
+            "workspace already exists: {name}"
+        )));
+    }
+    let assigned_node = select_ready_node(request.node_id.as_deref())?;
     let user_id = request.user.clone().unwrap_or_else(|| name.clone());
     let memory = u32::try_from(request.memory).context("memory must fit in u32 MiB")?;
     workspace_upsert_pending(
@@ -188,6 +215,15 @@ async fn api_worker_job_event(
 ) -> Result<Json<Value>, ApiError> {
     require_worker_token(&headers).map_err(ApiError::Unauthorized)?;
     let job = job_get(&id)?;
+    if job.node_id.as_deref() != Some(&request.node_id) {
+        return Err(ApiError::Unauthorized(anyhow!(
+            "job {id} is not assigned to node {}",
+            request.node_id
+        )));
+    }
+    if request.event_type == "job_running" {
+        mark_job_running(&id, &request.node_id)?;
+    }
     record_workspace_event(
         &job.workspace_name,
         &request.event_type,
@@ -278,8 +314,13 @@ fn require_assigned_worker(workspace_name: &str, node: &str) -> Result<(), ApiEr
 
 async fn api_worker_events(
     State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
     Query(query): Query<WorkerEventsQuery>,
-) -> Sse<impl tokio_stream::Stream<Item = std::result::Result<SseEvent, Infallible>>> {
+) -> Result<
+    Sse<impl tokio_stream::Stream<Item = std::result::Result<SseEvent, Infallible>>>,
+    ApiError,
+> {
+    require_worker_token(&headers).map_err(ApiError::Unauthorized)?;
     let node_id = query.node_id;
     let stream = BroadcastStream::new(state.notifier.subscribe()).filter_map(move |message| {
         let node_id = node_id.clone();
@@ -290,5 +331,5 @@ async fn api_worker_events(
             Err(_) => None,
         }
     });
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }

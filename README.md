@@ -195,7 +195,7 @@ services.agentmom = {
 
   api = {
     enable = true;
-    bind = "0.0.0.0:8080";
+    bind = "127.0.0.1:8080";
   };
 
   worker = {
@@ -208,7 +208,7 @@ services.agentmom = {
 
   ui.enable = true;
 
-  workerTokenFile = /run/secrets/agentmom-worker-token;
+  workerTokenFile = "/run/secrets/agentmom-worker-token";
 
   capacity = {
     cpus = 32;
@@ -224,12 +224,15 @@ Workers keep using host-local microsandbox volumes and claim jobs through
 `POST /worker/claim`; `GET /worker/events?node_id=...` is only a low-latency
 wake signal.
 
+The API/UI routes are intended to sit behind Tailscale or an authenticated
+reverse proxy. Do not bind the API to a public interface without adding that
+outer auth layer.
+
 Workers also expose private control endpoints, such as
 `POST /worker/services/{service}/open`, used by the API to open Hermes/OpenCode
 tunnels on the host that owns the workspace VM. Bind these endpoints to
 localhost for single-host deployments or to a Tailscale/private address for
 multi-host deployments.
 
-If `workerTokenFile` or `MOM_WORKER_TOKEN` is set, worker endpoints require a
-bearer token. Keep the API bound to localhost or a private network unless worker
-auth is configured.
+Worker endpoints require a bearer token through `workerTokenFile`,
+`MOM_WORKER_TOKEN`, or `MOM_WORKER_TOKEN_FILE`.

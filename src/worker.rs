@@ -2,6 +2,7 @@ use super::*;
 
 #[derive(Clone)]
 struct WorkerState {
+    api: WorkerApi,
     services: service::ServiceState,
 }
 
@@ -31,10 +32,18 @@ pub(crate) async fn worker(args: WorkerArgs) -> Result<()> {
         .worker_url
         .clone()
         .unwrap_or_else(|| format!("http://{}", args.bind));
+    let addr: SocketAddr = args
+        .bind
+        .parse()
+        .with_context(|| format!("parse worker bind address {}", args.bind))?;
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("bind worker HTTP {addr}"))?;
     let state = Arc::new(WorkerState {
+        api: worker_api.clone(),
         services: service::ServiceState::default(),
     });
-    let worker_http = tokio::spawn(run_worker_http(args.bind.clone(), state));
+    let worker_http = tokio::spawn(run_worker_http(listener, state));
     register_worker(&client, &api_url, &node, &worker_url).await?;
     let (wake_tx, mut wake_rx) = mpsc::channel::<()>(32);
     let sse_client = client.clone();
@@ -62,23 +71,20 @@ pub(crate) async fn worker(args: WorkerArgs) -> Result<()> {
     }
 }
 
-async fn run_worker_http(bind: String, state: Arc<WorkerState>) -> Result<()> {
+async fn run_worker_http(listener: tokio::net::TcpListener, state: Arc<WorkerState>) -> Result<()> {
     let app = Router::new()
         .route("/worker/health", get(worker_health))
         .route("/worker/services/{service}/open", post(worker_open_service))
         .with_state(state);
-    let addr: SocketAddr = bind
-        .parse()
-        .with_context(|| format!("parse worker bind address {bind}"))?;
+    let addr = listener
+        .local_addr()
+        .context("read worker HTTP listener address")?;
     log_record(
         "info",
         "worker_http_start",
         None,
         &format!("Agent Mom worker HTTP listening on http://{addr}"),
     );
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .with_context(|| format!("bind worker HTTP {addr}"))?;
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
@@ -96,16 +102,33 @@ async fn worker_open_service(
     Json(request): Json<OpenServiceRequest>,
 ) -> Result<Json<Value>, ApiError> {
     require_worker_token(&headers).map_err(ApiError::Unauthorized)?;
+    let workspace = state
+        .api
+        .workspace(&request.workspace_name)
+        .await
+        .map_err(ApiError::Anyhow)?;
+    if workspace.node_id.as_deref() != Some(&state.api.node) {
+        return Err(ApiError::Unauthorized(anyhow!(
+            "workspace {} is not assigned to worker {}",
+            workspace.name,
+            state.api.node
+        )));
+    }
+    if request.sandbox_name != workspace.sandbox_name {
+        return Err(ApiError::Unauthorized(anyhow!(
+            "service-open sandbox does not match workspace assignment"
+        )));
+    }
     if fake_runtime_enabled() {
-        let url = fake_open_service(&request.workspace_name, &service)
+        let url = fake_open_service(&workspace.name, &service)
             .await
             .map_err(ApiError::Anyhow)?;
         return Ok(Json(json!({ "url": url })));
     }
     let url = service::open_workspace_service(
         &state.services,
-        &request.workspace_name,
-        &request.sandbox_name,
+        &workspace.name,
+        &workspace.sandbox_name,
         &service,
     )
     .await?;
@@ -141,7 +164,12 @@ async fn worker_sse_loop(
     loop {
         let url = format!("{api_url}/worker/events?node_id={}", url_component(&node));
         let result = async {
-            let response = client.get(url).send().await?.error_for_status()?;
+            let response = client
+                .get(url)
+                .with_worker_token()
+                .send()
+                .await?
+                .error_for_status()?;
             let mut stream = response.bytes_stream();
             while let Some(chunk) = stream.next().await {
                 chunk?;
@@ -212,8 +240,7 @@ async fn run_claimed_job(api: &WorkerApi, job: JobRecord) -> Result<()> {
         }
         Err(error) => {
             let message = format!("{error:#}");
-            let _ = api
-                .client
+            api.client
                 .post(format!("{}/worker/jobs/{}/complete", api.api_url, job.id))
                 .with_worker_token()
                 .json(&json!({
@@ -222,8 +249,10 @@ async fn run_claimed_job(api: &WorkerApi, job: JobRecord) -> Result<()> {
                     "output": { "error": message }
                 }))
                 .send()
-                .await;
-            Err(error)
+                .await?
+                .error_for_status()?;
+            log_record("error", "job_failed", Some(&job.workspace_name), &message);
+            Ok(())
         }
     }
 }
