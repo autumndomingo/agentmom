@@ -108,6 +108,10 @@ let
     openssh
     restic
   ] ++ lib.optional (cfg.microsandboxPackage != null) cfg.microsandboxPackage;
+  tmpfilesReadyUnits = [
+    "systemd-tmpfiles-setup.service"
+    "systemd-tmpfiles-resetup.service"
+  ];
 in
 {
   options.services.agentmom = {
@@ -559,7 +563,7 @@ in
     systemd.services.agentmom-api = lib.mkIf cfg.api.enable {
       description = "Agent Mom central API";
       wantedBy = [ "multi-user.target" ];
-      after = [ "network-online.target" ];
+      after = [ "network-online.target" ] ++ tmpfilesReadyUnits;
       wants = [ "network-online.target" ];
       path = commonPath;
       environment = commonEnvironment // lib.optionalAttrs cfg.ui.enable {
@@ -579,7 +583,7 @@ in
     systemd.services.agentmom-worker = lib.mkIf cfg.worker.enable {
       description = "Agent Mom central API worker";
       wantedBy = [ "multi-user.target" ];
-      after = [ "network-online.target" ]
+      after = [ "network-online.target" ] ++ tmpfilesReadyUnits
         ++ lib.optionals cfg.credentialProxy.enable [ "agentmom-credential-proxy.service" ];
       wants = [ "network-online.target" ]
         ++ lib.optionals cfg.credentialProxy.enable [ "agentmom-credential-proxy.service" ];
@@ -610,7 +614,7 @@ in
 
     systemd.services.agentmom-catalog-backup = lib.mkIf cfg.catalogBackup.enable {
       description = "Agent Mom SQLite catalog backup";
-      after = [ "agentmom-api.service" ];
+      after = [ "agentmom-api.service" ] ++ tmpfilesReadyUnits;
       path = commonPath;
       environment = commonEnvironment;
       serviceConfig = {
@@ -646,7 +650,7 @@ in
 
     systemd.services.agentmom-monitor-check = lib.mkIf cfg.monitorCheck.enable {
       description = "Agent Mom lightweight monitor check";
-      after = [ "agentmom-api.service" ];
+      after = [ "agentmom-api.service" ] ++ tmpfilesReadyUnits;
       path = commonPath;
       environment = commonEnvironment;
       unitConfig = lib.optionalAttrs (cfg.monitorCheck.onFailureUnits != [ ]) {
