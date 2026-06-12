@@ -104,11 +104,13 @@ Out of scope for this phase:
 
 - [~] Add backups and restore discipline.
   - [x] Record backup artifacts and timestamps centrally.
-  - [ ] Alert/report when backup age exceeds RPO.
+  - [x] Monitor/report when backup age exceeds RPO through `mom monitor check`.
   - [x] Add `mom workspace backups`.
   - [x] Add `mom workspace restore`.
+  - [ ] Make `mom workspace backup` queue a worker job when the workspace is assigned to a remote node.
   - [x] Add explicit SQLite catalog backup/status commands.
   - [x] Add NixOS timer for catalog backups on the API host.
+  - [x] Upload API catalog backups to the configured restic repository.
   - [x] Add host-loss recovery drill path with `mom fleet recover-host`.
 
 - [~] Add deployment flow for multiple systemd hosts.
@@ -130,6 +132,9 @@ Out of scope for this phase:
   - [x] Integrate runbook updates for catalog backup, monitoring, idle wake, and rolling updates.
   - [x] Defer managed skills until the core fleet safety work lands.
   - [x] Add guarded host-loss recovery that requires successful restic backups before workspace reassignment.
+  - [x] Make host-loss recovery transactional so all preconditions pass before any workspace is reassigned.
+  - [x] Restore restic backups into a temporary directory and swap them into place only after restore succeeds.
+  - [x] Harden public `/worker/*` routes so only current worker public IPs can reach them through Caddy.
 
 - [ ] Preserve k3s migration path.
   - [x] Keep all runtime config available via env vars/files.
@@ -171,3 +176,8 @@ Out of scope for this phase:
 - Production ops integration imported catalog schema/version checks, SQLite catalog backup, richer metrics, monitor checks, node lifecycle controls, host-loss recovery, an ignored real-host test harness, and runbook updates. Managed skills remain intentionally deferred.
 - Live recovery QA on 2026-06-12 found and fixed two restore bugs: target-host restic restores must register the named volume in the local microsandbox DB before sandbox recreation, and stale/unusable sandbox records need replace semantics during recovery recreation. After the fixes, a clean `mom-2 -> mom-1` recovery restored two backed workspaces and returned both nodes to strict monitor health.
 - nixbuild.net currently rejects builds because billing/free build time is exhausted. All NixOS hosts now keep nixbuild.net configured but allow `max-jobs = 2` local fallback so deploys do not wedge when the remote builder is unavailable.
+- Reviewer-driven hardening on 2026-06-12 added transactional host recovery, safer restic restore swap/rollback behavior, catalog-backup restic upload, backup RPO/failure monitor checks, Caddy IP allowlisting for worker routes, and a narrow `mom-2` credential-proxy bind on `192.168.83.1:1080`.
+- Current live QA on 2026-06-12: `mom-ctrl`, `mom-1`, and `mom-2` all switched to the hardened Agent Mom commit; `agentmom.xyz` returns 403 for public `/worker/*`, 401 for public Basic Auth routes, both workers are ready, and strict monitor passes with two ready nodes and zero stale/failed/backup-alert counts.
+- Current live QA on 2026-06-12: read-only real-fleet tests passed, mutating real-fleet tests passed against `mom-2`, catalog backup uploaded a restic snapshot, and a fresh `mom-2 -> mom-1` host-loss recovery restored two newly backed workspaces.
+- CLI gap found during recovery QA: `mom workspace backup <workspace>` still tries to read local volumes on the invoking host. In distributed mode it should queue a `backup` job through the API for the owning worker.
+- CLI gap found during recovery QA: `mom workspace inspect <workspace>` reports local sandbox status from the invoking host, which is misleading on `mom-ctrl` for remote workspaces. Distributed inspect should use worker-reported state or clearly label host-local runtime checks.
