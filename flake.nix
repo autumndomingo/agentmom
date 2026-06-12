@@ -29,7 +29,15 @@
           };
           rustToolchain = pkgs.rust-bin.stable.latest.default;
           craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
-          src = craneLib.cleanCargoSource ./.;
+          src = pkgs.lib.cleanSourceWith {
+            src = ./.;
+            filter = path: type:
+              let
+                rel = pkgs.lib.removePrefix "${toString ./.}/" (toString path);
+              in
+              (craneLib.filterCargoSources path type)
+              && !(pkgs.lib.hasPrefix "tests/" rel);
+          };
           microsandboxVersion = "0.5.6";
           microsandboxBundleHashes = {
             x86_64-linux = "sha256-tVCx9fB4XY+2+eEyLCFq+m/k6DAg6n82ThIwgFDYTlU=";
