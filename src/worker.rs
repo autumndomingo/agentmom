@@ -380,11 +380,7 @@ async fn worker_reconcile_once(api: &WorkerApi) -> Result<()> {
     let records = api.workspaces().await?;
     let now = now_epoch()?;
     for record in records {
-        if record
-            .node_id
-            .as_deref()
-            .is_some_and(|assigned| assigned != api.node)
-        {
+        if record.node_id.as_deref() != Some(api.node.as_str()) {
             continue;
         }
         if let Err(error) = worker_reconcile_workspace(api, &record, now).await {
@@ -394,16 +390,30 @@ async fn worker_reconcile_once(api: &WorkerApi) -> Result<()> {
                 Some(&record.name),
                 "workspace reconciliation failed",
             );
-            api.update_workspace(&record.name, Some("error"), None, false, false)
-                .await?;
-            api.event(
-                &record.name,
-                "workspace_reconcile_failed",
-                "failed",
-                &format!("{error:#}"),
-                json!({ "sandbox": record.sandbox_name, "volume": record.volume_name }),
-            )
-            .await?;
+            if let Err(report_error) = api
+                .update_workspace(&record.name, Some("error"), None, false, false)
+                .await
+            {
+                eprintln!(
+                    "failed to report reconcile status for {}: {report_error:#}",
+                    record.name
+                );
+            }
+            if let Err(report_error) = api
+                .event(
+                    &record.name,
+                    "workspace_reconcile_failed",
+                    "failed",
+                    &format!("{error:#}"),
+                    json!({ "sandbox": record.sandbox_name, "volume": record.volume_name }),
+                )
+                .await
+            {
+                eprintln!(
+                    "failed to report reconcile event for {}: {report_error:#}",
+                    record.name
+                );
+            }
             eprintln!("reconcile {} failed: {error:#}", record.name);
         }
     }

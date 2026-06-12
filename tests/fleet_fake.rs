@@ -179,6 +179,25 @@ async fn worker_state_updates_require_assigned_node() -> Result<()> {
 }
 
 #[tokio::test]
+async fn worker_ignores_unassigned_legacy_workspaces() -> Result<()> {
+    let fleet = TestFleet::start().await?;
+    insert_unassigned_workspace(fleet.api_state.path(), "legacy")?;
+
+    let node = spawn_worker("node-a", &fleet.api_url)?;
+    wait_for_node(fleet.api_state.path(), "node-a").await?;
+
+    reqwest::get(format!("{}/worker/health", node.worker_url))
+        .await?
+        .error_for_status()?;
+    assert!(
+        !node.msb_home.path().join("fake/legacy").exists(),
+        "worker should not reconcile unassigned legacy workspaces"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn worker_events_requires_worker_token() -> Result<()> {
     let fleet = TestFleet::start().await?;
 
@@ -549,6 +568,27 @@ INSERT INTO workspaces (
             format!("mom-{name}"),
             format!("mom-{name}-workspace"),
             node,
+            now,
+        ),
+    )?;
+    Ok(())
+}
+
+fn insert_unassigned_workspace(api_state: &Path, name: &str) -> Result<()> {
+    let now = now_epoch()?;
+    let db = Connection::open(api_state.join("fleet.db"))?;
+    db.execute(
+        r#"
+INSERT INTO workspaces (
+    name, user_id, sandbox_name, volume_name, node_id, desired_state, cpus, memory_mib,
+    volume_quota_mib, status, idle_timeout_secs, backup_interval_secs,
+    last_used_at, last_backup_at, created_at, updated_at
+) VALUES (?1, ?1, ?2, ?3, NULL, 'running', 1, 2048, 10240, 'running', 1800, 0, ?4, NULL, ?4, ?4)
+"#,
+        (
+            name,
+            format!("mom-{name}"),
+            format!("mom-{name}-workspace"),
             now,
         ),
     )?;
