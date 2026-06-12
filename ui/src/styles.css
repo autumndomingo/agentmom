@@ -818,7 +818,7 @@ input:disabled {
 .adminPage {
   position: relative;
   min-height: 100vh;
-  padding: clamp(18px, 5vw, 72px);
+  padding: clamp(24px, 5vw, 64px);
   display: grid;
   place-items: center;
   background:
@@ -848,14 +848,14 @@ input:disabled {
 .adminPanel {
   position: relative;
   z-index: 1;
-  width: min(1040px, 100%);
-  min-height: min(680px, calc(100vh - 72px));
-  padding: clamp(18px, 3vw, 32px);
+  width: min(1080px, 100%);
+  min-height: min(640px, calc(100vh - 72px));
+  padding: clamp(24px, 3vw, 36px);
   border: 1px solid rgb(225 148 78 / 28%);
   border-radius: 12px;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
-  gap: 28px;
+  gap: 24px;
   background:
     radial-gradient(circle at 100% 0%, rgb(225 148 78 / 12%), transparent 34%),
     radial-gradient(circle at 0% 100%, rgb(70 128 148 / 12%), transparent 34%),
@@ -901,20 +901,20 @@ input:disabled {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 20px;
 }
 
 .adminTopActions {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
 }
 
 .adminPreviewControl,
 .accessCodeControl {
   display: inline-flex;
   align-items: center;
-  gap: 9px;
+  gap: 12px;
 }
 
 .adminPreviewControl span {
@@ -925,7 +925,7 @@ input:disabled {
 
 .adminPreviewControl select,
 .adminUserRow select {
-  height: 36px;
+  height: 44px;
   border: 1px solid rgb(255 255 255 / 16%);
   border-radius: 8px;
   background: rgb(24 24 27 / 86%);
@@ -941,21 +941,22 @@ input:disabled {
 }
 
 .adminPreviewControl select {
-  min-width: 190px;
-  padding: 0 38px 0 18px;
+  min-width: 220px;
+  padding: 0 42px 0 18px;
 }
 
 .accessCodeControl {
-  height: 39px;
-  padding: 0 6px 0 18px;
+  height: 44px;
+  padding: 0 8px 0 18px;
   border: 1px solid rgb(255 255 255 / 16%);
   border-radius: 8px;
   background: rgb(24 24 27 / 86%);
 }
 
 .adminNavButton {
-  height: 39px;
-  padding: 0 14px;
+  height: 44px;
+  min-width: 130px;
+  padding: 0 18px;
   border: 1px solid rgb(255 255 255 / 16%);
   border-radius: 8px;
   background: rgb(24 24 27 / 86%);
@@ -968,7 +969,7 @@ input:disabled {
 }
 
 .accessCodeControl code {
-  min-width: 72px;
+  min-width: 120px;
   color: var(--text);
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 16px;
@@ -977,8 +978,8 @@ input:disabled {
 }
 
 .accessCodeControl button {
-  width: 30px;
-  height: 30px;
+  width: 32px;
+  height: 32px;
   border-radius: 7px;
   display: grid;
   place-items: center;
@@ -995,7 +996,7 @@ input:disabled {
   position: relative;
   z-index: 1;
   min-height: 0;
-  padding: 10px 18px 28px;
+  padding: 16px 20px 24px;
   border: 1px solid rgb(255 255 255 / 12%);
   border-radius: 12px;
   display: grid;
@@ -1007,14 +1008,14 @@ input:disabled {
 .adminTableHeader,
 .adminUserRow {
   display: grid;
-  grid-template-columns: minmax(150px, 1.2fr) minmax(210px, 1.55fr) minmax(90px, 0.55fr) minmax(74px, 0.48fr) minmax(104px, 0.65fr);
+  grid-template-columns: minmax(180px, 1.25fr) minmax(250px, 1.55fr) 140px 110px 150px;
   align-items: center;
-  gap: 14px;
+  gap: 18px;
 }
 
 .adminTableHeader {
-  min-height: 44px;
-  padding: 0 10px;
+  min-height: 52px;
+  padding: 0 14px;
   border: 1px solid rgb(255 255 255 / 14%);
   border-radius: 9px;
   color: #f3eedf;
@@ -1025,7 +1026,7 @@ input:disabled {
 
 .adminTableHeader button,
 .adminUserRow button {
-  height: 34px;
+  height: 42px;
   border: 1px solid rgb(255 255 255 / 16%);
   border-radius: 8px;
   background: rgb(24 24 27 / 86%);
@@ -1041,12 +1042,12 @@ input:disabled {
 
 .adminUserList {
   min-height: 0;
-  padding: 4px 10px;
+  padding: 8px 14px 0;
   overflow: auto;
 }
 
 .adminUserRow {
-  min-height: 54px;
+  min-height: 72px;
   border-bottom: 1px solid rgb(255 255 255 / 12%);
 }
 
@@ -1075,13 +1076,13 @@ input:disabled {
 }
 
 .adminUserRow select {
-  width: 94px;
+  width: 128px;
   justify-self: center;
 }
 
 .adminStatusDot {
-  width: 13px;
-  height: 13px;
+  width: 14px;
+  height: 14px;
   border: 2px solid rgb(0 0 0 / 14%);
   border-radius: 50%;
   justify-self: center;
@@ -1119,6 +1120,8 @@ input:disabled {
 
   .adminPanel {
     min-height: auto;
+    padding: 20px;
+    gap: 20px;
   }
 
   .landingPanel {
@@ -1126,13 +1129,13 @@ input:disabled {
   }
 
   .adminTableShell {
-    padding: 10px;
+    padding: 12px;
     overflow-x: auto;
   }
 
   .adminTableHeader,
   .adminUserRow {
-    min-width: 760px;
+    min-width: 850px;
   }
 }
 
@@ -1184,8 +1187,8 @@ input:disabled {
   }
 
   .adminPanel {
-    padding: 14px;
-    border-radius: 16px;
+    padding: 16px;
+    border-radius: 12px;
     gap: 16px;
   }
 
@@ -1210,6 +1213,15 @@ input:disabled {
   }
 
   .adminPreviewControl select {
-    min-width: 150px;
+    min-width: 160px;
+  }
+
+  .accessCodeControl {
+    height: 44px;
+  }
+
+  .adminTableHeader,
+  .adminUserRow {
+    min-width: 820px;
   }
 }
