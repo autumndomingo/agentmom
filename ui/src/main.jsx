@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
-  ChevronDown,
   Edit3,
   PanelLeft,
   Plus,
@@ -271,13 +270,11 @@ function App({ userSession }) {
   ]);
   const [selectedUserId, setSelectedUserId] = useState(currentUserId);
   const [busy, setBusy] = useState(false);
-  const [showUsers, setShowUsers] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [createForm, setCreateForm] = useState({ userName: userSession.userName, botName: '' });
   const [chatInput, setChatInput] = useState('');
   const [chatsByUser, setChatsByUser] = useState(() => loadStoredChats());
   const [activeChatByUser, setActiveChatByUser] = useState({});
-  const [activityByName, setActivityByName] = useState({});
   const [now, setNow] = useState(() => Date.now());
 
   const selectedVm = useMemo(
@@ -332,7 +329,6 @@ function App({ userSession }) {
     setCreateForm({ userName: userSession.userName, botName: '' });
     setShowCreate(false);
     setSelectedUserId(currentUserId);
-    markActive(currentUserId);
     startNewChat(currentUserId);
   }
 
@@ -344,7 +340,6 @@ function App({ userSession }) {
     if (!prompt) return;
 
     setChatInput('');
-    markActive(selectedVm.id);
     const chatId = ensureChatForPrompt(selectedVm.id, prompt);
     appendMessage(selectedVm.id, chatId, { role: 'user', content: prompt });
 
@@ -352,16 +347,6 @@ function App({ userSession }) {
       role: 'assistant',
       content: 'This prototype is connected through the local onboarding flow. Backend chat wiring can be added after the screen flow is finalized.',
     });
-  }
-
-  function selectWorkspace(id) {
-    setSelectedUserId(id);
-    setShowUsers(false);
-    markActive(id);
-  }
-
-  function markActive(id) {
-    setActivityByName((current) => ({ ...current, [id]: Date.now() }));
   }
 
   function startNewChat(id = selectedVm?.id) {
@@ -429,35 +414,8 @@ function App({ userSession }) {
         <div className="userDropdown">
           <div className="brandRow">
             <div className="brandMark">A</div>
-            <button
-              className="brandButton"
-              onClick={() => setShowUsers((value) => !value)}
-              aria-expanded={showUsers}
-            >
-              Agent Mom Users
-              <ChevronDown className={showUsers ? 'chevron open' : 'chevron'} size={16} />
-            </button>
+            <div className="brandButton">Agent Mom</div>
           </div>
-
-          {showUsers && (
-            <div className="userMenu">
-              {vms.map((vm) => {
-                const status = userStatus(vm, activityByName[vm.id], now);
-                return (
-                  <button
-                    key={vm.id}
-                    className={`userMenuItem ${selectedVm?.id === vm.id ? 'active' : ''}`}
-                    onClick={() => selectWorkspace(vm.id)}
-                  >
-                    <span className={`statusDot ${status}`} />
-                    <span>{vm.userName ?? userSession.userName}</span>
-                    <small>{statusLabel(status)}</small>
-                  </button>
-                );
-              })}
-              {!vms.length && <p className="emptyList">No users yet.</p>}
-            </div>
-          )}
         </div>
 
         <div className="sidebarQuickActions">
@@ -610,6 +568,7 @@ function App({ userSession }) {
 function AdminPage({ userSession }) {
   const [users, setUsers] = useState([]);
   const [accessCodeStatus, setAccessCodeStatus] = useState('Generate code');
+  const [adminAccessCode, setAdminAccessCode] = useState('');
   const [adminError, setAdminError] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -646,6 +605,15 @@ function AdminPage({ userSession }) {
 
   useEffect(() => {
     loadUsers().catch((error) => setAdminError(formatError(error)));
+  }, [userSession?.token]);
+
+  useEffect(() => {
+    fetch(`${API_BASE}/auth/config`, {
+      headers: authHeaders(userSession),
+    })
+      .then((response) => response.json())
+      .then((data) => setAdminAccessCode(data.admin_access_code ?? ''))
+      .catch(() => setAdminAccessCode(''));
   }, [userSession?.token]);
 
   useEffect(() => {
@@ -830,6 +798,12 @@ function AdminPage({ userSession }) {
                 <RefreshCcw size={17} />
               </button>
             </div>
+            {adminAccessCode && (
+              <div className="accessCodeControl staticAccessCode" aria-label="Admin access code">
+                <span>Admin</span>
+                <code>{adminAccessCode}</code>
+              </div>
+            )}
           </div>
         </header>
 
@@ -884,23 +858,6 @@ function friendlyStatus(status) {
   if (lower === 'paused') return 'Paused';
   if (lower === 'crashed') return 'Needs attention';
   return status;
-}
-
-function userStatus(vm, lastActivity, now) {
-  const lower = vm.status.toLowerCase();
-  if (lower === 'stopped' || lower === 'paused' || lower === 'crashed') {
-    return 'inactive';
-  }
-  if (!lastActivity) {
-    return 'inactive';
-  }
-  return now - lastActivity >= 5 * 60 * 1000 ? 'stagnant' : 'active';
-}
-
-function statusLabel(status) {
-  if (status === 'active') return 'Active';
-  if (status === 'stagnant') return 'Stagnant';
-  return 'Inactive';
 }
 
 function adminStatusLabel(status) {
