@@ -162,12 +162,14 @@ input:disabled {
 
 .typedPrompt {
   display: inline-block;
-  width: auto;
+  width: 31ch;
   max-width: 100%;
-  border-right: 0;
-  overflow: visible;
+  border-right: 0.12em solid currentColor;
+  overflow: hidden;
   white-space: nowrap;
-  animation: none;
+  animation:
+    typePrompt 2.3s steps(31, end) 280ms both,
+    blinkCursor 850ms step-end 280ms 4;
 }
 
 .landingHeader h1 strong {
@@ -181,7 +183,7 @@ input:disabled {
   }
 
   to {
-    width: 30ch;
+    width: 31ch;
   }
 }
 
@@ -1236,8 +1238,15 @@ body {
   border-radius: 12px;
   padding: 0 18px;
   background: rgb(4 5 6 / 72%);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   font-size: 18px;
-  font-weight: 720;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+.landingForm input::placeholder {
+  color: #9b9ba3;
+  font-weight: 500;
 }
 
 .landingForm input:focus {
@@ -1249,8 +1258,10 @@ body {
   height: 52px;
   border-radius: 12px;
   background: var(--accent);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   font-size: 15px;
-  letter-spacing: 0;
+  font-weight: 750;
+  letter-spacing: 0.01em;
   box-shadow: 0 10px 34px rgb(227 154 77 / 22%);
 }
 
@@ -1353,7 +1364,25 @@ body {
   padding: 16px;
   border: 1px solid rgb(247 243 234 / 10%);
   border-radius: 14px;
+  display: grid;
+  gap: 8px;
   background: rgb(255 255 255 / 3.5%);
+}
+
+.sessionBox button {
+  height: 40px;
+  margin-top: 12px;
+  border: 1px solid rgb(247 243 234 / 16%);
+  border-radius: 10px;
+  background: rgb(247 243 234 / 8%);
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.sessionBox button:hover {
+  border-color: rgb(247 243 234 / 26%);
+  background: rgb(247 243 234 / 12%);
 }
 
 .chatHeader {
