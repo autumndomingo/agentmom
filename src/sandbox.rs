@@ -10,6 +10,7 @@ pub(crate) async fn create_sandbox(
 ) -> Result<()> {
     println!("creating {} from {IMAGE}", args.name);
     let config = load_mom_config()?;
+    let snapshot_name = config.snapshot_name()?.to_string();
 
     let memory = u32::try_from(args.memory).context("memory must fit in u32 MiB")?;
     if !args.no_snapshot {
@@ -41,7 +42,7 @@ pub(crate) async fn create_sandbox(
     if args.no_snapshot {
         builder = builder.image(IMAGE);
     } else {
-        builder = builder.from_snapshot(&config.snapshot_name);
+        builder = builder.from_snapshot(&snapshot_name);
     }
 
     if args.replace {
@@ -54,9 +55,9 @@ pub(crate) async fn create_sandbox(
         .with_context(|| format!("create sandbox '{}'", args.name))?;
 
     if args.no_snapshot {
-        provision_base(&sandbox, &config.hermes_profile).await?;
+        provision_base(&sandbox, config.hermes_profile()).await?;
     } else {
-        configure_guest_profile(&sandbox, &config.hermes_profile).await?;
+        configure_guest_profile(&sandbox, config.hermes_profile()).await?;
     }
     apply_guest_auth_config(&sandbox, &config).await?;
     if args.no_snapshot {
@@ -71,22 +72,26 @@ pub(crate) async fn create_sandbox(
 
 pub(crate) async fn apply_guest_auth_config(sandbox: &Sandbox, config: &MomConfig) -> Result<()> {
     println!("writing VM auth/config from host config");
-    let credential_mode = CredentialMode::parse(&config.credential_mode)?;
-    validate_credential_config(config, credential_mode)?;
+    let credential_mode = config.validate_for_guest_config()?;
 
     let (codex_auth, hermes_auth, opencode_auth) = if credential_mode.uses_guest_auth_files() {
-        let codex_auth_path = resolve_required_file(&config.codex_auth_path, "codex_auth_path")?;
+        let codex_auth_path = resolve_required_file(
+            &config.credentials.codex_auth_path,
+            "credentials.codex_auth_path",
+        )?;
         let codex_auth = fs::read(&codex_auth_path)
             .with_context(|| format!("read {}", codex_auth_path.display()))?;
         let hermes_auth = codex_auth_as_hermes_auth(&codex_auth_path)?;
-        let opencode_auth_path =
-            resolve_required_file(&config.opencode_auth_path, "opencode_auth_path")?;
+        let opencode_auth_path = resolve_required_file(
+            &config.credentials.opencode_auth_path,
+            "credentials.opencode_auth_path",
+        )?;
         let opencode_auth = opencode_auth_from_file(&opencode_auth_path)?;
         (Some(codex_auth), Some(hermes_auth), Some(opencode_auth))
     } else {
         (None, None, None)
     };
-    let hermes_home = format!("{GUEST_HERMES_HOME}/{}", config.hermes_profile);
+    let hermes_home = format!("{GUEST_HERMES_HOME}/{}", config.hermes_profile());
 
     let fs = sandbox.fs();
     fs.mkdir("/workspace").await?;
@@ -134,15 +139,15 @@ pub(crate) async fn apply_guest_auth_config(sandbox: &Sandbox, config: &MomConfi
         opencode_config_json(config).as_bytes(),
     )
     .await?;
-    if let Some(proxy_url) = &config.credential_proxy_url {
+    if let Some(proxy_url) = config.credential_proxy_url() {
         fs.write(
             "/etc/profile.d/agentmom-proxy.sh",
             proxy_env_sh(proxy_url).as_bytes(),
         )
         .await?;
     }
-    if let Some(ca_path) = &config.credential_proxy_ca_path {
-        let ca_path = resolve_required_file(ca_path, "credential_proxy_ca_path")?;
+    if let Some(ca_path) = &config.credentials.proxy_ca_path {
+        let ca_path = resolve_required_file(ca_path, "credentials.proxy_ca_path")?;
         let ca = fs::read(&ca_path).with_context(|| format!("read {}", ca_path.display()))?;
         fs.mkdir("/usr/local/share/ca-certificates").await?;
         fs.write("/usr/local/share/ca-certificates/agentmom-proxy.crt", ca)
@@ -180,34 +185,66 @@ sync
 }
 
 pub(crate) async fn ensure_base_snapshot(config: &MomConfig, rebuild: bool) -> Result<()> {
+    let snapshot_name = config.snapshot_name()?.to_string();
     if rebuild {
-        println!("rebuilding base snapshot {}", config.snapshot_name);
-        let _ = Snapshot::remove(&config.snapshot_name, true).await;
+        println!("rebuilding base snapshot {snapshot_name}");
+        let _ = Snapshot::remove(&snapshot_name, true).await;
+        build_base_snapshot(config).await?;
+        return doctor_base_snapshot(config).await;
+    }
+
+    match Snapshot::open(&snapshot_name).await {
+        Ok(snapshot) => {
+            println!(
+                "using base snapshot {} ({})",
+                snapshot_name,
+                snapshot.digest()
+            );
+            Ok(())
+        }
+        Err(MicrosandboxError::SnapshotNotFound(_)) => bail!(
+            "required base snapshot {} is missing; run `mom node ensure-base` before creating workspaces",
+            snapshot_name
+        ),
+        Err(error) => Err(error).context("open base snapshot"),
+    }
+}
+
+pub(crate) async fn ensure_base_snapshot_for_deploy(
+    config: &MomConfig,
+    rebuild: bool,
+) -> Result<()> {
+    let snapshot_name = config.snapshot_name()?.to_string();
+    if rebuild {
+        println!("rebuilding required base snapshot {snapshot_name}");
+        let _ = Snapshot::remove(&snapshot_name, true).await;
+        build_base_snapshot(config).await?;
     } else {
-        match Snapshot::open(&config.snapshot_name).await {
+        match Snapshot::open(&snapshot_name).await {
             Ok(snapshot) => {
                 println!(
-                    "using base snapshot {} ({})",
-                    config.snapshot_name,
+                    "found required base snapshot {} ({})",
+                    snapshot_name,
                     snapshot.digest()
                 );
-                return Ok(());
             }
             Err(MicrosandboxError::SnapshotNotFound(_)) => {
                 println!(
-                    "base snapshot {} not found; building it",
-                    config.snapshot_name
+                    "required base snapshot {} not found; building it",
+                    snapshot_name
                 );
+                build_base_snapshot(config).await?;
             }
             Err(error) => return Err(error).context("open base snapshot"),
         }
     }
 
-    build_base_snapshot(config).await
+    doctor_base_snapshot(config).await
 }
 
 pub(crate) async fn build_base_snapshot(config: &MomConfig) -> Result<()> {
-    let hermes_profile_name = config.hermes_profile.clone();
+    let snapshot_name = config.snapshot_name()?.to_string();
+    let hermes_profile_name = config.hermes_profile().to_string();
 
     if let Ok(handle) = Sandbox::get(BASE_BUILDER_NAME).await {
         if handle.status() == SandboxStatus::Running || handle.status() == SandboxStatus::Draining {
@@ -242,7 +279,7 @@ pub(crate) async fn build_base_snapshot(config: &MomConfig) -> Result<()> {
         .create()
         .await
         .with_context(|| format!("create base builder '{BASE_BUILDER_NAME}'"))?;
-    provision_base(&sandbox, &config.hermes_profile).await?;
+    provision_base(&sandbox, config.hermes_profile()).await?;
     doctor(&sandbox).await?;
     checked_shell(&sandbox, "sync").await?;
 
@@ -250,18 +287,51 @@ pub(crate) async fn build_base_snapshot(config: &MomConfig) -> Result<()> {
     sandbox.stop().await?;
 
     let snapshot = Snapshot::builder(BASE_BUILDER_NAME)
-        .destination(SnapshotDestination::Name(config.snapshot_name.clone()))
+        .destination(SnapshotDestination::Name(snapshot_name.clone()))
         .force()
         .create()
         .await
-        .with_context(|| format!("create snapshot '{}'", config.snapshot_name))?;
+        .with_context(|| format!("create snapshot '{snapshot_name}'"))?;
     println!(
         "created base snapshot {} ({})",
-        config.snapshot_name,
+        snapshot_name,
         snapshot.digest()
     );
 
     Sandbox::remove(BASE_BUILDER_NAME).await?;
+    Ok(())
+}
+
+pub(crate) async fn doctor_base_snapshot(config: &MomConfig) -> Result<()> {
+    let snapshot_name = config.snapshot_name()?.to_string();
+    if let Ok(handle) = Sandbox::get(BASE_DOCTOR_NAME).await {
+        if handle.status() == SandboxStatus::Running || handle.status() == SandboxStatus::Draining {
+            handle.stop_with_timeout(Duration::from_secs(10)).await?;
+        }
+        Sandbox::remove(BASE_DOCTOR_NAME).await?;
+    }
+
+    println!("doctoring base snapshot {snapshot_name}");
+    let sandbox = Sandbox::builder(BASE_DOCTOR_NAME)
+        .from_snapshot(&snapshot_name)
+        .replace()
+        .entrypoint(["tail", "-f", "/dev/null"])
+        .shell("/bin/sh")
+        .label(LABEL_MANAGED, "true")
+        .label(LABEL_VERSION, env!("CARGO_PKG_VERSION"))
+        .create()
+        .await
+        .with_context(|| {
+            format!(
+                "create base snapshot doctor sandbox '{}' from '{}'",
+                BASE_DOCTOR_NAME, snapshot_name
+            )
+        })?;
+    let result = doctor(&sandbox).await;
+    let _ = sandbox.stop().await;
+    let _ = Sandbox::remove(BASE_DOCTOR_NAME).await;
+    result.with_context(|| format!("doctor base snapshot '{snapshot_name}'"))?;
+    println!("base snapshot {snapshot_name} passed doctor");
     Ok(())
 }
 
@@ -441,10 +511,10 @@ pub(crate) async fn running_sandbox(name: &str) -> Result<Sandbox> {
 
 pub(crate) async fn run_codex(sandbox: &Sandbox, prompt: &str) -> Result<()> {
     let config = load_mom_config()?;
-    let credential_mode = CredentialMode::parse(&config.credential_mode)?;
+    let credential_mode = config.credential_mode()?;
     if credential_mode == CredentialMode::OpenRouterProxy {
         bail!(
-            "mom codex requires credential_mode vm-auth-json; use Hermes/OpenRouter in openrouter-proxy mode"
+            "mom codex requires credentials.mode vm-auth-json; use Hermes/OpenRouter in openrouter-proxy mode"
         );
     }
 

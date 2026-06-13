@@ -42,15 +42,18 @@ const GUEST_OPENCODE_CONFIG_HOME: &str = "/root/.config/opencode";
 const OPENCODE_GUEST_PORT: u16 = 4096;
 const HERMES_GUEST_PORT: u16 = 9119;
 const BASE_BUILDER_NAME: &str = "mom-base-builder";
+const BASE_DOCTOR_NAME: &str = "mom-base-doctor";
 
 mod api;
 mod backup;
+mod config;
 mod db;
 mod sandbox;
 mod service;
 mod ui;
 mod worker;
 
+pub(crate) use config::*;
 pub(crate) use db::*;
 pub(crate) use sandbox::*;
 
@@ -135,6 +138,11 @@ enum Command {
     Monitor {
         #[command(subcommand)]
         command: MonitorCommand,
+    },
+    /// Inspect Agent Mom configuration.
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
     },
     /// Run the central HTTP API and SSE notification service.
     Api(ApiArgs),
@@ -235,6 +243,12 @@ enum WorkspaceCommand {
 enum NodeCommand {
     /// Show local worker node status.
     Status,
+    /// Ensure the required versioned base snapshot exists and passes doctor.
+    EnsureBase {
+        /// Rebuild the required base snapshot even if it already exists.
+        #[arg(long)]
+        rebuild: bool,
+    },
     /// List registered fleet nodes from the central catalog.
     List,
     /// Show a registered fleet node from the central catalog.
@@ -259,6 +273,12 @@ enum DbCommand {
         #[arg(long)]
         output: Option<PathBuf>,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigCommand {
+    /// Validate the configured file and print the redacted effective config.
+    Doctor,
 }
 
 #[derive(Debug, Subcommand)]
@@ -623,52 +643,6 @@ struct LogRecord<'a> {
     message: &'a str,
 }
 
-#[derive(Debug, Deserialize)]
-struct MomConfig {
-    #[serde(default)]
-    codex_auth_path: PathBuf,
-    #[serde(default = "default_opencode_auth_path")]
-    opencode_auth_path: PathBuf,
-    #[serde(default = "default_hermes_profile")]
-    hermes_profile: String,
-    #[serde(default = "default_hermes_model")]
-    hermes_model: String,
-    #[serde(default = "default_snapshot_name")]
-    snapshot_name: String,
-    #[serde(default = "default_credential_mode")]
-    credential_mode: String,
-    #[serde(default)]
-    credential_proxy_url: Option<String>,
-    #[serde(default)]
-    credential_proxy_ca_path: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CredentialMode {
-    VmAuthJson,
-    OpenRouterProxy,
-}
-
-impl CredentialMode {
-    fn parse(raw: &str) -> Result<Self> {
-        match raw {
-            "vm-auth-json" | "file" => Ok(Self::VmAuthJson),
-            "openrouter-proxy" | "proxy" => Ok(Self::OpenRouterProxy),
-            _ => {
-                bail!("credential_mode must be one of: vm-auth-json, openrouter-proxy; got {raw:?}")
-            }
-        }
-    }
-
-    fn uses_guest_auth_files(self) -> bool {
-        matches!(self, Self::VmAuthJson)
-    }
-
-    fn uses_proxy(self) -> bool {
-        matches!(self, Self::OpenRouterProxy)
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -709,6 +683,7 @@ async fn main() -> Result<()> {
         Command::Fleet { command } => fleet_command(command).await,
         Command::Db { command } => db_command(command),
         Command::Monitor { command } => monitor_command(command).await,
+        Command::Config { command } => config_command(command),
         Command::Api(args) => api::api(args).await,
         Command::Worker(args) => worker::worker(args).await,
     }
@@ -778,12 +753,29 @@ async fn workspace_command(command: WorkspaceCommand) -> Result<()> {
 async fn node_command(command: NodeCommand) -> Result<()> {
     match command {
         NodeCommand::Status => node_status().await,
+        NodeCommand::EnsureBase { rebuild } => {
+            let config = load_mom_config()?;
+            sandbox::ensure_base_snapshot_for_deploy(&config, rebuild).await
+        }
         NodeCommand::List => node_list(),
         NodeCommand::Inspect { node } => node_inspect(&node),
         NodeCommand::Cordon { node } => node_set_scheduling(&node, "cordoned"),
         NodeCommand::Drain { node } => node_set_scheduling(&node, "draining"),
         NodeCommand::Retire { node } => node_set_scheduling(&node, "retired"),
         NodeCommand::Uncordon { node } => node_set_scheduling(&node, "ready"),
+    }
+}
+
+fn config_command(command: ConfigCommand) -> Result<()> {
+    match command {
+        ConfigCommand::Doctor => {
+            let path = config::config_path()?;
+            let config = load_mom_config()?;
+            config.validate_for_node()?;
+            println!("loaded Agent Mom config from {}", path.display());
+            println!("{}", serde_json::to_string_pretty(&config.redacted_json())?);
+            Ok(())
+        }
     }
 }
 
@@ -1686,10 +1678,6 @@ fn now_epoch() -> Result<i64> {
         .context("system time does not fit in i64 seconds")?)
 }
 
-fn home_dir() -> Result<PathBuf> {
-    dirs::home_dir().ok_or_else(|| anyhow!("could not determine home directory"))
-}
-
 fn opencode_auth_from_file(auth_path: &PathBuf) -> Result<String> {
     let raw =
         fs::read_to_string(auth_path).with_context(|| format!("read {}", auth_path.display()))?;
@@ -1732,86 +1720,6 @@ fn opencode_auth_from_file(auth_path: &PathBuf) -> Result<String> {
     Ok(serde_json::to_string_pretty(&json!({ "openai": openai }))?)
 }
 
-fn load_mom_config() -> Result<MomConfig> {
-    let path = match env::var_os("MOM_CONFIG") {
-        Some(value) => PathBuf::from(value),
-        None => home_dir()?.join(".config").join("mom").join("config.json"),
-    };
-    let raw = fs::read_to_string(&path).with_context(|| {
-        format!(
-            "read Agent Mom config {}; create it or set MOM_CONFIG",
-            path.display()
-        )
-    })?;
-    serde_json::from_str(&raw).with_context(|| format!("parse Agent Mom config {}", path.display()))
-}
-
-fn validate_credential_config(config: &MomConfig, credential_mode: CredentialMode) -> Result<()> {
-    match credential_mode {
-        CredentialMode::VmAuthJson => {
-            if config.codex_auth_path.as_os_str().is_empty() {
-                bail!("credential_mode vm-auth-json requires codex_auth_path");
-            }
-        }
-        CredentialMode::OpenRouterProxy => {
-            let proxy_url = config.credential_proxy_url.as_deref().unwrap_or("").trim();
-            if proxy_url.is_empty() {
-                bail!("credential_mode openrouter-proxy requires credential_proxy_url");
-            }
-            if config.credential_proxy_ca_path.is_none() {
-                bail!("credential_mode openrouter-proxy requires credential_proxy_ca_path");
-            }
-        }
-    }
-    Ok(())
-}
-
-fn resolve_required_file(path: &PathBuf, key: &str) -> Result<PathBuf> {
-    let expanded = expand_tilde(path)?;
-    expanded.canonicalize().with_context(|| {
-        format!(
-            "{key} does not point at a readable file: {}",
-            expanded.display()
-        )
-    })
-}
-
-fn expand_tilde(path: &PathBuf) -> Result<PathBuf> {
-    let raw = path.to_string_lossy();
-    if raw == "~" {
-        return home_dir();
-    }
-    if let Some(rest) = raw.strip_prefix("~/") {
-        return Ok(home_dir()?.join(rest));
-    }
-    Ok(path.clone())
-}
-
-fn default_hermes_profile() -> String {
-    "main".to_string()
-}
-
-fn default_opencode_auth_path() -> PathBuf {
-    home_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join(".local")
-        .join("share")
-        .join("opencode")
-        .join("auth.json")
-}
-
-fn default_hermes_model() -> String {
-    "gpt-5.5".to_string()
-}
-
-fn default_snapshot_name() -> String {
-    "mom-alpine-agent-base".to_string()
-}
-
-fn default_credential_mode() -> String {
-    "vm-auth-json".to_string()
-}
-
 fn default_workspace_cpus() -> u8 {
     1
 }
@@ -1833,9 +1741,10 @@ fn default_workspace_backup_interval() -> u64 {
 }
 
 fn hermes_config_yaml(config: &MomConfig) -> String {
-    let credential_mode =
-        CredentialMode::parse(&config.credential_mode).unwrap_or(CredentialMode::VmAuthJson);
-    let model = config_string(&config.hermes_model);
+    let credential_mode = config
+        .credential_mode()
+        .unwrap_or(CredentialMode::VmAuthJson);
+    let model = config_string(config.model());
     let provider = match credential_mode {
         CredentialMode::VmAuthJson => "openai-codex",
         CredentialMode::OpenRouterProxy => "openrouter",
@@ -1845,8 +1754,7 @@ fn hermes_config_yaml(config: &MomConfig) -> String {
         CredentialMode::OpenRouterProxy => "",
     };
     let proxy = config
-        .credential_proxy_url
-        .as_ref()
+        .credential_proxy_url()
         .map(|url| {
             format!(
                 r#"
@@ -1882,9 +1790,10 @@ toolsets:
 }
 
 fn codex_config_toml(config: &MomConfig) -> String {
-    let credential_mode =
-        CredentialMode::parse(&config.credential_mode).unwrap_or(CredentialMode::VmAuthJson);
-    let model = config_string(&config.hermes_model);
+    let credential_mode = config
+        .credential_mode()
+        .unwrap_or(CredentialMode::VmAuthJson);
+    let model = config_string(config.model());
     let mut toml = format!(
         r#"model = {model}
 approval_policy = "never"
@@ -1920,11 +1829,12 @@ export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 }
 
 fn opencode_config_json(config: &MomConfig) -> String {
-    let credential_mode =
-        CredentialMode::parse(&config.credential_mode).unwrap_or(CredentialMode::VmAuthJson);
+    let credential_mode = config
+        .credential_mode()
+        .unwrap_or(CredentialMode::VmAuthJson);
     let model = match credential_mode {
-        CredentialMode::VmAuthJson => format!("openai/{}", config.hermes_model),
-        CredentialMode::OpenRouterProxy => format!("openrouter/{}", config.hermes_model),
+        CredentialMode::VmAuthJson => format!("openai/{}", config.model()),
+        CredentialMode::OpenRouterProxy => format!("openrouter/{}", config.model()),
     };
     let model = config_string(&model);
     format!(
@@ -1962,14 +1872,21 @@ mod tests {
 
     fn test_config(credential_mode: &str) -> MomConfig {
         MomConfig {
-            codex_auth_path: PathBuf::from("/tmp/codex-auth.json"),
-            opencode_auth_path: PathBuf::from("/tmp/opencode-auth.json"),
-            hermes_profile: "main".to_string(),
-            hermes_model: "anthropic/claude-sonnet-4.6".to_string(),
-            snapshot_name: "mom-alpine-agent-base".to_string(),
-            credential_mode: credential_mode.to_string(),
-            credential_proxy_url: Some("http://127.0.0.1:1080".to_string()),
-            credential_proxy_ca_path: Some(PathBuf::from("/tmp/agentmom-proxy-ca.crt")),
+            schema_version: 1,
+            runtime: RuntimeConfig {
+                snapshot_name: Some("mom-base-testrev".to_string()),
+            },
+            credentials: CredentialConfig {
+                mode: credential_mode.to_string(),
+                codex_auth_path: PathBuf::from("/tmp/codex-auth.json"),
+                opencode_auth_path: PathBuf::from("/tmp/opencode-auth.json"),
+                proxy_url: Some("http://127.0.0.1:1080".to_string()),
+                proxy_ca_path: Some(PathBuf::from("/tmp/agentmom-proxy-ca.crt")),
+            },
+            guest: GuestConfig {
+                hermes_profile: "main".to_string(),
+                model: "anthropic/claude-sonnet-4.6".to_string(),
+            },
         }
     }
 
@@ -1978,10 +1895,13 @@ mod tests {
         let config = test_config("vm-auth-json");
 
         assert_eq!(
-            CredentialMode::parse(&config.credential_mode).unwrap(),
+            config.credential_mode().unwrap(),
             CredentialMode::VmAuthJson
         );
-        assert!(validate_credential_config(&config, CredentialMode::VmAuthJson).is_ok());
+        assert_eq!(
+            config.validate_for_guest_config().unwrap(),
+            CredentialMode::VmAuthJson
+        );
 
         let hermes = hermes_config_yaml(&config);
         assert!(hermes.contains("provider: openai-codex"));
@@ -1993,10 +1913,13 @@ mod tests {
         let config = test_config("openrouter-proxy");
 
         assert_eq!(
-            CredentialMode::parse(&config.credential_mode).unwrap(),
+            config.credential_mode().unwrap(),
             CredentialMode::OpenRouterProxy
         );
-        assert!(validate_credential_config(&config, CredentialMode::OpenRouterProxy).is_ok());
+        assert_eq!(
+            config.validate_for_guest_config().unwrap(),
+            CredentialMode::OpenRouterProxy
+        );
 
         let hermes = hermes_config_yaml(&config);
         assert!(hermes.contains("provider: openrouter"));
@@ -2010,12 +1933,19 @@ mod tests {
     #[test]
     fn openrouter_proxy_mode_requires_proxy_config() {
         let mut config = test_config("openrouter-proxy");
-        config.credential_proxy_url = None;
-        assert!(validate_credential_config(&config, CredentialMode::OpenRouterProxy).is_err());
+        config.credentials.proxy_url = None;
+        assert!(config.validate_for_guest_config().is_err());
 
-        config.credential_proxy_url = Some("http://127.0.0.1:1080".to_string());
-        config.credential_proxy_ca_path = None;
-        assert!(validate_credential_config(&config, CredentialMode::OpenRouterProxy).is_err());
+        config.credentials.proxy_url = Some("http://127.0.0.1:1080".to_string());
+        config.credentials.proxy_ca_path = None;
+        assert!(config.validate_for_guest_config().is_err());
+    }
+
+    #[test]
+    fn missing_snapshot_name_is_invalid_for_node() {
+        let mut config = test_config("openrouter-proxy");
+        config.runtime.snapshot_name = None;
+        assert!(config.validate_for_node().is_err());
     }
 
     #[test]

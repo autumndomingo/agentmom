@@ -3,6 +3,32 @@
 let
   cfg = config.services.agentmom;
   yaml = pkgs.formats.yaml { };
+  json = pkgs.formats.json { };
+  generatedConfigFile = json.generate "agentmom-config.json" {
+    schema_version = 1;
+    runtime = {
+      snapshot_name = cfg.runtime.snapshotName;
+    };
+    credentials = {
+      mode = cfg.credentials.mode;
+      codex_auth_path = cfg.credentials.codexAuthPath;
+      opencode_auth_path = cfg.credentials.opencodeAuthPath;
+      proxy_url =
+        if cfg.credentials.proxyUrl != null then cfg.credentials.proxyUrl
+        else if cfg.credentialProxy.enable then cfg.credentialProxy.guestProxyUrl
+        else null;
+      proxy_ca_path =
+        if cfg.credentials.proxyCaPath != null then cfg.credentials.proxyCaPath
+        else if cfg.credentialProxy.enable then cfg.credentialProxy.caCert
+        else null;
+    };
+    guest = {
+      hermes_profile = cfg.guest.hermesProfile;
+      model = cfg.guest.model;
+    };
+  };
+  effectiveConfigFile =
+    if cfg.configFile != null then cfg.configFile else generatedConfigFile;
   credentialProxyConfig = yaml.generate "agentmom-iron-proxy.yaml" {
     dns = {
       listen = cfg.credentialProxy.dnsListen;
@@ -88,8 +114,8 @@ let
     MOM_CAPACITY_ACTIVE_WORKSPACES = toString cfg.capacity.activeWorkspaces;
     MOM_CAPACITY_DISK_RESERVE_MIB = toString cfg.capacity.diskReserveMib;
   }
-  // lib.optionalAttrs (cfg.configFile != null) {
-    MOM_CONFIG = toString cfg.configFile;
+  // {
+    MOM_CONFIG = toString effectiveConfigFile;
   }
   // lib.optionalAttrs (cfg.microsandboxPackage != null) {
     MSB_PATH = "${cfg.microsandboxPackage}/bin/msb";
@@ -173,7 +199,61 @@ in
     configFile = lib.mkOption {
       type = lib.types.nullOr lib.types.path;
       default = null;
-      description = "Agent Mom config.json containing Codex/Hermes seed configuration.";
+      description = "Optional externally managed Agent Mom config.json. When unset, the module generates a structured non-secret config.";
+    };
+
+    runtime = {
+      snapshotName = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Required microsandbox base snapshot name used for new workspaces.";
+      };
+    };
+
+    credentials = {
+      mode = lib.mkOption {
+        type = lib.types.enum [ "vm-auth-json" "openrouter-proxy" ];
+        default = "vm-auth-json";
+        description = "Credential strategy used when configuring guest sandboxes.";
+      };
+
+      codexAuthPath = lib.mkOption {
+        type = lib.types.str;
+        default = "~/.codex/auth.json";
+        description = "Host path copied into guests when credentials.mode is vm-auth-json.";
+      };
+
+      opencodeAuthPath = lib.mkOption {
+        type = lib.types.str;
+        default = "~/.local/share/opencode/auth.json";
+        description = "Host path used to seed OpenCode auth when credentials.mode is vm-auth-json.";
+      };
+
+      proxyUrl = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Proxy URL written into guest environments when credentials.mode is openrouter-proxy.";
+      };
+
+      proxyCaPath = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "CA certificate path trusted by guests when credentials.mode is openrouter-proxy.";
+      };
+    };
+
+    guest = {
+      hermesProfile = lib.mkOption {
+        type = lib.types.str;
+        default = "main";
+        description = "Hermes profile name created inside guest sandboxes.";
+      };
+
+      model = lib.mkOption {
+        type = lib.types.str;
+        default = "gpt-5.5";
+        description = "Default model written into guest Hermes, Codex, and OpenCode config.";
+      };
     };
 
     catalogBackup = {
@@ -366,6 +446,12 @@ in
         default = null;
         description = "Optional runtime environment file with RESTIC_* and S3-compatible credentials for workspace backups.";
       };
+
+      ensureBaseSnapshot = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = "Run mom node ensure-base before starting the worker so deploys fail unless the required versioned base snapshot exists and passes doctor.";
+      };
     };
 
     ui = {
@@ -551,6 +637,18 @@ in
         message = "services.agentmom.workerTokenFile is required when the Agent Mom API or worker service is enabled.";
       }
       {
+        assertion = !cfg.worker.enable || cfg.configFile != null || cfg.runtime.snapshotName != null;
+        message = "services.agentmom.runtime.snapshotName is required when the generated config is used by services.agentmom.worker.";
+      }
+      {
+        assertion = cfg.credentials.mode != "openrouter-proxy" || cfg.configFile != null || cfg.credentials.proxyUrl != null || cfg.credentialProxy.enable;
+        message = "services.agentmom.credentials.proxyUrl or services.agentmom.credentialProxy.enable is required for openrouter-proxy mode.";
+      }
+      {
+        assertion = cfg.credentials.mode != "openrouter-proxy" || cfg.configFile != null || cfg.credentials.proxyCaPath != null || cfg.credentialProxy.enable;
+        message = "services.agentmom.credentials.proxyCaPath or services.agentmom.credentialProxy.enable is required for openrouter-proxy mode.";
+      }
+      {
         assertion = !cfg.catalogBackup.enable || cfg.api.enable;
         message = "services.agentmom.api.enable is required when services.agentmom.catalogBackup.enable is true.";
       }
@@ -603,6 +701,11 @@ in
         Type = "simple";
         User = cfg.user;
         Group = cfg.group;
+        ExecStartPre = lib.optional cfg.worker.ensureBaseSnapshot (pkgs.writeShellScript "agentmom-worker-ensure-base" ''
+          set -eu
+          ${cfg.package}/bin/mom config doctor
+          ${cfg.package}/bin/mom node ensure-base
+        '');
         ExecStart = "${cfg.package}/bin/mom worker --interval ${toString cfg.worker.intervalSeconds}";
         Restart = "always";
         RestartSec = "5s";

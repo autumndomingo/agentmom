@@ -133,40 +133,56 @@ node totals by status, stale node count, and oldest queued job age.
 ## Host Config
 
 `mom create` requires a host config file at `~/.config/mom/config.json`.
-Set `MOM_CONFIG=/path/to/config.json` to use a different file.
+Set `MOM_CONFIG=/path/to/config.json` to use a different file. Production
+NixOS deployments should let the Nix module generate this non-secret JSON from
+typed `services.agentmom.*` options.
 
 ```json
 {
-  "codex_auth_path": "~/.codex/auth.json",
-  "hermes_profile": "main",
-  "hermes_model": "gpt-5.5",
-  "snapshot_name": "mom-alpine-agent-base",
-  "credential_mode": "vm-auth-json"
+  "schema_version": 1,
+  "runtime": {
+    "snapshot_name": "mom-base-fc3a7f7"
+  },
+  "credentials": {
+    "mode": "openrouter-proxy",
+    "proxy_url": "http://192.168.83.1:1080",
+    "proxy_ca_path": "/var/lib/agentmom/iron-proxy/ca.crt"
+  },
+  "guest": {
+    "hermes_profile": "main",
+    "model": "openai/gpt-5.5"
+  }
 }
 ```
 
 Required assumptions:
 
-- `credential_mode` is either `vm-auth-json` or `openrouter-proxy`.
-- `vm-auth-json` requires `codex_auth_path` to exist and contain Codex CLI OAuth tokens. This copies credentials into the VM.
-- `openrouter-proxy` requires `credential_proxy_url` and `credential_proxy_ca_path`. It writes proxy env into the VM and expects iron-proxy to inject the OpenRouter API key on the host.
-- `hermes_profile` is the guest profile name to create.
-- `hermes_model` is the default Hermes model for the selected mode. Use an `openai-codex` model in `vm-auth-json` mode and an OpenRouter model ID in `openrouter-proxy` mode.
-- `snapshot_name` is the prebuilt microsandbox snapshot to boot new VMs from.
+- `credentials.mode` is either `vm-auth-json` or `openrouter-proxy`.
+- `vm-auth-json` requires `credentials.codex_auth_path` to exist and contain Codex CLI OAuth tokens. This copies credentials into the VM.
+- `openrouter-proxy` requires `credentials.proxy_url` and `credentials.proxy_ca_path`. It writes proxy env into the VM and expects iron-proxy to inject the OpenRouter API key on the host.
+- `guest.hermes_profile` is the guest profile name to create.
+- `guest.model` is the default model for the selected mode. Use an `openai-codex` model in `vm-auth-json` mode and an OpenRouter model ID in `openrouter-proxy` mode.
+- `runtime.snapshot_name` is the versioned prebuilt microsandbox snapshot to boot new VMs from. It is required for worker/node VM operations and has no Rust default.
 
-`create` uses `snapshot_name` by default. If the snapshot is missing, Agent Mom builds
-it once from the `alpine` image by installing `nodejs`, `npm`, `python3`, `uv`,
-`@openai/codex`, and `hermes-agent`, then snapshots the stopped builder VM.
-Pass `--rebuild-snapshot` to refresh that base, or `--no-snapshot` to force the
-slow direct-Alpine provisioning path.
+`mom config doctor` validates the configured file and prints a redacted
+effective config.
+
+`create` uses `runtime.snapshot_name` by default and requires that exact versioned
+snapshot to already exist. This is intentionally a hard deploy contract: worker
+hosts should run `mom node ensure-base` before serving the worker. That command
+builds the configured snapshot from `alpine` if missing, installs `nodejs`,
+`npm`, `python3`, `uv`, `@openai/codex`, `opencode-ai`, and `hermes-agent`, then
+boots a probe VM from the snapshot and runs `mom doctor` checks. Pass
+`--rebuild-snapshot` only for explicit operator rebuilds, or `--no-snapshot` to
+force the slow direct-Alpine provisioning path.
 
 Each new VM is then patched with auth and Hermes config for the selected mode.
 
 In `vm-auth-json` mode:
 
-- `codex_auth_path` -> `/root/.codex/auth.json`
+- `credentials.codex_auth_path` -> `/root/.codex/auth.json`
 - a generated `/root/.codex/config.toml` with `approval_policy = "never"` and `sandbox_mode = "danger-full-access"`
-- OpenAI Codex tokens from `codex_auth_path` -> `/root/.hermes-agent/<hermes_profile>/auth.json`
+- OpenAI Codex tokens from `credentials.codex_auth_path` -> `/root/.hermes-agent/<guest.hermes_profile>/auth.json`
 - a minimal generated Hermes `config.yaml` selecting `openai-codex`
 
 In `openrouter-proxy` mode:
@@ -231,7 +247,9 @@ its existing NixOS config:
     logFormat = "json";
     stateDir = "/var/lib/agentmom";
     microsandboxHome = "/var/lib/agentmom/microsandbox";
-    configFile = /etc/agentmom/config.json;
+    runtime.snapshotName = "mom-base-${builtins.substring 0 12 inputs.agentmom.rev}";
+    credentials.mode = "openrouter-proxy";
+    guest.model = "openai/gpt-5.5";
   };
 }
 ```
