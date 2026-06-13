@@ -16,6 +16,8 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post},
 };
+use chrono::{DateTime, Datelike, Duration, LocalResult, TimeZone, Timelike, Utc, Weekday};
+use chrono_tz::America::New_York;
 use microsandbox::{Sandbox, sandbox::SandboxStatus};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -35,6 +37,7 @@ struct AppState {
     mom_bin: PathBuf,
     db: SqlitePool,
     admin_email: String,
+    admin_access_code: String,
     opencode_tunnels: Arc<Mutex<HashMap<String, OpencodeTunnel>>>,
 }
 
@@ -86,7 +89,6 @@ struct LoginRequest {
 struct CreateAccessCodeRequest {
     label: Option<String>,
     max_uses: Option<i64>,
-    expires_at: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -118,6 +120,7 @@ struct ListResponse {
 #[derive(Debug, Serialize)]
 struct AccessConfig {
     admin_email: String,
+    admin_access_code: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -198,6 +201,7 @@ async fn main() -> Result<()> {
         mom_bin,
         db,
         admin_email,
+        admin_access_code,
         opencode_tunnels: Arc::new(Mutex::new(HashMap::new())),
     };
 
@@ -243,10 +247,13 @@ async fn health() -> Json<serde_json::Value> {
 
 async fn access_config(
     axum::extract::State(state): axum::extract::State<AppState>,
-) -> Json<AccessConfig> {
-    Json(AccessConfig {
+    headers: HeaderMap,
+) -> Result<Json<AccessConfig>, ApiError> {
+    authorize_admin(&state, &headers).await?;
+    Ok(Json(AccessConfig {
         admin_email: state.admin_email,
-    })
+        admin_access_code: state.admin_access_code,
+    }))
 }
 
 async fn login(
@@ -451,6 +458,20 @@ async fn create_access_code(
         .to_string();
     let code = generate_access_code();
     let now = now_epoch();
+    let expires_at = participant_access_expires_at(now);
+
+    sqlx::query(
+        r#"
+UPDATE access_codes
+SET revoked_at = ?1
+WHERE role = 'PAR'
+  AND revoked_at IS NULL
+"#,
+    )
+    .bind(now)
+    .execute(&state.db)
+    .await
+    .context("revoke previous participant access codes")?;
 
     sqlx::query(
         r#"
@@ -465,7 +486,7 @@ VALUES (?1, ?2, 'PAR', ?3, 0, ?4, ?5, ?6)
     .bind(request.max_uses)
     .bind(admin.id)
     .bind(now)
-    .bind(request.expires_at)
+    .bind(expires_at)
     .execute(&state.db)
     .await
     .context("create access code")?;
@@ -475,7 +496,7 @@ VALUES (?1, ?2, 'PAR', ?3, 0, ?4, ?5, ?6)
         label,
         role: "PAR".to_string(),
         max_uses: request.max_uses,
-        expires_at: request.expires_at,
+        expires_at: Some(expires_at),
     }))
 }
 
@@ -1105,6 +1126,9 @@ WHERE code_hash = ?1
     if role != "ADMN" && email.eq_ignore_ascii_case(&state.admin_email) {
         return Err(ApiError::Unauthorized);
     }
+    if role != "ADMN" && !is_participant_access_window(now) {
+        return Err(ApiError::Unauthorized);
+    }
 
     let update = sqlx::query(
         r#"
@@ -1307,6 +1331,83 @@ fn now_epoch() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system time is before UNIX epoch")
         .as_secs() as i64
+}
+
+fn is_participant_access_window(epoch: i64) -> bool {
+    let local = eastern_time(epoch);
+    local.weekday() == Weekday::Sun
+        && local.hour() >= 17
+        && (local.hour() < 19 || (local.hour() == 19 && local.minute() < 15))
+}
+
+fn participant_access_expires_at(epoch: i64) -> i64 {
+    let local = eastern_time(epoch);
+    let days_until_sunday = (7 + Weekday::Sun.num_days_from_monday() as i64
+        - local.weekday().num_days_from_monday() as i64)
+        % 7;
+    let target_date = if days_until_sunday == 0
+        && (local.hour() > 19 || (local.hour() == 19 && local.minute() >= 15))
+    {
+        local.date_naive() + Duration::days(7)
+    } else {
+        local.date_naive() + Duration::days(days_until_sunday)
+    };
+
+    match New_York.with_ymd_and_hms(
+        target_date.year(),
+        target_date.month(),
+        target_date.day(),
+        19,
+        15,
+        0,
+    ) {
+        LocalResult::Single(value) => value.timestamp(),
+        LocalResult::Ambiguous(earlier, _) => earlier.timestamp(),
+        LocalResult::None => panic!("7:15 PM Eastern should always be a valid local time"),
+    }
+}
+
+fn eastern_time(epoch: i64) -> DateTime<chrono_tz::Tz> {
+    DateTime::<Utc>::from_timestamp(epoch, 0)
+        .expect("invalid epoch")
+        .with_timezone(&New_York)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn epoch(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> i64 {
+        Utc.with_ymd_and_hms(year, month, day, hour, minute, 0)
+            .single()
+            .expect("valid UTC test time")
+            .timestamp()
+    }
+
+    #[test]
+    fn participant_access_window_is_sunday_evening_eastern() {
+        assert!(!is_participant_access_window(epoch(2026, 6, 14, 20, 59)));
+        assert!(is_participant_access_window(epoch(2026, 6, 14, 21, 0)));
+        assert!(is_participant_access_window(epoch(2026, 6, 14, 23, 14)));
+        assert!(!is_participant_access_window(epoch(2026, 6, 14, 23, 15)));
+        assert!(!is_participant_access_window(epoch(2026, 6, 15, 21, 0)));
+    }
+
+    #[test]
+    fn generated_participant_code_expires_at_sunday_cutoff() {
+        assert_eq!(
+            participant_access_expires_at(epoch(2026, 6, 14, 18, 0)),
+            epoch(2026, 6, 14, 23, 15),
+        );
+        assert_eq!(
+            participant_access_expires_at(epoch(2026, 6, 14, 23, 15)),
+            epoch(2026, 6, 21, 23, 15),
+        );
+        assert_eq!(
+            participant_access_expires_at(epoch(2026, 6, 15, 12, 0)),
+            epoch(2026, 6, 21, 23, 15),
+        );
+    }
 }
 
 fn resolve_mom_bin() -> Result<PathBuf> {
