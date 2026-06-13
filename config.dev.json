@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "runtime": {
+    "snapshot_name": "mom-dev-base"
+  },
+  "credentials": {
+    "mode": "vm-auth-json",
+    "codex_auth_path": "~/.codex/auth.json",
+    "opencode_auth_path": "~/.local/share/opencode/auth.json"
+  },
+  "auth": {
+    "secret_file": "dev/secrets/auth-secret",
+    "admin_email": "admin@example.com",
+    "admin_access_code_file": "dev/secrets/admin-access-code"
+  }
+}

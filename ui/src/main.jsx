@@ -13,63 +13,46 @@ import {
 import './styles.css';
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? '/api';
-const CHAT_STORAGE_KEY = 'agent-mom-chats';
-const USER_SESSION_KEY = 'agent-mom-user-session';
-
 function Root() {
   const [userSession, setUserSession] = useState(null);
   const [checkingSession, setCheckingSession] = useState(true);
 
   useEffect(() => {
-    const stored = loadUserSession();
-    if (!stored) {
-      setCheckingSession(false);
-      return;
-    }
-
-    validateSession(stored)
+    validateSession()
       .then((session) => {
         setUserSession(session);
       })
-      .catch(() => {
-        window.localStorage.removeItem(USER_SESSION_KEY);
-      })
+      .catch(() => setUserSession(null))
       .finally(() => {
         setCheckingSession(false);
       });
   }, []);
 
   useEffect(() => {
-    if (!userSession?.token) return undefined;
+    if (!userSession?.id) return undefined;
 
     let cancelled = false;
     const checkSession = async () => {
       try {
-        const refreshedSession = await validateSession(userSession);
+        const refreshedSession = await validateSession();
         if (!cancelled) {
-          setUserSession((current) =>
-            current?.token === userSession.token
-              ? { ...current, email: refreshedSession.email, role: refreshedSession.role }
-              : current,
-          );
+          setUserSession(refreshedSession);
         }
       } catch {
-        window.localStorage.removeItem(USER_SESSION_KEY);
         if (!cancelled) {
           setUserSession(null);
         }
       }
     };
 
-    const interval = window.setInterval(checkSession, 1000);
+    const interval = window.setInterval(checkSession, 30_000);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [userSession?.token]);
+  }, [userSession?.id]);
 
   function enterUserFlow(session) {
-    window.localStorage.setItem(USER_SESSION_KEY, JSON.stringify(session));
     setUserSession(session);
   }
 
@@ -88,7 +71,7 @@ function Root() {
   }
 
   if (window.location.pathname === '/admin') {
-    if (userSession.role !== 'ADMN') {
+    if (userSession.role !== 'admin') {
       window.history.replaceState({}, '', '/');
     } else {
       return <AdminPage userSession={userSession} />;
@@ -125,12 +108,7 @@ function LandingPage({ onSubmit }) {
       if (!response.ok) {
         throw data;
       }
-      onSubmit({
-        email: data.email,
-        role: data.role,
-        token: data.token,
-        startedAt: Date.now(),
-      });
+      onSubmit(sessionFromMe(data));
     } catch (accessError) {
       setError(accessError?.error ?? 'Access denied.');
     } finally {
@@ -189,22 +167,17 @@ function BuildersTableBrand() {
   );
 }
 
-async function validateSession(session) {
-  if (!session.token) {
-    throw new Error('Missing session token.');
-  }
-  const response = await fetch(`${API_BASE}/auth/session`, {
-    headers: authHeaders(session),
-  });
+async function validateSession() {
+  return fetchMe();
+}
+
+async function fetchMe() {
+  const response = await fetch(`${API_BASE}/me`);
   const data = await response.json();
   if (!response.ok) {
     throw data;
   }
-  return {
-    ...session,
-    email: data.email,
-    role: data.role,
-  };
+  return sessionFromMe(data);
 }
 
 function SetupPage({ userSession, onSubmit }) {
@@ -224,15 +197,8 @@ function SetupPage({ userSession, onSubmit }) {
     setBusy(true);
     setError('');
     try {
-      const workspace = await createWorkspaceFromOnboarding(userSession, userName, agentName);
-      onSubmit({
-        ...userSession,
-        userName,
-        agentName,
-        workspaceName: workspace.name,
-        workspaceDisplayName: workspaceDisplayName(workspace),
-        completedSetupAt: Date.now(),
-      });
+      const session = await createWorkspaceFromOnboarding(userName, agentName);
+      onSubmit(session);
     } catch (setupError) {
       setError(formatError(setupError));
     } finally {
@@ -279,7 +245,7 @@ function App({ userSession }) {
   const [selectedName, setSelectedName] = useState(userSession.workspaceName ?? '');
   const [busy, setBusy] = useState(false);
   const [chatInput, setChatInput] = useState('');
-  const [chatsByUser, setChatsByUser] = useState(() => loadStoredChats());
+  const [chatsByUser, setChatsByUser] = useState({});
   const [activeChatByUser, setActiveChatByUser] = useState({});
   const [workspaceError, setWorkspaceError] = useState('');
   const [now, setNow] = useState(() => Date.now());
@@ -301,10 +267,6 @@ function App({ userSession }) {
     const interval = window.setInterval(() => setNow(Date.now()), 30_000);
     return () => window.clearInterval(interval);
   }, []);
-
-  useEffect(() => {
-    window.localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(chatsByUser));
-  }, [chatsByUser]);
 
   useEffect(() => {
     refresh().catch((error) => setWorkspaceError(formatError(error)));
@@ -529,7 +491,7 @@ function App({ userSession }) {
             <p>{selectedVm ? friendlyStatus(selectedVm.status) : 'Create a workspace to begin.'}</p>
           </div>
           <div className="headerActions">
-            {userSession.role === 'ADMN' && (
+            {userSession.role === 'admin' && (
               <button className="refreshButton" type="button" onClick={openAdminPage}>
                 <Users size={17} />
                 Admin
@@ -601,148 +563,64 @@ function App({ userSession }) {
 
 function AdminPage({ userSession }) {
   const [users, setUsers] = useState([]);
+  const [invites, setInvites] = useState([]);
   const [accessCodeStatus, setAccessCodeStatus] = useState('Generate code');
-  const [adminAccessCode, setAdminAccessCode] = useState('');
   const [adminError, setAdminError] = useState('');
   const [busy, setBusy] = useState(false);
 
-  function endAdminSession() {
-    window.localStorage.removeItem(USER_SESSION_KEY);
-    window.location.href = '/';
-  }
-
-  function leaveAdminView(updatedSession = userSession) {
-    window.localStorage.setItem(USER_SESSION_KEY, JSON.stringify(updatedSession));
+  function leaveAdminView() {
     window.location.href = '/';
   }
 
   async function loadUsers() {
-    if (!userSession?.token) {
-      endAdminSession();
-      return;
-    }
-
     setAdminError('');
-    const response = await fetch(`${API_BASE}/users`, {
-      headers: authHeaders(userSession),
-    });
-    const data = await response.json();
-    if (!response.ok) {
-      if (response.status === 401 || response.status === 403) {
-        endAdminSession();
-        return;
-      }
-      throw data;
-    }
+    const data = await apiRequest('/admin/users');
     setUsers((data.users ?? []).map(normalizeAdminUser));
+  }
+
+  async function loadInvites() {
+    const data = await apiRequest('/admin/invites');
+    setInvites(data.invites ?? []);
   }
 
   useEffect(() => {
     loadUsers().catch((error) => setAdminError(formatError(error)));
-  }, [userSession?.token]);
+    loadInvites().catch((error) => setAdminError(formatError(error)));
+  }, [userSession?.id]);
 
   useEffect(() => {
-    fetch(`${API_BASE}/auth/config`, {
-      headers: authHeaders(userSession),
-    })
-      .then((response) => response.json())
-      .then((data) => setAdminAccessCode(data.admin_access_code ?? ''))
-      .catch(() => setAdminAccessCode(''));
-  }, [userSession?.token]);
-
-  useEffect(() => {
-    if (!userSession?.token) {
-      endAdminSession();
-      return undefined;
-    }
-
     let cancelled = false;
     const checkAdminSession = async () => {
       try {
-        const refreshedSession = await validateSession(userSession);
+        const refreshedSession = await validateSession();
         if (cancelled) return;
-        if (refreshedSession.role !== 'ADMN') {
-          leaveAdminView(refreshedSession);
+        if (refreshedSession.role !== 'admin') {
+          leaveAdminView();
         }
       } catch {
         if (!cancelled) {
-          endAdminSession();
+          leaveAdminView();
         }
       }
     };
 
-    const interval = window.setInterval(checkAdminSession, 1000);
+    const interval = window.setInterval(checkAdminSession, 30_000);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [userSession?.token]);
-
-  async function updateRole(userId, role) {
-    if (!userSession?.token) {
-      setAdminError('Sign in as an admin to update roles.');
-      return;
-    }
-
-    const previousUsers = users;
-    setUsers((current) =>
-      current.map((user) => (user.id === userId ? { ...user, role } : user)),
-    );
-    setAdminError('');
-
-    try {
-      const response = await fetch(`${API_BASE}/users/${userId}/role`, {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          ...authHeaders(userSession),
-        },
-        body: JSON.stringify({ role }),
-      });
-      const data = await response.json();
-      if (!response.ok) {
-        throw data;
-      }
-      const updatedUser = normalizeAdminUser(data);
-      setUsers((current) =>
-        current.map((user) => (user.id === updatedUser.id ? updatedUser : user)),
-      );
-      if (sameEmail(updatedUser.email, userSession.email)) {
-        const updatedSession = { ...userSession, role: updatedUser.role };
-        if (updatedUser.role !== 'ADMN') {
-          leaveAdminView(updatedSession);
-        } else {
-          window.localStorage.setItem(USER_SESSION_KEY, JSON.stringify(updatedSession));
-        }
-      }
-    } catch (error) {
-      setUsers(previousUsers);
-      setAdminError(formatError(error));
-    }
-  }
+  }, [userSession?.id]);
 
   async function refreshAccessCode() {
-    if (!userSession?.token) {
-      setAdminError('Sign in as an admin to generate an access code.');
-      return;
-    }
-
     setBusy(true);
     setAdminError('');
     try {
-      const response = await fetch(`${API_BASE}/access-codes`, {
+      const data = await apiRequest('/admin/invites', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...authHeaders(userSession),
-        },
-        body: JSON.stringify({ label: 'Meetup access' }),
+        body: JSON.stringify({ label: `Invite ${new Date().toLocaleDateString()}` }),
       });
-      const data = await response.json();
-      if (!response.ok) {
-        throw data;
-      }
       setAccessCodeStatus(data.code);
+      await loadInvites();
     } catch (error) {
       setAdminError(formatError(error));
     } finally {
@@ -750,59 +628,18 @@ function AdminPage({ userSession }) {
     }
   }
 
-  async function logOutUser(user) {
-    if (!userSession?.token) {
-      setAdminError('Sign in as an admin to log out users.');
-      return;
-    }
-
+  async function deleteUser(user) {
     const previousUsers = users;
-    setUsers((current) =>
-      current.map((currentUser) =>
-        currentUser.id === user.id ? { ...currentUser, status: 'inactive' } : currentUser,
-      ),
-    );
+    setUsers((current) => current.filter((currentUser) => currentUser.id !== user.id));
     setAdminError('');
 
     try {
-      const response = await fetch(`${API_BASE}/users/${user.id}/sessions`, {
+      await apiRequest(`/admin/users/${user.id}`, {
         method: 'DELETE',
-        headers: authHeaders(userSession),
       });
-      const data = await response.json();
-      if (!response.ok) {
-        throw data;
-      }
       if (sameEmail(user.email, userSession.email)) {
-        endAdminSession();
+        leaveAdminView();
       }
-    } catch (error) {
-      setUsers(previousUsers);
-      setAdminError(formatError(error));
-    }
-  }
-
-  async function logOutAll() {
-    if (!userSession?.token) {
-      setAdminError('Sign in as an admin to log out users.');
-      return;
-    }
-
-    const previousUsers = users;
-    setUsers((current) => current.map((user) => ({ ...user, status: 'inactive' })));
-    setAdminError('');
-
-    try {
-      const response = await fetch(`${API_BASE}/sessions`, {
-        method: 'DELETE',
-        headers: authHeaders(userSession),
-      });
-      const data = await response.json();
-      if (!response.ok) {
-        throw data;
-      }
-      window.localStorage.removeItem(USER_SESSION_KEY);
-      window.location.href = '/';
     } catch (error) {
       setUsers(previousUsers);
       setAdminError(formatError(error));
@@ -832,12 +669,6 @@ function AdminPage({ userSession }) {
                 <RefreshCcw size={17} />
               </button>
             </div>
-            {adminAccessCode && (
-              <div className="accessCodeControl staticAccessCode" aria-label="Admin access code">
-                <span>Admin</span>
-                <code>{adminAccessCode}</code>
-              </div>
-            )}
           </div>
         </header>
 
@@ -845,35 +676,48 @@ function AdminPage({ userSession }) {
 
         <section className="adminTableShell">
           <div className="adminTableHeader">
+            <span>Invite</span>
+            <span>Uses</span>
+            <span>Status</span>
+            <span>Code</span>
+            <span></span>
+          </div>
+          <div className="adminUserList">
+            {invites.map((invite) => (
+              <article className="adminUserRow" key={invite.id}>
+                <strong>{invite.label}</strong>
+                <span>{invite.used_count}{invite.max_uses ? ` / ${invite.max_uses}` : ''}</span>
+                <span>{invite.active ? 'active' : 'disabled'}</span>
+                <span>{invite.code}</span>
+                <span></span>
+              </article>
+            ))}
+            {!invites.length && <p className="emptyList">No invites yet.</p>}
+          </div>
+        </section>
+
+        <section className="adminTableShell">
+          <div className="adminTableHeader">
             <span>Name</span>
             <span>Email</span>
             <span>Role</span>
             <span>Status</span>
-            <button type="button" onClick={logOutAll}>
-              Log Out All
-            </button>
+            <span></span>
           </div>
 
           <div className="adminUserList">
             {users.map((user) => (
               <article className="adminUserRow" key={user.id}>
-                <strong>{user.name}</strong>
+                <strong>{user.full_name || user.email}</strong>
                 <span>{user.email}</span>
-                <select
-                  value={user.role}
-                  onChange={(event) => updateRole(user.id, event.target.value)}
-                  aria-label={`Role for ${user.name}`}
-                >
-                  <option value="ADMN">ADMN</option>
-                  <option value="PAR">PAR</option>
-                </select>
+                <span>{user.role}</span>
                 <span
                   className={`adminStatusDot ${user.status}`}
                   title={adminStatusLabel(user.status)}
                   aria-label={adminStatusLabel(user.status)}
                 />
-                <button type="button" onClick={() => logOutUser(user)}>
-                  Log Out
+                <button type="button" onClick={() => deleteUser(user)}>
+                  Delete
                 </button>
               </article>
             ))}
@@ -894,39 +738,20 @@ function friendlyStatus(status) {
   return status;
 }
 
-async function createWorkspaceFromOnboarding(session, userName, agentName) {
-  try {
-    await apiRequest(
-      '/vms',
-      {
-        method: 'POST',
-        body: JSON.stringify({
-          name: agentName,
-          user: userIdentity(session.email) || userName,
-          replace: true,
-        }),
-      },
-      session,
-    );
-  } catch (error) {
-    if (!workspaceAlreadyExists(error)) {
-      throw error;
-    }
-  }
-
-  const list = await apiRequest('/vms', {}, session);
-  const workspaces = normalizeVmList(list);
-  const workspace = findWorkspaceBySubmittedName(workspaces, agentName);
-  if (workspace) {
-    return workspace;
-  }
-  throw new Error(`Workspace was created, but ${agentName} was not returned by the backend.`);
+async function createWorkspaceFromOnboarding(userName, agentName) {
+  const response = await apiRequest('/me/setup', {
+    method: 'POST',
+    body: JSON.stringify({
+      full_name: userName,
+      agent_name: agentName,
+    }),
+  });
+  return sessionFromMe(response);
 }
 
-async function apiRequest(path, options = {}, session) {
+async function apiRequest(path, options = {}) {
   const headers = {
     'Content-Type': 'application/json',
-    ...authHeaders(session),
     ...(options.headers ?? {}),
   };
   const response = await fetch(`${API_BASE}${path}`, {
@@ -943,6 +768,20 @@ async function apiRequest(path, options = {}, session) {
 function workspaceAlreadyExists(error) {
   const message = formatError(error).toLowerCase();
   return message.includes('already exists') || message.includes('replace');
+}
+
+function sessionFromMe(data) {
+  const user = data.user ?? {};
+  const workspace = data.workspace ?? null;
+  return {
+    id: user.id,
+    email: user.email,
+    role: user.role,
+    userName: user.full_name ?? '',
+    agentName: workspace?.agent_name ?? workspace?.agentName ?? '',
+    workspaceName: workspace?.name ?? '',
+    workspaceDisplayName: workspace ? workspaceDisplayName(workspace) : '',
+  };
 }
 
 function workspaceDisplayName(workspace) {
@@ -1006,10 +845,10 @@ function normalizeAdminUser(user) {
 }
 
 function userDisplayStatus(user) {
-  if (user.status === 'inactive' || !user.last_active_at) return 'inactive';
+  if (user.status === 'inactive' || !user.last_seen_at) return 'inactive';
   const inactiveAfter = 15 * 60;
   const stagnantAfter = 5 * 60;
-  const ageSeconds = Math.max(0, Math.floor(Date.now() / 1000) - user.last_active_at);
+  const ageSeconds = Math.max(0, Math.floor(Date.now() / 1000) - user.last_seen_at);
   if (ageSeconds >= inactiveAfter) return 'inactive';
   if (ageSeconds >= stagnantAfter) return 'stagnant';
   return 'active';
@@ -1047,38 +886,12 @@ function groupChatsByAge(chats, now) {
   return groups.filter((group) => group.chats.length);
 }
 
-function loadStoredChats() {
-  try {
-    const stored = window.localStorage.getItem(CHAT_STORAGE_KEY);
-    if (!stored) return {};
-    const parsed = JSON.parse(stored);
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-function loadUserSession() {
-  try {
-    const stored = window.localStorage.getItem(USER_SESSION_KEY);
-    if (!stored) return null;
-    const parsed = JSON.parse(stored);
-    return parsed?.email && parsed?.token ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-
 function userIdentity(email) {
   return String(email ?? '').trim().toLowerCase();
 }
 
 function sameEmail(left, right) {
   return userIdentity(left) === userIdentity(right);
-}
-
-function authHeaders(session = loadUserSession()) {
-  return session?.token ? { Authorization: `Bearer ${session.token}` } : {};
 }
 
 function renderResult(result) {
@@ -1089,6 +902,9 @@ function renderResult(result) {
 function formatError(error) {
   if (error?.stdout || error?.stderr) {
     return renderResult(error);
+  }
+  if (error?.error === 'no ready worker nodes are registered') {
+    return 'No worker is running, so Agent Mom cannot create a workspace yet.';
   }
   return error?.error ?? String(error);
 }

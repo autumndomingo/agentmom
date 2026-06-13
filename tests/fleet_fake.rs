@@ -1,4 +1,5 @@
 use std::{
+    fs,
     net::TcpListener,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -162,9 +163,11 @@ async fn ui_create_selects_registered_worker_node() -> Result<()> {
     let fleet = TestFleet::start().await?;
     let node = spawn_worker("node-a", &fleet.api_url)?;
     wait_for_node(fleet.api_state.path(), "node-a").await?;
+    let cookie = admin_cookie(&fleet.api_url).await?;
 
     reqwest::Client::new()
         .post(format!("{}/api/vms", fleet.api_url))
+        .header(reqwest::header::COOKIE, &cookie)
         .json(&json!({ "name": "ui-created" }))
         .send()
         .await?
@@ -362,9 +365,11 @@ async fn create_selects_fresh_worker_over_stale_node() -> Result<()> {
     insert_node(fleet.api_state.path(), "stale-node", now_epoch()? - 3600)?;
     let node = spawn_worker("fresh-node", &fleet.api_url)?;
     wait_for_node(fleet.api_state.path(), "fresh-node").await?;
+    let cookie = admin_cookie(&fleet.api_url).await?;
 
     reqwest::Client::new()
         .post(format!("{}/api/vms", fleet.api_url))
+        .header(reqwest::header::COOKIE, &cookie)
         .json(&json!({ "name": "fresh" }))
         .send()
         .await?
@@ -788,9 +793,11 @@ async fn service_open_routes_to_assigned_worker_url() -> Result<()> {
     let job_id = create_workspace(&fleet.api_url, "svc", "node-b", 0).await?;
     wait_for_job_status(&fleet.api_url, &job_id, "succeeded").await?;
     wait_for_workspace_status(&fleet.api_url, "svc", "running").await?;
+    let cookie = admin_cookie(&fleet.api_url).await?;
 
     let result = reqwest::Client::new()
         .post(format!("{}/api/vms/svc/opencode", fleet.api_url))
+        .header(reqwest::header::COOKIE, &cookie)
         .send()
         .await?
         .error_for_status()?
@@ -845,9 +852,11 @@ async fn tls_ask_allows_only_registered_service_tunnel_hostnames() -> Result<()>
     let job_id = create_workspace(&fleet.api_url, "tls-svc", "mom-1", 0).await?;
     wait_for_job_status(&fleet.api_url, &job_id, "succeeded").await?;
     wait_for_workspace_status(&fleet.api_url, "tls-svc", "running").await?;
+    let cookie = admin_cookie(&fleet.api_url).await?;
 
     client
         .post(format!("{}/api/vms/tls-svc/hermes-ui", fleet.api_url))
+        .header(reqwest::header::COOKIE, &cookie)
         .send()
         .await?
         .error_for_status()?;
@@ -903,11 +912,25 @@ impl TestFleet {
 }
 
 fn spawn_api(state_dir: &Path, bind: &str, envs: &[(&str, &str)]) -> Result<ChildGuard> {
+    let config_path = state_dir.join("config.json");
+    fs::write(
+        &config_path,
+        serde_json::to_string_pretty(&json!({
+            "schema_version": 1,
+            "auth": {
+                "secret": "test-auth-secret",
+                "admin_email": "admin@example.com",
+                "admin_access_code": "AM-ADMIN-1234"
+            }
+        }))?,
+    )
+    .context("write test Agent Mom config")?;
     let mut command = Command::new(MOM_BIN);
     command
         .args(["api", "--bind", bind])
         .env("MOM_RUNTIME", "fake")
         .env("MOM_STATE_DIR", state_dir)
+        .env("MOM_CONFIG", &config_path)
         .env("MOM_UI_DIST", state_dir.join("missing-ui"))
         .env("MOM_WORKER_TOKEN", WORKER_TOKEN)
         .stdout(Stdio::null())
@@ -1312,6 +1335,29 @@ async fn workspace(api_url: &str, name: &str) -> Result<Value> {
         .into_iter()
         .find(|value| value.get("name").and_then(Value::as_str) == Some(name))
         .ok_or_else(|| anyhow!("workspace not found: {name}"))
+}
+
+async fn admin_cookie(api_url: &str) -> Result<String> {
+    let response = reqwest::Client::new()
+        .post(format!("{api_url}/api/auth/login"))
+        .json(&json!({
+            "email": "admin@example.com",
+            "access_code": "AM-ADMIN-1234"
+        }))
+        .send()
+        .await?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        bail!("admin login failed with {status}: {body}");
+    }
+    let cookie = response
+        .headers()
+        .get(reqwest::header::SET_COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .ok_or_else(|| anyhow!("admin login response did not set a session cookie"))?;
+    Ok(cookie.to_string())
 }
 
 async fn wait_until<F, Fut>(label: &str, mut check: F) -> Result<()>

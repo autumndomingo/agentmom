@@ -1,16 +1,17 @@
 set dotenv-load
 
-port := env_var_or_default("MOM_UI_PORT", "8787")
-
 default:
     @just --list
 
 ui-build:
     npm --prefix ui run build
 
-dev: ui-build
-    @echo "Starting Agent Mom UI on http://127.0.0.1:{{port}}"
-    MOM_UI_PORT={{port}} cargo run --bin mom-ui
+dev:
+    @if ! command -v lsof >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1 || ! command -v cargo >/dev/null 2>&1; then exec nix develop --command just dev; fi
+    @./scripts/dev-run
+
+dev-smoke:
+    @./scripts/dev-smoke
 
 real-fleet-test:
     cargo test --test real_fleet real_api_health_metrics_and_worker_auth -- --ignored --test-threads=1

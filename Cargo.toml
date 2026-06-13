@@ -7,17 +7,12 @@ edition = "2024"
 name = "mom"
 path = "src/main.rs"
 
-[[bin]]
-name = "mom-ui"
-path = "src/bin/mom-ui.rs"
-
 [dependencies]
 anyhow = "1.0"
 axum = "0.8"
-chrono = "0.4"
-chrono-tz = "0.10"
 clap = { version = "4.5", features = ["derive", "env"] }
 dirs = "6.0"
+hmac = "0.12"
 microsandbox = { git = "https://github.com/superradcompany/microsandbox", rev = "8059c966c586685271fbf2781b5d6dbb112ace36", features = ["ssh"] }
 rand = "0.9"
 reqwest = { version = "0.12", features = ["json", "stream"] }
@@ -25,7 +20,6 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 tokio = { version = "1.48", features = ["macros", "net", "process", "rt-multi-thread", "signal", "sync"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tower-http = { version = "0.6", features = ["cors", "fs"] }

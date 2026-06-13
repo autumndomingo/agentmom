@@ -352,6 +352,15 @@ async fn execute_job(api: &WorkerApi, job: &JobRecord) -> Result<Value> {
             stop_workspace_local(api, &workspace).await?;
             Ok(json!({ "stopped": true }))
         }
+        "remove" => {
+            let workspace = api.workspace(&job.workspace_name).await?;
+            let remove_volume = payload
+                .get("remove_volume")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            remove_workspace_local(api, &workspace, remove_volume).await?;
+            Ok(json!({ "removed": true, "volume_removed": remove_volume }))
+        }
         "backup" => {
             let workspace = api.workspace(&job.workspace_name).await?;
             let leave_stopped = payload
@@ -736,6 +745,49 @@ async fn stop_workspace_local(api: &WorkerApi, workspace: &WorkspaceRecord) -> R
     )
     .await?;
     Ok(())
+}
+
+async fn remove_workspace_local(
+    api: &WorkerApi,
+    workspace: &WorkspaceRecord,
+    remove_volume: bool,
+) -> Result<()> {
+    if fake_runtime_enabled() {
+        return fake_remove_workspace(api, workspace, remove_volume).await;
+    }
+    api.update_workspace(
+        &workspace.name,
+        Some("removing"),
+        Some("removed"),
+        false,
+        false,
+    )
+    .await?;
+    if let Ok(handle) = Sandbox::get(&workspace.sandbox_name).await {
+        if handle.status() == SandboxStatus::Running || handle.status() == SandboxStatus::Draining {
+            let _ = handle.stop_with_timeout(Duration::from_secs(20)).await;
+        }
+        let _ = Sandbox::remove(&workspace.sandbox_name).await;
+    }
+    if remove_volume {
+        let _ = Volume::remove(&workspace.volume_name).await;
+    }
+    api.update_workspace(
+        &workspace.name,
+        Some("removed"),
+        Some("removed"),
+        false,
+        false,
+    )
+    .await?;
+    api.event(
+        &workspace.name,
+        "workspace_removed",
+        "succeeded",
+        "workspace sandbox removed",
+        json!({ "volume_removed": remove_volume }),
+    )
+    .await
 }
 
 async fn ensure_workspace_running_local(
@@ -1138,6 +1190,31 @@ async fn fake_stop_workspace(api: &WorkerApi, workspace: &WorkspaceRecord) -> Re
         "succeeded",
         "fake workspace stopped",
         json!({ "runtime": "fake" }),
+    )
+    .await
+}
+
+async fn fake_remove_workspace(
+    api: &WorkerApi,
+    workspace: &WorkspaceRecord,
+    remove_volume: bool,
+) -> Result<()> {
+    let dir = fake_workspace_dir(workspace)?;
+    let _ = fs::remove_dir_all(&dir);
+    api.update_workspace(
+        &workspace.name,
+        Some("removed"),
+        Some("removed"),
+        false,
+        false,
+    )
+    .await?;
+    api.event(
+        &workspace.name,
+        "workspace_removed",
+        "succeeded",
+        "fake workspace removed",
+        json!({ "runtime": "fake", "volume_removed": remove_volume }),
     )
     .await
 }

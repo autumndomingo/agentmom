@@ -43,6 +43,8 @@ CREATE TABLE IF NOT EXISTS workspaces (
     slug TEXT UNIQUE,
     display_name TEXT,
     user_id TEXT NOT NULL,
+    owner_user_id INTEGER,
+    agent_name TEXT,
     sandbox_name TEXT NOT NULL UNIQUE,
     volume_name TEXT NOT NULL UNIQUE,
     node_id TEXT,
@@ -132,9 +134,62 @@ ON service_tunnels (workspace_name, service);
     add_column_if_missing(&db, "workspaces", "workspace_id", "TEXT")?;
     add_column_if_missing(&db, "workspaces", "slug", "TEXT")?;
     add_column_if_missing(&db, "workspaces", "display_name", "TEXT")?;
+    add_column_if_missing(&db, "workspaces", "owner_user_id", "INTEGER")?;
+    add_column_if_missing(&db, "workspaces", "agent_name", "TEXT")?;
     add_column_if_missing(&db, "nodes", "worker_url", "TEXT")?;
+    ensure_auth_schema(&db)?;
     backfill_workspace_identity(&db)?;
     migrate_fleet_schema(&db, current)?;
+    Ok(())
+}
+
+fn ensure_auth_schema(db: &Connection) -> Result<()> {
+    db.execute_batch(
+        r#"
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL UNIQUE,
+    full_name TEXT NOT NULL DEFAULT '',
+    role TEXT NOT NULL CHECK(role IN ('admin', 'user')),
+    invite_id INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    last_seen_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS invites (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    label TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    code TEXT NOT NULL UNIQUE,
+    role TEXT NOT NULL CHECK(role IN ('admin', 'user')),
+    max_uses INTEGER,
+    used_count INTEGER NOT NULL DEFAULT 0,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_by_user_id INTEGER,
+    created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS invite_redemptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    invite_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    redeemed_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL,
+    last_seen_at INTEGER NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workspaces_owner_user
+ON workspaces(owner_user_id)
+WHERE owner_user_id IS NOT NULL;
+"#,
+    )?;
     Ok(())
 }
 
@@ -249,6 +304,8 @@ pub(crate) fn workspace_upsert_pending(
     name: &str,
     display_name: &str,
     user_id: &str,
+    owner_user_id: Option<i64>,
+    agent_name: Option<&str>,
     sandbox_name: &str,
     volume_name: &str,
     assigned_node_id: Option<&str>,
@@ -266,11 +323,11 @@ pub(crate) fn workspace_upsert_pending(
     db.execute(
         r#"
 INSERT INTO workspaces (
-    name, workspace_id, slug, display_name, user_id, sandbox_name, volume_name,
+    name, workspace_id, slug, display_name, user_id, owner_user_id, agent_name, sandbox_name, volume_name,
     node_id, desired_state, cpus, memory_mib,
     volume_quota_mib, status, idle_timeout_secs, backup_interval_secs,
     last_used_at, last_backup_at, created_at, updated_at
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'running', ?9, ?10, ?11, 'creating', ?12, ?13, ?14, NULL, ?14, ?14)
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'running', ?11, ?12, ?13, 'creating', ?14, ?15, ?16, NULL, ?16, ?16)
 ON CONFLICT(name) DO NOTHING
 "#,
         params![
@@ -279,6 +336,8 @@ ON CONFLICT(name) DO NOTHING
             slug,
             display_name,
             user_id,
+            owner_user_id,
+            agent_name,
             sandbox_name,
             volume_name,
             assigned_node_id,
@@ -302,7 +361,8 @@ pub(crate) fn workspace_get(name: &str) -> Result<WorkspaceRecord> {
     db.query_row(
         r#"
 SELECT workspace_id, name, slug, display_name, user_id, sandbox_name, volume_name, desired_state, cpus, memory_mib,
-       node_id, status, volume_quota_mib, idle_timeout_secs, backup_interval_secs, last_used_at, last_backup_at
+       node_id, status, volume_quota_mib, idle_timeout_secs, backup_interval_secs, last_used_at, last_backup_at,
+       owner_user_id, agent_name
 FROM workspaces
 WHERE name = ?1
 "#,
@@ -319,7 +379,8 @@ pub(crate) fn workspace_all() -> Result<Vec<WorkspaceRecord>> {
     let mut stmt = db.prepare(
         r#"
 SELECT workspace_id, name, slug, display_name, user_id, sandbox_name, volume_name, desired_state, cpus, memory_mib,
-       node_id, status, volume_quota_mib, idle_timeout_secs, backup_interval_secs, last_used_at, last_backup_at
+       node_id, status, volume_quota_mib, idle_timeout_secs, backup_interval_secs, last_used_at, last_backup_at,
+       owner_user_id, agent_name
 FROM workspaces
 ORDER BY name
 "#,
@@ -336,7 +397,8 @@ pub(crate) fn workspaces_for_node(node: &str) -> Result<Vec<WorkspaceRecord>> {
     let mut stmt = db.prepare(
         r#"
 SELECT workspace_id, name, slug, display_name, user_id, sandbox_name, volume_name, desired_state, cpus, memory_mib,
-       node_id, status, volume_quota_mib, idle_timeout_secs, backup_interval_secs, last_used_at, last_backup_at
+       node_id, status, volume_quota_mib, idle_timeout_secs, backup_interval_secs, last_used_at, last_backup_at,
+       owner_user_id, agent_name
 FROM workspaces
 WHERE node_id = ?1 AND status != 'removed'
 ORDER BY name
@@ -359,6 +421,8 @@ pub(crate) fn workspace_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Wo
         slug: row.get(2)?,
         display_name: row.get(3)?,
         user_id: row.get(4)?,
+        owner_user_id: row.get(17)?,
+        agent_name: row.get(18)?,
         sandbox_name: row.get(5)?,
         volume_name: row.get(6)?,
         desired_state: row.get(7)?,
@@ -1159,6 +1223,21 @@ fn validate_worker_url(worker_url: &str) -> Result<()> {
     let host = url
         .host_str()
         .ok_or_else(|| anyhow!("worker_url must include a host: {worker_url}"))?;
+
+    if let Ok(allowlist) = env::var("MOM_WORKER_URL_ALLOWLIST") {
+        let worker_url = normalized_url(worker_url);
+        let allowed = allowlist
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(normalized_url)
+            .any(|allowed| allowed == worker_url);
+        if allowed {
+            return Ok(());
+        }
+        bail!("worker_url is not in MOM_WORKER_URL_ALLOWLIST: {worker_url}");
+    }
+
     if host.eq_ignore_ascii_case("localhost") && env::var("MOM_RUNTIME").as_deref() != Ok("fake") {
         bail!("worker_url may not use localhost outside fake runtime: {worker_url}");
     }
@@ -1168,18 +1247,6 @@ fn validate_worker_url(worker_url: &str) -> Result<()> {
         }
         if addr.is_loopback() && env::var("MOM_RUNTIME").as_deref() != Ok("fake") {
             bail!("worker_url may not use loopback host outside fake runtime: {worker_url}");
-        }
-    }
-    if let Ok(allowlist) = env::var("MOM_WORKER_URL_ALLOWLIST") {
-        let worker_url = normalized_url(worker_url);
-        let allowed = allowlist
-            .split(',')
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(normalized_url)
-            .any(|allowed| allowed == worker_url);
-        if !allowed {
-            bail!("worker_url is not in MOM_WORKER_URL_ALLOWLIST: {worker_url}");
         }
     }
     Ok(())
@@ -1373,6 +1440,7 @@ pub(crate) fn fleet_db() -> Result<Connection> {
     let dir = fleet_state_dir()?;
     fs::create_dir_all(&dir)?;
     let db = Connection::open(fleet_db_path()?)?;
+    db.busy_timeout(std::time::Duration::from_secs(5))?;
     ensure_supported_schema_without_mutation(&db)?;
     db.pragma_update(None, "journal_mode", "WAL")?;
     db.pragma_update(None, "foreign_keys", "ON")?;
@@ -1392,6 +1460,7 @@ fn open_existing_fleet_db(read_only: bool) -> Result<Connection> {
     } else {
         Connection::open(path)?
     };
+    db.busy_timeout(std::time::Duration::from_secs(5))?;
     ensure_supported_schema_without_mutation(&db)?;
     Ok(db)
 }

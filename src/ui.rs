@@ -4,7 +4,7 @@ use anyhow::{Result, anyhow};
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -16,8 +16,8 @@ use crate::{
     ApiState, JobResponse, WorkspaceRecord, create_job, default_workspace_backup_interval,
     default_workspace_cpus, default_workspace_idle_timeout, default_workspace_memory,
     default_workspace_volume_quota, job_get, node_worker_url, select_ready_node,
-    service_tunnel_hostname_registered, service_tunnel_upsert, worker_token, workspace_all,
-    workspace_get, workspace_upsert_pending,
+    service_tunnel_hostname_registered, service_tunnel_upsert, worker_token, workspace_get,
+    workspace_upsert_pending,
 };
 
 #[derive(Debug, Deserialize)]
@@ -156,8 +156,8 @@ fn service_tunnel_registered(domain: &str) -> Result<bool> {
     service_tunnel_hostname_registered(domain)
 }
 
-async fn list_vms() -> Result<Json<ListResponse>, UiError> {
-    let vms = workspace_all()?
+async fn list_vms(headers: HeaderMap) -> Result<Json<ListResponse>, UiError> {
+    let vms = crate::auth::visible_workspaces(&headers)?
         .into_iter()
         .map(|workspace| Vm {
             workspace_id: workspace.workspace_id,
@@ -181,8 +181,10 @@ async fn list_vms() -> Result<Json<ListResponse>, UiError> {
 
 async fn create_vm(
     State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
     Json(request): Json<CreateRequest>,
 ) -> Result<Json<CommandResult>, UiError> {
+    crate::auth::require_admin(&headers)?;
     let display_name = request.name.trim().to_string();
     let name = crate::workspace_slug_from_name(&request.name)?;
     if workspace_get(&name).is_ok() {
@@ -196,6 +198,8 @@ async fn create_vm(
         &name,
         &display_name,
         &user_id,
+        None,
+        None,
         &format!("mom-{name}"),
         &format!("mom-{name}-workspace"),
         Some(&node_id),
@@ -226,26 +230,38 @@ async fn create_vm(
 
 async fn start_vm(
     State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Result<Json<CommandResult>, UiError> {
+    crate::auth::authorize_workspace(&headers, &name)?;
     create_and_wait_for_job(&state, &name, "start", json!({})).await
 }
 
 async fn stop_vm(
     State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Result<Json<CommandResult>, UiError> {
+    crate::auth::authorize_workspace(&headers, &name)?;
     create_and_wait_for_job(&state, &name, "stop", json!({})).await
 }
 
-async fn remove_vm(Path(name): Path<String>) -> Result<Json<CommandResult>, UiError> {
+async fn remove_vm(
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<Json<CommandResult>, UiError> {
+    crate::auth::require_admin(&headers)?;
     let _ = name;
     Err(UiError::Anyhow(anyhow!(
         "workspace removal is not exposed in the UI yet"
     )))
 }
 
-async fn doctor_vm(Path(name): Path<String>) -> Result<Json<CommandResult>, UiError> {
+async fn doctor_vm(
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<Json<CommandResult>, UiError> {
+    crate::auth::authorize_workspace(&headers, &name)?;
     let _ = name;
     Err(UiError::Anyhow(anyhow!(
         "doctor is not exposed in the UI yet"
@@ -254,9 +270,11 @@ async fn doctor_vm(Path(name): Path<String>) -> Result<Json<CommandResult>, UiEr
 
 async fn exec_vm(
     State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
     Path(name): Path<String>,
     Json(request): Json<CommandRequest>,
 ) -> Result<Json<CommandResult>, UiError> {
+    crate::auth::authorize_workspace(&headers, &name)?;
     create_and_wait_for_job(
         &state,
         &name,
@@ -268,25 +286,37 @@ async fn exec_vm(
 
 async fn codex_vm(
     State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
     Path(name): Path<String>,
     Json(request): Json<PromptRequest>,
 ) -> Result<Json<CommandResult>, UiError> {
+    crate::auth::authorize_workspace(&headers, &name)?;
     create_and_wait_for_job(&state, &name, "codex", json!({ "prompt": request.prompt })).await
 }
 
 async fn hermes_vm(
     State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
     Path(name): Path<String>,
     Json(request): Json<CommandRequest>,
 ) -> Result<Json<CommandResult>, UiError> {
+    crate::auth::authorize_workspace(&headers, &name)?;
     create_and_wait_for_job(&state, &name, "hermes", json!({ "args": request.command })).await
 }
 
-async fn opencode_vm(Path(name): Path<String>) -> Result<Json<CommandResult>, UiError> {
+async fn opencode_vm(
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<Json<CommandResult>, UiError> {
+    crate::auth::authorize_workspace(&headers, &name)?;
     open_workspace_service(&name, "opencode").await
 }
 
-async fn hermes_ui_vm(Path(name): Path<String>) -> Result<Json<CommandResult>, UiError> {
+async fn hermes_ui_vm(
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<Json<CommandResult>, UiError> {
+    crate::auth::authorize_workspace(&headers, &name)?;
     open_workspace_service(&name, "hermes").await
 }
 
@@ -425,6 +455,7 @@ impl WorkerTokenExt for reqwest::RequestBuilder {
 
 enum UiError {
     Anyhow(anyhow::Error),
+    Auth(crate::auth::AuthError),
     Command(CommandResult),
 }
 
@@ -440,9 +471,16 @@ impl From<reqwest::Error> for UiError {
     }
 }
 
+impl From<crate::auth::AuthError> for UiError {
+    fn from(error: crate::auth::AuthError) -> Self {
+        Self::Auth(error)
+    }
+}
+
 impl IntoResponse for UiError {
     fn into_response(self) -> Response {
         match self {
+            UiError::Auth(error) => error.into_response(),
             UiError::Anyhow(error) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorBody {

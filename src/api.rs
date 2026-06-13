@@ -2,6 +2,7 @@ use super::*;
 
 pub(crate) async fn api(args: ApiArgs) -> Result<()> {
     ensure_fleet_schema()?;
+    auth::seed_admin_from_config()?;
     let (notifier, _) = broadcast::channel(1024);
     let state = ApiState { notifier };
     let app = Router::new()
@@ -34,6 +35,7 @@ pub(crate) async fn api(args: ApiArgs) -> Result<()> {
         )
         .route("/worker/workspaces", get(api_worker_workspaces))
         .route("/worker/events", get(api_worker_events))
+        .merge(auth::api_routes())
         .merge(ui::api_routes())
         .with_state(Arc::new(state));
     let app = ui::serve_assets(app);
@@ -187,6 +189,8 @@ async fn api_create_workspace(
         &name,
         &display_name,
         &user_id,
+        None,
+        None,
         &format!("mom-{name}"),
         &format!("mom-{name}-workspace"),
         Some(&assigned_node),

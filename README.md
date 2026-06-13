@@ -74,15 +74,15 @@ Before backing up, Agent Mom gracefully stops the workspace VM so the named
 volume is in a consistent state. If the workspace was desired-running, it is
 started again after backup.
 
-For local testing without touching the default microsandbox home:
+For local testing without touching the default microsandbox home, use the dev
+entrypoint:
 
 ```sh
-export MOM_STATE_DIR="$PWD/.state/mom"
-export MSB_HOME="$PWD/.state/msb"
-cargo run --bin mom -- workspace list
-cargo run --bin mom -- api --bind 127.0.0.1:8080
-MOM_API_URL=http://127.0.0.1:8080 cargo run --bin mom -- worker --once
+just dev
 ```
+
+It writes `.state/dev.env`, keeps mom and microsandbox state under `.state/`,
+and starts the same API/worker shape used in production.
 
 ## Fleet Operations
 
@@ -151,6 +151,11 @@ typed `services.agentmom.*` options.
   "guest": {
     "hermes_profile": "main",
     "model": "openai/gpt-5.5"
+  },
+  "auth": {
+    "secret_file": "/run/secrets/agentmom-auth-secret",
+    "admin_email": "you@example.com",
+    "admin_access_code_file": "/run/secrets/agentmom-admin-access-code"
   }
 }
 ```
@@ -163,6 +168,8 @@ Required assumptions:
 - `guest.hermes_profile` is the guest profile name to create.
 - `guest.model` is the default model for the selected mode. Use an `openai-codex` model in `vm-auth-json` mode and an OpenRouter model ID in `openrouter-proxy` mode.
 - `runtime.snapshot_name` is the versioned prebuilt microsandbox snapshot to boot new VMs from. It is required for worker/node VM operations and has no Rust default.
+- `auth.secret_file` is required for `mom api`. It signs browser sessions and invite/access-code hashes.
+- `auth.admin_email` and `auth.admin_access_code_file` optionally seed a bootstrap admin at API startup. Remove or rotate the bootstrap code after creating durable admin access.
 
 `mom config doctor` validates the configured file and prints a redacted
 effective config.
@@ -213,21 +220,25 @@ nix build
 
 ## UI
 
-The meetup UI is a React app served by the Rust `mom-ui` backend. The browser
-uses same-origin `/api` routes for login, admin, and workspace actions.
+The participant/admin UI is a React app served by `mom api`. The browser uses
+same-origin `/api` routes for login, admin, and workspace actions.
 
 ```sh
 nix develop
-cd ui
-npm install
-npm run build
-cd ..
-MOM_UI_PORT=8080 cargo run --bin mom-ui
+just dev
 ```
 
-Open <http://127.0.0.1:8080>. Hermes/OpenCode launch requests are routed from
-the API to the workspace's assigned worker over that worker's private
-`worker.url`.
+`just dev` builds the UI, chooses available localhost ports, uses
+`config.dev.json` by default, starts `mom api` and `mom worker`, and uses the
+real microsandbox runtime. On a fresh checkout the first run installs the local
+microsandbox helper under `.state/msb` and builds the configured base snapshot.
+Hermes/OpenCode launch requests are routed from the API to the workspace's
+assigned worker over that worker's private `worker.url`.
+Foreground output is intentionally brief; detailed API, worker, build, and base
+image logs are written to `.state/logs/`.
+
+With `just dev` running, use `just dev-smoke` in another shell to check the API
+health endpoint and cookie-based admin login.
 
 ## NixOS Service
 
@@ -250,6 +261,11 @@ its existing NixOS config:
     runtime.snapshotName = "mom-base-${builtins.substring 0 12 inputs.agentmom.rev}";
     credentials.mode = "openrouter-proxy";
     guest.model = "openai/gpt-5.5";
+    auth = {
+      secretFile = "/run/secrets/agentmom-auth-secret";
+      adminEmail = "you@example.com";
+      adminAccessCodeFile = "/run/secrets/agentmom-admin-access-code";
+    };
   };
 }
 ```
@@ -281,6 +297,11 @@ services.agentmom = {
   ui.enable = true;
 
   workerTokenFile = "/run/secrets/agentmom-worker-token";
+  auth = {
+    secretFile = "/run/secrets/agentmom-auth-secret";
+    adminEmail = "you@example.com";
+    adminAccessCodeFile = "/run/secrets/agentmom-admin-access-code";
+  };
 
   capacity = {
     cpus = 32;
@@ -308,9 +329,9 @@ Workers keep using host-local microsandbox volumes and claim jobs through
 `POST /worker/claim`; `GET /worker/events?node_id=...` is only a low-latency
 wake signal.
 
-The API/UI routes are intended to sit behind Tailscale or an authenticated
-reverse proxy. Do not bind the API to a public interface without adding that
-outer auth layer.
+The API/UI routes have first-party cookie auth for browser users and bearer
+tokens for workers. Keep production behind Tailscale, Cloudflare, or another
+trusted reverse proxy for rate limiting, TLS, and network exposure control.
 
 Workers also expose private control endpoints, such as
 `POST /worker/services/{service}/open`, used by the API to open Hermes/OpenCode

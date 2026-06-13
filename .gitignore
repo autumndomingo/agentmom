@@ -1,5 +1,7 @@
 /target/
 /.direnv/
+/.state/
 /ui/dist/
 /ui/node_modules/
 /worktrees
+/result

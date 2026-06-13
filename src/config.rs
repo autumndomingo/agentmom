@@ -18,6 +18,8 @@ pub(crate) struct MomConfig {
     pub(crate) credentials: CredentialConfig,
     #[serde(default)]
     pub(crate) guest: GuestConfig,
+    #[serde(default)]
+    pub(crate) auth: AuthConfig,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -70,6 +72,21 @@ impl Default for GuestConfig {
             model: default_model(),
         }
     }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AuthConfig {
+    #[serde(default)]
+    pub(crate) secret: Option<String>,
+    #[serde(default)]
+    pub(crate) secret_file: Option<PathBuf>,
+    #[serde(default)]
+    pub(crate) admin_email: Option<String>,
+    #[serde(default)]
+    pub(crate) admin_access_code: Option<String>,
+    #[serde(default)]
+    pub(crate) admin_access_code_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,6 +194,50 @@ impl MomConfig {
         Ok(())
     }
 
+    pub(crate) fn validate_for_api(&self) -> Result<()> {
+        self.auth_secret()?;
+        if self
+            .auth
+            .admin_email
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            self.admin_access_code()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn auth_secret(&self) -> Result<String> {
+        required_config_secret(
+            self.auth.secret.as_deref(),
+            self.auth.secret_file.as_ref(),
+            "auth.secret",
+            "auth.secret_file",
+        )
+    }
+
+    pub(crate) fn admin_bootstrap(&self) -> Result<Option<(String, String)>> {
+        let Some(email) = self
+            .auth
+            .admin_email
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Ok(None);
+        };
+        Ok(Some((email.to_string(), self.admin_access_code()?)))
+    }
+
+    pub(crate) fn admin_access_code(&self) -> Result<String> {
+        required_config_secret(
+            self.auth.admin_access_code.as_deref(),
+            self.auth.admin_access_code_file.as_ref(),
+            "auth.admin_access_code",
+            "auth.admin_access_code_file",
+        )
+    }
+
     pub(crate) fn redacted_json(&self) -> serde_json::Value {
         json!({
             "schema_version": self.schema_version,
@@ -193,6 +254,13 @@ impl MomConfig {
             "guest": {
                 "hermes_profile": self.guest.hermes_profile,
                 "model": self.guest.model,
+            },
+            "auth": {
+                "secret": self.auth.secret.as_ref().map(|_| "<redacted>"),
+                "secret_file": self.auth.secret_file.as_ref().map(|p| p.display().to_string()),
+                "admin_email": self.auth.admin_email,
+                "admin_access_code": self.auth.admin_access_code.as_ref().map(|_| "<redacted>"),
+                "admin_access_code_file": self.auth.admin_access_code_file.as_ref().map(|p| p.display().to_string()),
             }
         })
     }
@@ -244,6 +312,7 @@ impl From<LegacyMomConfig> for MomConfig {
                 hermes_profile: value.hermes_profile,
                 model: value.hermes_model,
             },
+            auth: AuthConfig::default(),
         }
     }
 }
@@ -279,6 +348,28 @@ pub(crate) fn resolve_required_file(path: &PathBuf, key: &str) -> Result<PathBuf
             expanded.display()
         )
     })
+}
+
+fn required_config_secret(
+    inline: Option<&str>,
+    file: Option<&PathBuf>,
+    inline_key: &str,
+    file_key: &str,
+) -> Result<String> {
+    if let Some(value) = inline.map(str::trim).filter(|value| !value.is_empty()) {
+        return Ok(value.to_string());
+    }
+    if let Some(path) = file {
+        let path = resolve_required_file(path, file_key)?;
+        let value = fs::read_to_string(&path)
+            .with_context(|| format!("read {file_key} {}", path.display()))?;
+        let value = value.trim();
+        if !value.is_empty() {
+            return Ok(value.to_string());
+        }
+        bail!("{file_key} points at an empty file: {}", path.display());
+    }
+    bail!("{inline_key} or {file_key} is required");
 }
 
 pub(crate) fn expand_tilde(path: &PathBuf) -> Result<PathBuf> {
@@ -354,6 +445,11 @@ mod tests {
               "guest": {
                 "hermes_profile": "main",
                 "model": "openai/gpt-5.5"
+              },
+              "auth": {
+                "secret": "dev-secret",
+                "admin_email": "admin@example.com",
+                "admin_access_code": "AM-ADMIN-1234"
               }
             }"#,
         );
@@ -364,6 +460,11 @@ mod tests {
             CredentialMode::OpenRouterProxy
         );
         assert_eq!(config.model(), "openai/gpt-5.5");
+        assert_eq!(config.auth_secret().unwrap(), "dev-secret");
+        assert_eq!(
+            config.admin_bootstrap().unwrap(),
+            Some(("admin@example.com".to_string(), "AM-ADMIN-1234".to_string()))
+        );
     }
 
     #[test]
@@ -388,5 +489,6 @@ mod tests {
             config.credentials.codex_auth_path,
             PathBuf::from("/tmp/codex-auth.json")
         );
+        assert!(config.admin_bootstrap().unwrap().is_none());
     }
 }

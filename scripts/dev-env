@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${repo_root}"
+
+find_port() {
+  local port="$1"
+  local max_port=$((port + 99))
+  while lsof -nP -iTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1; do
+    port=$((port + 1))
+    if [ "${port}" -gt "${max_port}" ]; then
+      echo "No free localhost port found in $1-${max_port}" >&2
+      return 1
+    fi
+  done
+  printf '%s\n' "${port}"
+}
+
+api_port="$(find_port "${MOM_API_PORT:-8787}")"
+worker_port="$(find_port "${MOM_WORKER_PORT:-9090}")"
+
+mkdir -p .state/mom .state/msb .state/logs
+msb_path="${repo_root}/.state/msb/bin/msb"
+
+env_file=".state/dev.env"
+{
+  printf 'MOM_CONFIG=%q\n' "${repo_root}/config.dev.json"
+  printf 'MOM_STATE_DIR=%q\n' "${repo_root}/.state/mom"
+  printf 'MSB_HOME=%q\n' "${repo_root}/.state/msb"
+  printf 'MSB_PATH=%q\n' "${msb_path}"
+  printf 'MOM_WORKER_TOKEN_FILE=%q\n' "${repo_root}/dev/secrets/worker-token"
+  printf 'MOM_UI_DIST=%q\n' "${repo_root}/ui/dist"
+  printf 'MOM_NODE_ID=%q\n' "dev-node"
+  printf 'MOM_LOG_FORMAT=%q\n' "text"
+  printf 'MOM_RUNTIME=%q\n' "real"
+  printf 'MOM_API_BIND=%q\n' "127.0.0.1:${api_port}"
+  printf 'MOM_API_URL=%q\n' "http://127.0.0.1:${api_port}"
+  printf 'MOM_WORKER_BIND=%q\n' "127.0.0.1:${worker_port}"
+  printf 'MOM_WORKER_URL=%q\n' "http://127.0.0.1:${worker_port}"
+  printf 'MOM_WORKER_URL_ALLOWLIST=%q\n' "http://127.0.0.1:${worker_port}"
+} > "${env_file}"

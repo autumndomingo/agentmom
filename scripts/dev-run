@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${repo_root}"
+
+log_dir="${repo_root}/.state/logs"
+mkdir -p "${log_dir}"
+
+run_step() {
+  local name="$1"
+  local log_file="$2"
+  shift 2
+
+  printf '  %-24s' "${name}..."
+  if "$@" >"${log_file}" 2>&1; then
+    printf 'ok\n'
+  else
+    printf 'failed\n\n'
+    echo "${name} failed. Last log lines from ${log_file}:"
+    tail -n 80 "${log_file}" || true
+    exit 1
+  fi
+}
+
+wait_for_http() {
+  local name="$1"
+  local url="$2"
+  local log_file="$3"
+
+  printf '  %-24s' "${name}..."
+  for _ in $(seq 1 60); do
+    if curl -fsS "${url}" >/dev/null 2>&1; then
+      printf 'ok\n'
+      return 0
+    fi
+    sleep 1
+  done
+
+  printf 'failed\n\n'
+  echo "${name} did not become ready. Last log lines from ${log_file}:"
+  tail -n 80 "${log_file}" || true
+  exit 1
+}
+
+wait_for_node() {
+  local log_file="$1"
+
+  printf '  %-24s' "registering worker..."
+  for _ in $(seq 1 60); do
+    if "${repo_root}/target/debug/mom" node inspect "${MOM_NODE_ID}" >"${log_file}" 2>&1 &&
+      grep -q '^Status: ready$' "${log_file}"; then
+      printf 'ok\n'
+      return 0
+    fi
+    sleep 1
+  done
+
+  printf 'failed\n\n'
+  echo "worker did not register as ready. Last log lines from ${log_file}:"
+  tail -n 80 "${log_file}" || true
+  echo
+  echo "Worker log:"
+  tail -n 80 "${log_dir}/worker.log" || true
+  exit 1
+}
+
+stop_children() {
+  local status=$?
+  trap - INT TERM EXIT
+  if [ -n "${worker_pid:-}" ] && kill -0 "${worker_pid}" >/dev/null 2>&1; then
+    kill "${worker_pid}" >/dev/null 2>&1 || true
+  fi
+  if [ -n "${api_pid:-}" ] && kill -0 "${api_pid}" >/dev/null 2>&1; then
+    kill "${api_pid}" >/dev/null 2>&1 || true
+  fi
+  wait "${worker_pid:-}" "${api_pid:-}" >/dev/null 2>&1 || true
+  exit "${status}"
+}
+
+trap stop_children INT TERM EXIT
+
+run_step "writing dev env" "${log_dir}/dev-env.log" ./scripts/dev-env
+
+set -a
+source .state/dev.env
+set +a
+
+run_step "building UI" "${log_dir}/ui-build.log" npm --prefix ui run build
+
+if [ ! -x "${MSB_PATH}" ]; then
+  run_step "installing microsandbox" "${log_dir}/msb-install.log" bash -lc 'set -a; source .state/dev.env; set +a; cargo clean -p microsandbox >/dev/null && cargo build --bin mom'
+fi
+
+run_step "building mom" "${log_dir}/cargo-build.log" cargo build --bin mom
+
+"${repo_root}/target/debug/mom" api --bind "${MOM_API_BIND}" >"${log_dir}/api.log" 2>&1 &
+api_pid=$!
+wait_for_http "starting API" "${MOM_API_URL}/health/ready" "${log_dir}/api.log"
+
+run_step "checking config" "${log_dir}/config-doctor.log" "${repo_root}/target/debug/mom" config doctor
+run_step "checking base image" "${log_dir}/ensure-base.log" "${repo_root}/target/debug/mom" node ensure-base
+
+"${repo_root}/target/debug/mom" worker --interval 5 >"${log_dir}/worker.log" 2>&1 &
+worker_pid=$!
+wait_for_http "starting worker" "${MOM_WORKER_URL}/worker/health" "${log_dir}/worker.log"
+wait_for_node "${log_dir}/node-inspect.log"
+
+cat <<EOF
+
+Agent Mom dev is running
+  UI:    ${MOM_API_URL}
+  Admin: admin@example.com / $(cat dev/secrets/admin-access-code)
+  Logs:  ${log_dir}
+
+Press Ctrl-C to stop.
+EOF
+
+while true; do
+  if ! kill -0 "${api_pid}" >/dev/null 2>&1; then
+    echo "API exited. Last log lines from ${log_dir}/api.log:"
+    tail -n 80 "${log_dir}/api.log" || true
+    exit 1
+  fi
+  if ! kill -0 "${worker_pid}" >/dev/null 2>&1; then
+    echo "Worker exited. Last log lines from ${log_dir}/worker.log:"
+    tail -n 80 "${log_dir}/worker.log" || true
+    exit 1
+  fi
+  sleep 2
+done

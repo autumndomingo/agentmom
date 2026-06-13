@@ -45,6 +45,7 @@ const BASE_BUILDER_NAME: &str = "mom-base-builder";
 const BASE_DOCTOR_NAME: &str = "mom-base-doctor";
 
 mod api;
+mod auth;
 mod backup;
 mod config;
 mod db;
@@ -406,6 +407,8 @@ struct WorkspaceRecord {
     slug: String,
     display_name: String,
     user_id: String,
+    owner_user_id: Option<i64>,
+    agent_name: Option<String>,
     sandbox_name: String,
     volume_name: String,
     node_id: Option<String>,
@@ -1015,6 +1018,8 @@ async fn workspace_create(args: WorkspaceCreateArgs) -> Result<()> {
         &name,
         &display_name,
         &user_id,
+        None,
+        None,
         &sandbox_name,
         &volume_name,
         Some(&node_id()?),
@@ -1886,6 +1891,13 @@ mod tests {
             guest: GuestConfig {
                 hermes_profile: "main".to_string(),
                 model: "anthropic/claude-sonnet-4.6".to_string(),
+            },
+            auth: AuthConfig {
+                secret: Some("test-auth-secret".to_string()),
+                secret_file: None,
+                admin_email: Some("admin@example.com".to_string()),
+                admin_access_code: Some("AM-ADMIN-1234".to_string()),
+                admin_access_code_file: None,
             },
         }
     }

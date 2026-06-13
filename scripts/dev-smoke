@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${repo_root}"
+
+if [ ! -f .state/dev.env ]; then
+  echo ".state/dev.env is missing; run just dev first" >&2
+  exit 1
+fi
+
+set -a
+source .state/dev.env
+set +a
+
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "${tmpdir}"' EXIT
+
+curl -fsS "${MOM_API_URL}/health/ready" >/dev/null
+curl -fsS \
+  -c "${tmpdir}/cookie" \
+  -H 'Content-Type: application/json' \
+  -d "{\"email\":\"admin@example.com\",\"access_code\":\"$(cat dev/secrets/admin-access-code)\"}" \
+  "${MOM_API_URL}/api/auth/login" >/dev/null
+curl -fsS -b "${tmpdir}/cookie" "${MOM_API_URL}/api/me" >/dev/null
+curl -fsS -b "${tmpdir}/cookie" "${MOM_API_URL}/api/admin/invites" >/dev/null
+
+echo "dev smoke ok: ${MOM_API_URL}"
