@@ -61,7 +61,7 @@ pub(crate) use sandbox::*;
 #[derive(Debug, Parser)]
 #[command(
     name = "mom",
-    about = "Agent Mom: small VM manager for Alpine microsandbox agent boxes"
+    about = "Agent Mom: workspace control plane for microsandbox agent runtimes"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -71,18 +71,23 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Create and provision a new Alpine VM.
+    #[command(hide = true)]
     Create(CreateArgs),
     /// List Agent Mom-managed VMs.
+    #[command(hide = true)]
     List {
         /// Include sandboxes not created by Agent Mom.
         #[arg(long)]
         all: bool,
     },
     /// Start a stopped VM in the background.
+    #[command(hide = true)]
     Start { name: String },
     /// Stop a VM.
+    #[command(hide = true)]
     Stop { name: String },
     /// Remove a VM, stopping it first if needed.
+    #[command(hide = true)]
     Rm {
         name: Option<String>,
         /// Remove all Agent Mom-managed VMs.
@@ -93,26 +98,31 @@ enum Command {
         force: bool,
     },
     /// Run a command in a VM and print captured output.
+    #[command(hide = true)]
     Exec {
         name: String,
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
     /// Open an interactive shell in a VM.
+    #[command(hide = true)]
     Enter { name: String },
     /// Run Codex inside a VM.
+    #[command(hide = true)]
     Codex {
         name: String,
         #[arg(required = true)]
         prompt: Vec<String>,
     },
     /// Run Hermes inside a VM.
+    #[command(hide = true)]
     Hermes {
         name: String,
         #[arg(last = true)]
         args: Vec<String>,
     },
     /// Run basic tool checks inside a VM.
+    #[command(hide = true)]
     Doctor { name: String },
     /// Manage durable user workspaces backed by named volumes.
     #[command(alias = "ws")]
