@@ -318,6 +318,11 @@ async fn opencode_vm(
     Path(name): Path<String>,
 ) -> Result<Json<CommandResult>, UiError> {
     crate::auth::authorize_workspace(&headers, &name)?;
+    if !opencode_enabled() {
+        return Err(UiError::Forbidden(
+            "OpenCode is disabled; set MOM_ENABLE_OPENCODE=1 to expose it".to_string(),
+        ));
+    }
     open_workspace_service(&name, "opencode").await
 }
 
@@ -327,6 +332,10 @@ async fn hermes_ui_vm(
 ) -> Result<Json<CommandResult>, UiError> {
     crate::auth::authorize_workspace(&headers, &name)?;
     open_workspace_service(&name, "hermes").await
+}
+
+fn opencode_enabled() -> bool {
+    env::var("MOM_ENABLE_OPENCODE").is_ok_and(|value| value == "1" || value == "true")
 }
 
 async fn open_workspace_service(name: &str, service: &str) -> Result<Json<CommandResult>, UiError> {
@@ -466,6 +475,7 @@ enum UiError {
     Anyhow(anyhow::Error),
     Auth(crate::auth::AuthError),
     Command(CommandResult),
+    Forbidden(String),
 }
 
 impl From<anyhow::Error> for UiError {
@@ -504,6 +514,9 @@ impl IntoResponse for UiError {
                     StatusCode::INTERNAL_SERVER_ERROR
                 };
                 (status, Json(result)).into_response()
+            }
+            UiError::Forbidden(error) => {
+                (StatusCode::FORBIDDEN, Json(ErrorBody { error })).into_response()
             }
         }
     }

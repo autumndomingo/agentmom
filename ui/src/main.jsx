@@ -13,6 +13,9 @@ import {
 import './styles.css';
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? '/api';
+const ENABLE_OPENCODE =
+  import.meta.env.VITE_ENABLE_OPENCODE === '1' || import.meta.env.VITE_ENABLE_OPENCODE === 'true';
+
 function Root() {
   const [userSession, setUserSession] = useState(null);
   const [checkingSession, setCheckingSession] = useState(true);
@@ -504,14 +507,16 @@ function App({ userSession }) {
               <RefreshCcw size={17} />
               Refresh
             </button>
-            <button
-              className="refreshButton"
-              onClick={launchOpencode}
-              disabled={!selectedWorkspace || busy}
-            >
-              <ExternalLink size={17} />
-              OpenCode
-            </button>
+            {ENABLE_OPENCODE && (
+              <button
+                className="refreshButton"
+                onClick={launchOpencode}
+                disabled={!selectedWorkspace || busy}
+              >
+                <ExternalLink size={17} />
+                OpenCode
+              </button>
+            )}
             <button className="refreshButton" onClick={launchHermes} disabled={!selectedWorkspace || busy}>
               <ExternalLink size={17} />
               Hermes

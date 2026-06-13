@@ -921,7 +921,7 @@ async fn service_open_routes_to_assigned_worker_url() -> Result<()> {
     let cookie = admin_cookie(&fleet.api_url).await?;
 
     let result = reqwest::Client::new()
-        .post(format!("{}/api/workspaces/svc/opencode", fleet.api_url))
+        .post(format!("{}/api/workspaces/svc/hermes-ui", fleet.api_url))
         .header(reqwest::header::COOKIE, &cookie)
         .send()
         .await?
@@ -930,14 +930,14 @@ async fn service_open_routes_to_assigned_worker_url() -> Result<()> {
         .await?;
     let stdout = result.get("stdout").and_then(Value::as_str).unwrap_or("");
     assert!(
-        stdout.contains("http://node-b.fake/svc/opencode"),
+        stdout.contains("http://node-b.fake/svc/hermes"),
         "service URL should come from assigned node-b, got {stdout:?}"
     );
     assert!(
         !node_a
             .msb_home
             .path()
-            .join("fake/svc/service-opencode")
+            .join("fake/svc/service-hermes")
             .exists(),
         "node-a should not open node-b's service"
     );
@@ -945,9 +945,55 @@ async fn service_open_routes_to_assigned_worker_url() -> Result<()> {
         node_b
             .msb_home
             .path()
-            .join("fake/svc/service-opencode")
+            .join("fake/svc/service-hermes")
             .exists(),
         "node-b should open its assigned service"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn opencode_service_requires_explicit_enable_flag() -> Result<()> {
+    let _guard = fleet_test_guard().await;
+    let mut fleet = TestFleet::start().await?;
+    let _node =
+        spawn_worker_with_options("node-a", &fleet.api_url, "1", Some("http://node-a.fake"))?;
+    wait_for_node(fleet.api_state.path(), "node-a").await?;
+
+    let job_id = create_workspace(&fleet.api_url, "opencode-svc", "node-a", 0).await?;
+    wait_for_job_status(&fleet.api_url, &job_id, "succeeded").await?;
+    wait_for_workspace_status(&fleet.api_url, "opencode-svc", "running").await?;
+    let cookie = admin_cookie(&fleet.api_url).await?;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{}/api/workspaces/opencode-svc/opencode",
+            fleet.api_url
+        ))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    fleet.stop_api()?;
+    fleet.start_api(&[("MOM_ENABLE_OPENCODE", "1")]).await?;
+
+    let result = reqwest::Client::new()
+        .post(format!(
+            "{}/api/workspaces/opencode-svc/opencode",
+            fleet.api_url
+        ))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Value>()
+        .await?;
+    let stdout = result.get("stdout").and_then(Value::as_str).unwrap_or("");
+    assert!(
+        stdout.contains("http://node-a.fake/opencode-svc/opencode"),
+        "OpenCode service should open only after explicit opt-in, got {stdout:?}"
     );
 
     Ok(())
