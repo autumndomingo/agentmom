@@ -285,7 +285,7 @@ function App({ userSession }) {
 
   async function refresh() {
     setWorkspaceError('');
-    const allWorkspaces = normalizeVmList(await request('/vms'));
+    const allWorkspaces = normalizeVmList(await request('/workspaces'));
     const userWorkspace = selectUserWorkspace(allWorkspaces, userSession);
     const nextVms = userSession.workspaceName
       ? userWorkspace
