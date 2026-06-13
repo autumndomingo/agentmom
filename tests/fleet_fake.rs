@@ -156,9 +156,11 @@ async fn fake_worker_start_stop_backup_jobs_update_central_state() -> Result<()>
     let create = create_workspace(&fleet.api_url, "alice", "node-a", 0).await?;
     wait_for_job_status(&fleet.api_url, &create, "succeeded").await?;
     wait_for_workspace_status(&fleet.api_url, "alice", "running").await?;
+    let cookie = admin_cookie(&fleet.api_url).await?;
 
     reqwest::Client::new()
         .post(format!("{}/api/workspaces/alice/stop", fleet.api_url))
+        .header(reqwest::header::COOKIE, &cookie)
         .send()
         .await?
         .error_for_status()?;

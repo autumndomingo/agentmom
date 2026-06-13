@@ -84,14 +84,75 @@ Private worker routes:
 
 - `/worker/...`
 
+## Notes From 2026-06-13 Auth Rebase
+
+Auth landed in `origin/master` as a material architecture change, not just a UI
+login patch. `mom api` now owns browser sessions, admin invite/access-code
+management, user setup, and user-owned workspace creation. The old standalone
+`mom-ui` binary is gone; the React app is served by `mom api` and calls
+same-origin `/api` routes with first-party cookies. That means frontend state
+must not reintroduce localStorage session tokens, bearer tokens, or role strings
+from the old UI. The live role strings are now `admin` and `user`.
+
+Important auth boundaries observed during the rebase:
+
+- `/api/auth/login`, `/api/me`, `/api/me/setup`, and `/api/admin/...` live in
+  `src/auth.rs`.
+- `/api/me/setup` updates the user's name, creates the owned workspace if one
+  does not exist, queues the create job, and returns the refreshed session. The
+  browser should use this instead of directly posting workspace creates during
+  onboarding.
+- `src/ui.rs` browser/workspace action routes must call `authorize_workspace`
+  or `require_admin`. During conflict resolution, keep those auth checks before
+  service opens and job creation.
+- Worker endpoints remain bearer-token authenticated. Do not mix browser cookie
+  auth into `/worker/...`.
+
+Conflict-resolution decisions made during the rebase:
+
+- Kept auth branch cookie sessions and `/api/me/setup`; discarded the older
+  client-side onboarding flow that created a workspace and then listed
+  workspaces to rediscover it.
+- Preserved admin cookies in fake fleet tests while changing route names.
+  Tests that exercise browser-facing routes should include the admin session
+  cookie unless they are explicitly testing unauthorized behavior.
+- Kept OpenCode authorization before the feature flag check. A caller must be
+  allowed to access the workspace before learning whether OpenCode is enabled.
+- Kept OpenCode hidden by default on both sides:
+  `VITE_ENABLE_OPENCODE=1` for the React button and `MOM_ENABLE_OPENCODE=1` for
+  the API route.
+
+Temporary route decision:
+
+The React workspace list currently uses the auth-filtered legacy compatibility
+route `/api/vms`, then normalizes the result as workspaces. This is intentional
+after the auth rebase. The canonical core `GET /api/workspaces` still belongs
+to the scheduler/control-plane API and currently returns all workspaces, while
+the auth-filtered browser list is implemented in `src/ui.rs` behind `/api/vms`.
+Moving the browser list back to `/api/workspaces` should be paired with one of
+these explicit follow-up decisions:
+
+- make core `GET /api/workspaces` cookie-aware and filtered for browser users,
+  while preserving an operator/admin path for full fleet listing;
+- split the unauthenticated/internal scheduler API away from public browser
+  `/api/workspaces`; or
+- add a new workspace-named browser list route that cannot be shadowed by the
+  existing core route.
+
+Until that API boundary is made explicit, keeping the one `/api/vms` list call
+is the safer inconsistency. Workspace action routes already use
+`/api/workspaces/<name>/...` and are auth-checked.
+
 ## Plan Of Attack
 
 Stabilize the test guardrails first. Fake fleet tests should be reliable under
 the normal test command or explicitly serialized by the harness.
 
 Rename the primary UI/API surface from VM to workspace. Add workspace-named
-routes, move React calls off `/vms`, stop returning `vms` in new response
-bodies, and keep compatibility aliases only as long as they are useful.
+routes and stop returning `vms` in new response bodies. The browser action
+routes should use `/api/workspaces/...`; the browser list route remains the
+auth-filtered `/api/vms` compatibility endpoint until the canonical
+`/api/workspaces` list is secured or split from the internal control-plane API.
 
 Make Hermes the only default visible service. OpenCode should require an
 explicit enable flag. Codex prompt flows should not appear in the primary UI.
