@@ -1,9 +1,9 @@
-use std::{env, path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::HashMap, env, path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{Result, anyhow};
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -93,6 +93,7 @@ struct OpenWorkerServiceResponse {
 pub(crate) fn api_routes() -> Router<Arc<ApiState>> {
     Router::new()
         .route("/api/ui/health", get(health))
+        .route("/api/tls-ask", get(tls_ask))
         .route("/api/vms", get(list_vms).post(create_vm))
         .route("/api/vms/{name}/start", post(start_vm))
         .route("/api/vms/{name}/stop", post(stop_vm))
@@ -121,6 +122,33 @@ pub(crate) fn serve_assets(app: Router) -> Router {
 
 async fn health() -> Json<Value> {
     Json(json!({ "ok": true }))
+}
+
+async fn tls_ask(Query(query): Query<HashMap<String, String>>) -> StatusCode {
+    let Some(domain) = query.get("domain") else {
+        return StatusCode::BAD_REQUEST;
+    };
+    if service_tunnel_domain_allowed(domain) {
+        StatusCode::OK
+    } else {
+        StatusCode::FORBIDDEN
+    }
+}
+
+fn service_tunnel_domain_allowed(domain: &str) -> bool {
+    let domain = domain.to_ascii_lowercase();
+    let Some(label) = domain.strip_suffix(".agentmom.xyz") else {
+        return false;
+    };
+
+    ["mom-1-", "mom-2-"].iter().any(|prefix| {
+        let Some(port) = label.strip_prefix(prefix) else {
+            return false;
+        };
+        !port.is_empty()
+            && port.parse::<u16>().is_ok()
+            && port.bytes().all(|byte| byte.is_ascii_digit())
+    })
 }
 
 async fn list_vms() -> Result<Json<ListResponse>, UiError> {
@@ -417,5 +445,24 @@ impl IntoResponse for UiError {
                 (status, Json(result)).into_response()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::service_tunnel_domain_allowed;
+
+    #[test]
+    fn service_tunnel_domain_allows_known_node_port_hosts() {
+        assert!(service_tunnel_domain_allowed("mom-1-45887.agentmom.xyz"));
+        assert!(service_tunnel_domain_allowed("mom-2-45887.agentmom.xyz"));
+    }
+
+    #[test]
+    fn service_tunnel_domain_rejects_unexpected_hosts() {
+        assert!(!service_tunnel_domain_allowed("agentmom.xyz"));
+        assert!(!service_tunnel_domain_allowed("mom-3-45887.agentmom.xyz"));
+        assert!(!service_tunnel_domain_allowed("mom-1-api.agentmom.xyz"));
+        assert!(!service_tunnel_domain_allowed("mom-1-45887.example.com"));
     }
 }

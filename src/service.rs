@@ -449,6 +449,16 @@ mod tests {
     }
 
     #[test]
+    fn service_tunnel_url_supports_port_in_hostname() {
+        let url = service_tunnel_public_url_from_base(
+            "0.0.0.0",
+            45887,
+            Some("https://mom-1-{port}.agentmom.xyz/"),
+        );
+        assert_eq!(url, "https://mom-1-45887.agentmom.xyz/");
+    }
+
+    #[test]
     fn service_tunnel_url_keeps_legacy_base_port_behavior() {
         let url =
             service_tunnel_public_url_from_base("0.0.0.0", 45887, Some("http://100.81.250.67"));
