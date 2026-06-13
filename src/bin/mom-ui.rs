@@ -35,6 +35,7 @@ struct AppState {
     mom_bin: PathBuf,
     db: SqlitePool,
     admin_email: String,
+    admin_access_code: String,
     opencode_tunnels: Arc<Mutex<HashMap<String, OpencodeTunnel>>>,
 }
 
@@ -118,6 +119,7 @@ struct ListResponse {
 #[derive(Debug, Serialize)]
 struct AccessConfig {
     admin_email: String,
+    admin_access_code: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -198,6 +200,7 @@ async fn main() -> Result<()> {
         mom_bin,
         db,
         admin_email,
+        admin_access_code,
         opencode_tunnels: Arc::new(Mutex::new(HashMap::new())),
     };
 
@@ -243,10 +246,13 @@ async fn health() -> Json<serde_json::Value> {
 
 async fn access_config(
     axum::extract::State(state): axum::extract::State<AppState>,
-) -> Json<AccessConfig> {
-    Json(AccessConfig {
+    headers: HeaderMap,
+) -> Result<Json<AccessConfig>, ApiError> {
+    authorize_admin(&state, &headers).await?;
+    Ok(Json(AccessConfig {
         admin_email: state.admin_email,
-    })
+        admin_access_code: state.admin_access_code,
+    }))
 }
 
 async fn login(

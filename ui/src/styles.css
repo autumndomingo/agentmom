@@ -49,14 +49,292 @@ input:disabled {
   background: var(--bg);
 }
 
+.landingPage {
+  position: relative;
+  min-height: 100vh;
+  padding: clamp(24px, 7vw, 96px);
+  display: grid;
+  place-items: center;
+  background:
+    linear-gradient(rgb(255 255 255 / 3%) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(255 255 255 / 3%) 1px, transparent 1px),
+    var(--bg);
+  background-size:
+    56px 56px,
+    56px 56px,
+    auto;
+  overflow: hidden;
+}
+
+.landingPage::before {
+  position: absolute;
+  inset: -28%;
+  content: "";
+  background:
+    radial-gradient(circle at 16% 74%, rgb(220 121 55 / 22%), transparent 25%),
+    radial-gradient(circle at 78% 18%, rgb(70 128 148 / 20%), transparent 28%),
+    radial-gradient(circle at 44% 42%, rgb(225 148 78 / 10%), transparent 30%);
+  filter: blur(2px);
+  pointer-events: none;
+}
+
+.landingPanel {
+  position: relative;
+  z-index: 1;
+  width: min(910px, 100%);
+  min-height: min(568px, calc(100vh - 72px));
+  padding: clamp(26px, 4.8vw, 68px);
+  border: 1px solid rgb(225 148 78 / 28%);
+  border-radius: 12px;
+  display: grid;
+  grid-template-rows: auto 1fr;
+  background:
+    radial-gradient(circle at 100% 0%, rgb(225 148 78 / 12%), transparent 34%),
+    radial-gradient(circle at 0% 100%, rgb(70 128 148 / 12%), transparent 34%),
+    linear-gradient(rgb(255 255 255 / 3%) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(255 255 255 / 3%) 1px, transparent 1px),
+    rgb(7 8 9 / 88%);
+  background-size:
+    auto,
+    auto,
+    42px 42px,
+    42px 42px,
+    auto;
+  box-shadow: 0 24px 90px rgb(0 0 0 / 42%);
+  overflow: hidden;
+}
+
+.landingPanel::before,
+.landingPanel::after {
+  position: absolute;
+  width: 44px;
+  height: 44px;
+  content: "";
+  pointer-events: none;
+}
+
+.landingPanel::before {
+  top: 22px;
+  left: 22px;
+  border-top: 3px solid #e1944e;
+  border-left: 3px solid #e1944e;
+}
+
+.landingPanel::after {
+  right: 22px;
+  bottom: 22px;
+  border-right: 3px solid #e1944e;
+  border-bottom: 3px solid #e1944e;
+}
+
+.landingHeader {
+  position: relative;
+  z-index: 1;
+  display: block;
+}
+
+.landingHeader h1 {
+  margin: 0;
+  color: #f3eedf;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: clamp(31px, 4vw, 56px);
+  font-weight: 900;
+  letter-spacing: 0;
+  line-height: 0.96;
+}
+
+.landingHeader h1 > span,
+.landingHeader h1 strong {
+  display: block;
+}
+
+.landingHeader h1 .terminalPrompt {
+  width: fit-content;
+  max-width: 100%;
+  color: #f3eedf;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: clamp(16px, 1.75vw, 24px);
+  font-style: normal;
+  font-weight: 750;
+  letter-spacing: 0;
+  line-height: 1.35;
+}
+
+.typedPrompt {
+  display: inline-block;
+  width: 30ch;
+  max-width: 100%;
+  border-right: 0.12em solid #f3eedf;
+  overflow: hidden;
+  white-space: nowrap;
+  animation:
+    typePrompt 2.7s steps(30, end) both,
+    blinkCursor 900ms step-end infinite;
+}
+
+.landingHeader h1 strong {
+  color: #e1944e;
+  font-size: 1.12em;
+}
+
+@keyframes typePrompt {
+  from {
+    width: 0;
+  }
+
+  to {
+    width: 30ch;
+  }
+}
+
+@keyframes blinkCursor {
+  50% {
+    border-color: transparent;
+  }
+}
+
+.landingForm {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  max-width: 470px;
+  place-self: center;
+  display: grid;
+  gap: 28px;
+}
+
+.landingForm input {
+  width: 100%;
+  height: 72px;
+  border: 2px solid rgb(255 255 255 / 18%);
+  border-radius: 10px;
+  outline: 0;
+  padding: 0 30px;
+  background: rgb(3 4 5 / 76%);
+  color: var(--text);
+  font-size: 25px;
+  font-weight: 650;
+}
+
+.landingForm input::placeholder {
+  color: #8a8a91;
+}
+
+.landingForm input:focus {
+  border-color: #e1944e;
+  background: rgb(7 8 9 / 86%);
+}
+
+.accessError {
+  margin: -12px 0 -8px;
+  color: #ff8c8c;
+  font-size: 14px;
+  font-weight: 750;
+}
+
+.landingForm button {
+  height: 56px;
+  border-radius: 10px;
+  background: #e1944e;
+  color: #08090a;
+  font-size: 17px;
+  font-weight: 850;
+}
+
+.landingForm button:hover:not(:disabled) {
+  background: #f0aa61;
+}
+
+@media (max-width: 560px) {
+  .landingPage {
+    padding: 16px;
+  }
+
+  .landingPanel {
+    width: calc(100vw - 32px);
+    padding: 22px;
+  }
+
+  .landingForm {
+    max-width: none;
+    justify-self: stretch;
+  }
+
+  .landingForm input {
+    min-width: 0;
+    padding: 0 18px;
+    font-size: 20px;
+  }
+}
+
 .sidebar {
   min-height: 100vh;
-  padding: 14px;
+  padding: 16px 16px 18px;
   display: grid;
-  grid-template-rows: auto auto auto 1fr auto;
-  gap: 14px;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  gap: 18px;
   background: var(--sidebar);
   border-right: 1px solid var(--line);
+}
+
+.sidebarTopBar {
+  min-height: 58px;
+  display: flex;
+  justify-content: flex-end;
+  align-items: flex-start;
+}
+
+.sidebarIconButton {
+  width: 44px;
+  height: 44px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  background: transparent;
+  color: var(--muted);
+}
+
+.sidebarIconButton:hover {
+  background: var(--panel);
+  color: var(--text);
+}
+
+.sidebarQuickActions {
+  display: grid;
+  gap: 8px;
+}
+
+.newChatButton,
+.launchButton {
+  width: 100%;
+  min-height: 56px;
+  padding: 0 16px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  font-size: 18px;
+  font-weight: 750;
+  line-height: 1;
+}
+
+.newChatButton {
+  background: var(--panel);
+}
+
+.newChatButton:hover:not(:disabled) {
+  background: #303030;
+}
+
+.launchButton:hover {
+  background: #1f1f1f;
+}
+
+.userDropdown {
+  position: relative;
 }
 
 .brandRow {
@@ -77,8 +355,7 @@ input:disabled {
 }
 
 .brandButton,
-.sidebarAction,
-.workspaceItem,
+.chatHistoryItem,
 .refreshButton,
 .squareButton,
 .createButton,
@@ -87,12 +364,29 @@ input:disabled {
 }
 
 .brandButton {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
+  min-width: 0;
   color: var(--text);
   font-size: 17px;
   font-weight: 750;
+}
+
+.statusDot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #ec5f67;
+}
+
+.statusDot.active {
+  background: #55d681;
+}
+
+.statusDot.stagnant {
+  background: #f2c879;
+}
+
+.statusDot.inactive {
+  background: #ec5f67;
 }
 
 .createButton {
@@ -113,34 +407,12 @@ input:disabled {
 }
 
 .createButton:hover,
-.sidebarAction:hover,
-.workspaceItem:hover,
 .refreshButton:hover:not(:disabled),
 .squareButton:hover,
 .composer button:hover:not(:disabled) {
   background: var(--panel-hover);
 }
 
-.sidebarAction {
-  height: 42px;
-  padding: 0 12px;
-  border-radius: 8px;
-  display: inline-flex;
-  align-items: center;
-  gap: 11px;
-  color: var(--muted);
-  text-align: left;
-  font-size: 15px;
-  font-weight: 650;
-}
-
-.workspaceSection {
-  min-height: 0;
-  overflow: auto;
-  padding-top: 12px;
-}
-
-.workspaceSection h2,
 .sessionBox h2 {
   margin: 0 0 10px;
   color: var(--dim);
@@ -150,36 +422,57 @@ input:disabled {
   text-transform: uppercase;
 }
 
-.workspaceList {
-  display: grid;
-  gap: 3px;
+.chatHistory {
+  min-height: 0;
+  overflow: auto;
+  padding-top: 18px;
 }
 
-.workspaceItem {
-  width: 100%;
-  min-height: 46px;
-  padding: 8px 12px;
-  border-radius: 8px;
+.chatHistory h2 {
+  margin: 0 0 14px;
+  color: var(--dim);
+  font-size: 12px;
+  font-weight: 850;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.chatHistoryGroup {
+  margin-bottom: 34px;
+}
+
+.chatHistoryList {
   display: grid;
-  gap: 2px;
+  gap: 12px;
+}
+
+.chatHistoryItem {
+  width: 100%;
+  min-height: 40px;
+  padding: 0;
+  border-radius: 4px;
+  display: block;
+  color: #a7a7aa;
   text-align: left;
 }
 
-.workspaceItem.active {
-  background: var(--panel);
-}
-
-.workspaceItem span {
+.chatHistoryItem:hover,
+.chatHistoryItem.active {
+  background: transparent;
   color: var(--text);
-  font-size: 15px;
-  font-weight: 700;
-  overflow-wrap: anywhere;
 }
 
-.workspaceItem small {
-  color: var(--muted);
-  font-size: 13px;
+.chatHistoryItem span {
+  display: block;
+  color: inherit;
+  font-size: 16px;
   font-weight: 650;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
 }
 
 .emptyList {
@@ -189,10 +482,10 @@ input:disabled {
 }
 
 .sessionBox {
-  padding-top: 14px;
+  padding-top: 16px;
   border-top: 1px solid var(--line);
   display: grid;
-  gap: 5px;
+  gap: 7px;
 }
 
 .sessionBox strong {
@@ -203,6 +496,25 @@ input:disabled {
 .sessionBox span {
   color: var(--muted);
   font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.sessionBox button {
+  width: 100%;
+  height: 38px;
+  margin-top: 10px;
+  border: 1px solid rgb(255 255 255 / 14%);
+  border-radius: 8px;
+  background: rgb(255 255 255 / 7%);
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 750;
+  text-align: center;
+}
+
+.sessionBox button:hover {
+  border-color: rgb(255 255 255 / 22%);
+  background: rgb(255 255 255 / 11%);
 }
 
 .chatShell {
@@ -462,6 +774,290 @@ input:disabled {
   background: #ffffff;
 }
 
+.adminPage {
+  position: relative;
+  min-height: 100vh;
+  padding: clamp(24px, 5vw, 64px);
+  display: grid;
+  place-items: center;
+  background:
+    linear-gradient(rgb(255 255 255 / 3%) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(255 255 255 / 3%) 1px, transparent 1px),
+    var(--bg);
+  background-size:
+    56px 56px,
+    56px 56px,
+    auto;
+  color: var(--text);
+  overflow: hidden;
+}
+
+.adminPage::before {
+  position: absolute;
+  inset: -28%;
+  content: "";
+  background:
+    radial-gradient(circle at 16% 74%, rgb(220 121 55 / 22%), transparent 25%),
+    radial-gradient(circle at 78% 18%, rgb(70 128 148 / 20%), transparent 28%),
+    radial-gradient(circle at 44% 42%, rgb(225 148 78 / 10%), transparent 30%);
+  filter: blur(2px);
+  pointer-events: none;
+}
+
+.adminPanel {
+  position: relative;
+  z-index: 1;
+  width: min(1080px, 100%);
+  min-height: min(640px, calc(100vh - 72px));
+  padding: clamp(24px, 3vw, 36px);
+  border: 1px solid rgb(225 148 78 / 28%);
+  border-radius: 12px;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 24px;
+  background:
+    radial-gradient(circle at 100% 0%, rgb(225 148 78 / 12%), transparent 34%),
+    radial-gradient(circle at 0% 100%, rgb(70 128 148 / 12%), transparent 34%),
+    linear-gradient(rgb(255 255 255 / 3%) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(255 255 255 / 3%) 1px, transparent 1px),
+    rgb(7 8 9 / 88%);
+  background-size:
+    auto,
+    auto,
+    42px 42px,
+    42px 42px,
+    auto;
+  box-shadow: 0 24px 90px rgb(0 0 0 / 45%);
+  overflow: hidden;
+}
+
+.adminPanel::before,
+.adminPanel::after {
+  position: absolute;
+  width: 44px;
+  height: 44px;
+  content: "";
+  pointer-events: none;
+}
+
+.adminPanel::before {
+  top: 22px;
+  left: 22px;
+  border-top: 3px solid #e1944e;
+  border-left: 3px solid #e1944e;
+}
+
+.adminPanel::after {
+  right: 22px;
+  bottom: 22px;
+  border-right: 3px solid #e1944e;
+  border-bottom: 3px solid #e1944e;
+}
+
+.adminTopBar {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.adminTopActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.accessCodeControl {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.adminUserRow select {
+  height: 44px;
+  border: 1px solid rgb(255 255 255 / 16%);
+  border-radius: 8px;
+  background: rgb(24 24 27 / 86%);
+  color: var(--text);
+  font-weight: 800;
+  text-align: center;
+  outline: 0;
+}
+
+.adminUserRow select:focus {
+  border-color: #e1944e;
+}
+
+.accessCodeControl {
+  height: 44px;
+  padding: 0 8px 0 18px;
+  border: 1px solid rgb(255 255 255 / 16%);
+  border-radius: 8px;
+  background: rgb(24 24 27 / 86%);
+}
+
+.adminNavButton {
+  height: 44px;
+  min-width: 130px;
+  padding: 0 18px;
+  border: 1px solid rgb(255 255 255 / 16%);
+  border-radius: 8px;
+  background: rgb(24 24 27 / 86%);
+  color: var(--text);
+  font-weight: 800;
+}
+
+.adminNavButton:hover {
+  background: var(--panel-hover);
+}
+
+.accessCodeControl code {
+  min-width: 120px;
+  color: var(--text);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 16px;
+  font-weight: 800;
+  text-align: center;
+}
+
+.staticAccessCode {
+  padding-right: 18px;
+}
+
+.staticAccessCode span {
+  color: var(--muted);
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.accessCodeControl button {
+  width: 32px;
+  height: 32px;
+  border-radius: 7px;
+  display: grid;
+  place-items: center;
+  background: transparent;
+  color: var(--muted);
+}
+
+.accessCodeControl button:hover {
+  background: var(--panel-hover);
+  color: var(--text);
+}
+
+.adminTableShell {
+  position: relative;
+  z-index: 1;
+  min-height: 0;
+  padding: 16px 20px 24px;
+  border: 1px solid rgb(255 255 255 / 12%);
+  border-radius: 12px;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  background: rgb(6 7 8 / 72%);
+  overflow: hidden;
+}
+
+.adminTableHeader,
+.adminUserRow {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.25fr) minmax(250px, 1.55fr) 140px 110px 150px;
+  align-items: center;
+  gap: 18px;
+}
+
+.adminTableHeader {
+  min-height: 52px;
+  padding: 0 14px;
+  border: 1px solid rgb(255 255 255 / 14%);
+  border-radius: 9px;
+  color: #f3eedf;
+  font-size: 17px;
+  font-weight: 850;
+  background: rgb(24 24 27 / 86%);
+}
+
+.adminTableHeader button,
+.adminUserRow button {
+  height: 42px;
+  border: 1px solid rgb(255 255 255 / 16%);
+  border-radius: 8px;
+  background: rgb(24 24 27 / 86%);
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.adminTableHeader button:hover,
+.adminUserRow button:hover {
+  background: var(--panel-hover);
+}
+
+.adminUserList {
+  min-height: 0;
+  padding: 8px 14px 0;
+  overflow: auto;
+}
+
+.adminUserRow {
+  min-height: 72px;
+  border-bottom: 1px solid rgb(255 255 255 / 12%);
+}
+
+.adminUserRow strong,
+.adminUserRow span:not(.adminStatusDot) {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.adminUserRow strong {
+  font-size: 17px;
+  font-weight: 800;
+}
+
+.adminUserRow span:not(.adminStatusDot) {
+  color: var(--muted);
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.adminError {
+  margin: -10px 0 0;
+  color: #ff8c8c;
+  font-size: 14px;
+  font-weight: 750;
+}
+
+.adminUserRow select {
+  width: 128px;
+  justify-self: center;
+}
+
+.adminStatusDot {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgb(0 0 0 / 14%);
+  border-radius: 50%;
+  justify-self: center;
+  display: inline-block;
+  flex: 0 0 auto;
+}
+
+.adminStatusDot.active {
+  background: #55d681;
+}
+
+.adminStatusDot.inactive {
+  background: #ec5f67;
+}
+
+.adminStatusDot.idle,
+.adminStatusDot.stagnant {
+  background: #f2c879;
+}
+
 @media (max-width: 860px) {
   .appShell {
     grid-template-columns: 1fr;
@@ -475,6 +1071,26 @@ input:disabled {
 
   .chatShell {
     min-height: 70vh;
+  }
+
+  .adminPanel {
+    min-height: auto;
+    padding: 20px;
+    gap: 20px;
+  }
+
+  .landingPanel {
+    min-height: min(540px, calc(100vh - 48px));
+  }
+
+  .adminTableShell {
+    padding: 12px;
+    overflow-x: auto;
+  }
+
+  .adminTableHeader,
+  .adminUserRow {
+    min-width: 850px;
   }
 }
 
@@ -497,5 +1113,65 @@ input:disabled {
 
   .emptyChat h2 {
     font-size: 32px;
+  }
+
+  .adminPage {
+    padding: 12px;
+    place-items: start center;
+  }
+
+  .landingPage {
+    padding: 16px;
+  }
+
+  .landingPanel {
+    min-height: calc(100vh - 32px);
+    padding: 22px;
+    border-radius: 16px;
+  }
+
+  .landingForm {
+    gap: 18px;
+  }
+
+  .landingForm input {
+    height: 60px;
+    padding: 0 18px;
+    border-radius: 12px;
+    font-size: 20px;
+  }
+
+  .adminPanel {
+    padding: 16px;
+    border-radius: 12px;
+    gap: 16px;
+  }
+
+  .adminTopBar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .adminTopActions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .accessCodeControl {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .adminNavButton {
+    width: 100%;
+  }
+
+  .accessCodeControl {
+    height: 44px;
+  }
+
+  .adminTableHeader,
+  .adminUserRow {
+    min-width: 820px;
   }
 }

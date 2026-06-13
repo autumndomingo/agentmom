@@ -1,12 +1,10 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
-  ChevronDown,
-  ExternalLink,
+  Edit3,
   PanelLeft,
   Plus,
   RefreshCcw,
-  Search,
   Send,
   Sparkles,
   Users,
@@ -14,52 +12,297 @@ import {
 import './styles.css';
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? '/api';
+const CHAT_STORAGE_KEY = 'agent-mom-chats';
+const USER_SESSION_KEY = 'agent-mom-user-session';
 
-function App() {
-  const [vms, setVms] = useState([]);
-  const [selectedName, setSelectedName] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [showCreate, setShowCreate] = useState(false);
-  const [createForm, setCreateForm] = useState({ userName: '', botName: '' });
-  const [chatInput, setChatInput] = useState('');
-  const [messages, setMessages] = useState([]);
-
-  const selectedVm = useMemo(
-    () => vms.find((vm) => vm.name === selectedName) ?? vms[0],
-    [selectedName, vms],
-  );
+function Root() {
+  const [userSession, setUserSession] = useState(null);
+  const [checkingSession, setCheckingSession] = useState(true);
 
   useEffect(() => {
-    refresh().catch(() => {});
+    const stored = loadUserSession();
+    if (!stored) {
+      setCheckingSession(false);
+      return;
+    }
+
+    validateSession(stored)
+      .then((session) => {
+        setUserSession(session);
+      })
+      .catch(() => {
+        window.localStorage.removeItem(USER_SESSION_KEY);
+      })
+      .finally(() => {
+        setCheckingSession(false);
+      });
   }, []);
 
-  async function request(path, options = {}) {
+  useEffect(() => {
+    if (!userSession?.token) return undefined;
+
+    let cancelled = false;
+    const checkSession = async () => {
+      try {
+        const refreshedSession = await validateSession(userSession);
+        if (!cancelled) {
+          setUserSession((current) =>
+            current?.token === userSession.token
+              ? { ...current, email: refreshedSession.email, role: refreshedSession.role }
+              : current,
+          );
+        }
+      } catch {
+        window.localStorage.removeItem(USER_SESSION_KEY);
+        if (!cancelled) {
+          setUserSession(null);
+        }
+      }
+    };
+
+    const interval = window.setInterval(checkSession, 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [userSession?.token]);
+
+  function enterUserFlow(session) {
+    window.localStorage.setItem(USER_SESSION_KEY, JSON.stringify(session));
+    setUserSession(session);
+  }
+
+  if (checkingSession) {
+    return (
+      <main className="landingPage">
+        <section className="landingPanel" aria-label="User access">
+          <BuildersTableBrand />
+        </section>
+      </main>
+    );
+  }
+
+  if (!userSession) {
+    return <LandingPage onSubmit={enterUserFlow} />;
+  }
+
+  if (window.location.pathname === '/admin') {
+    if (userSession.role !== 'ADMN') {
+      window.history.replaceState({}, '', '/');
+    } else {
+      return <AdminPage userSession={userSession} />;
+    }
+  }
+
+  if (!userSession.userName || !userSession.agentName) {
+    return <SetupPage userSession={userSession} onSubmit={enterUserFlow} />;
+  }
+
+  return <App userSession={userSession} />;
+}
+
+function LandingPage({ onSubmit }) {
+  const [form, setForm] = useState({ email: '', accessCode: '' });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  async function submitAccess(event) {
+    event.preventDefault();
+    const email = form.email.trim();
+    const accessCode = form.accessCode.trim();
+    if (!email || !accessCode) return;
+
     setBusy(true);
+    setError('');
     try {
-      const response = await fetch(`${API_BASE}${path}`, {
+      const response = await fetch(`${API_BASE}/auth/login`, {
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        ...options,
+        body: JSON.stringify({ email, access_code: accessCode }),
       });
       const data = await response.json();
       if (!response.ok) {
         throw data;
       }
-      return data;
+      onSubmit({
+        email: data.email,
+        role: data.role,
+        token: data.token,
+        startedAt: Date.now(),
+      });
+    } catch (accessError) {
+      setError(accessError?.error ?? 'Access denied.');
     } finally {
       setBusy(false);
     }
   }
 
+  return (
+    <main className="landingPage">
+      <section className="landingPanel" aria-label="User access">
+        <BuildersTableBrand />
+
+        <form className="landingForm" onSubmit={submitAccess}>
+          <input
+            type="email"
+            value={form.email}
+            onChange={(event) =>
+              setForm((current) => ({ ...current, email: event.target.value }))
+            }
+            placeholder="Email"
+            autoComplete="email"
+            autoFocus
+            required
+          />
+          <input
+            value={form.accessCode}
+            onChange={(event) =>
+              setForm((current) => ({ ...current, accessCode: event.target.value }))
+            }
+            placeholder="Access Code"
+            autoComplete="one-time-code"
+            required
+          />
+          {error && <p className="accessError">{error}</p>}
+          <button disabled={busy || !form.email.trim() || !form.accessCode.trim()}>
+            {busy ? 'Checking...' : 'Continue'}
+          </button>
+        </form>
+      </section>
+    </main>
+  );
+}
+
+function BuildersTableBrand() {
+  return (
+    <div className="landingHeader">
+      <h1>
+        <span className="terminalPrompt" aria-label="Let's start building with...">
+          <span className="typedPrompt" aria-hidden="true">
+            $ Let's start building with...
+          </span>
+        </span>
+        <strong>Agent Mom</strong>
+      </h1>
+    </div>
+  );
+}
+
+async function validateSession(session) {
+  if (!session.token) {
+    throw new Error('Missing session token.');
+  }
+  const response = await fetch(`${API_BASE}/auth/session`, {
+    headers: authHeaders(session),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    throw data;
+  }
+  return {
+    ...session,
+    email: data.email,
+    role: data.role,
+  };
+}
+
+function SetupPage({ userSession, onSubmit }) {
+  const [form, setForm] = useState({
+    userName: userSession.userName ?? '',
+    agentName: userSession.agentName ?? '',
+  });
+
+  function submitSetup(event) {
+    event.preventDefault();
+    const userName = form.userName.trim();
+    const agentName = form.agentName.trim();
+    if (!userName || !agentName) return;
+
+    onSubmit({
+      ...userSession,
+      userName,
+      agentName,
+      completedSetupAt: Date.now(),
+    });
+  }
+
+  return (
+    <main className="landingPage">
+      <section className="landingPanel setupPanel" aria-label="Create your workspace">
+        <BuildersTableBrand />
+
+        <form className="landingForm setupForm" onSubmit={submitSetup}>
+          <input
+            value={form.userName}
+            onChange={(event) =>
+              setForm((current) => ({ ...current, userName: event.target.value }))
+            }
+            placeholder="Name"
+            autoComplete="name"
+            autoFocus
+            required
+          />
+          <input
+            value={form.agentName}
+            onChange={(event) =>
+              setForm((current) => ({ ...current, agentName: event.target.value }))
+            }
+            placeholder="Agent name"
+            required
+          />
+          <button disabled={!form.userName.trim() || !form.agentName.trim()}>Continue</button>
+        </form>
+      </section>
+    </main>
+  );
+}
+
+function App({ userSession }) {
+  const currentUserId = userIdentity(userSession.email);
+  const [vms, setVms] = useState(() => [
+    {
+      id: currentUserId,
+      email: userSession.email,
+      name: userSession.agentName,
+      userName: userSession.userName,
+      status: 'paused',
+    },
+  ]);
+  const [selectedUserId, setSelectedUserId] = useState(currentUserId);
+  const [busy, setBusy] = useState(false);
+  const [showCreate, setShowCreate] = useState(false);
+  const [createForm, setCreateForm] = useState({ userName: userSession.userName, botName: '' });
+  const [chatInput, setChatInput] = useState('');
+  const [chatsByUser, setChatsByUser] = useState(() => loadStoredChats());
+  const [activeChatByUser, setActiveChatByUser] = useState({});
+  const [now, setNow] = useState(() => Date.now());
+
+  const selectedVm = useMemo(
+    () => vms.find((vm) => vm.id === selectedUserId) ?? vms[0],
+    [selectedUserId, vms],
+  );
+  const selectedKey = selectedVm?.id;
+  const selectedChats = selectedKey ? chatsByUser[selectedKey] ?? [] : [];
+  const activeChatId = selectedKey
+    ? activeChatByUser[selectedKey] ?? selectedChats[0]?.id
+    : undefined;
+  const activeChat = selectedChats.find((chat) => chat.id === activeChatId);
+  const chatGroups = groupChatsByAge(selectedChats, now);
+  const messages = activeChat?.messages ?? [];
+
+  useEffect(() => {
+    const interval = window.setInterval(() => setNow(Date.now()), 30_000);
+    return () => window.clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(chatsByUser));
+  }, [chatsByUser]);
+
   async function refresh() {
-    const nextVms = normalizeVmList(await request('/vms'));
-    setVms(nextVms);
-    if (nextVms.length && !nextVms.some((vm) => vm.name === selectedName)) {
-      setSelectedName(nextVms[0].name);
-    }
-    if (!nextVms.length) {
-      setSelectedName('');
-    }
-    return nextVms;
+    setVms((current) =>
+      current.map((vm) => (vm.id === selectedUserId ? { ...vm, status: 'paused' } : vm)),
+    );
   }
 
   function openAdminPage() {
@@ -71,16 +314,22 @@ function App() {
     const name = createForm.botName.trim();
     if (!name) return;
 
-    await request('/vms', {
-      method: 'POST',
-      body: JSON.stringify({ name, replace: true }),
+    setVms((current) => {
+      const existing = current.find((vm) => vm.id === currentUserId);
+      const updated = {
+        ...(existing ?? {}),
+        id: currentUserId,
+        email: userSession.email,
+        name,
+        userName: createForm.userName.trim() || userSession.userName,
+        status: existing?.status ?? 'paused',
+      };
+      return [updated, ...current.filter((vm) => vm.id !== currentUserId)];
     });
-    const nextVms = await refresh();
-    const createdWorkspace = findWorkspaceBySubmittedName(nextVms, name);
-    setCreateForm({ userName: '', botName: '' });
+    setCreateForm({ userName: userSession.userName, botName: '' });
     setShowCreate(false);
-    setSelectedName(createdWorkspace?.name ?? nextVms[0]?.name ?? '');
-    setMessages([]);
+    setSelectedUserId(currentUserId);
+    startNewChat(currentUserId);
   }
 
   async function sendMessage(event) {
@@ -91,101 +340,121 @@ function App() {
     if (!prompt) return;
 
     setChatInput('');
-    setMessages((current) => [...current, { role: 'user', content: prompt }]);
+    const chatId = ensureChatForPrompt(selectedVm.id, prompt);
+    appendMessage(selectedVm.id, chatId, { role: 'user', content: prompt });
 
-    try {
-      const result = await request(`/vms/${encodeURIComponent(selectedVm.name)}/codex`, {
-        method: 'POST',
-        body: JSON.stringify({ prompt }),
-      });
-      setMessages((current) => [...current, { role: 'assistant', content: renderResult(result) }]);
-      await refresh();
-    } catch (error) {
-      setMessages((current) => [...current, { role: 'assistant', content: formatError(error) }]);
-    }
+    appendMessage(selectedVm.id, chatId, {
+      role: 'assistant',
+      content: 'This prototype is connected through the local onboarding flow. Backend chat wiring can be added after the screen flow is finalized.',
+    });
   }
 
-  async function launchOpencode() {
+  function startNewChat(id = selectedVm?.id) {
+    if (!id) return;
+    const chat = {
+      id: window.crypto?.randomUUID?.() ?? `${Date.now()}`,
+      title: 'New chat',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      messages: [],
+    };
+    setChatsByUser((current) => ({
+      ...current,
+      [id]: [chat, ...(current[id] ?? [])],
+    }));
+    setActiveChatByUser((current) => ({ ...current, [id]: chat.id }));
+  }
+
+  function selectChat(chatId) {
     if (!selectedVm) return;
-
-    try {
-      const result = await request(`/vms/${encodeURIComponent(selectedVm.name)}/opencode`, {
-        method: 'POST',
-      });
-      const url = launchUrlFromResult(result);
-      if (url) {
-        window.open(url, '_blank', 'noopener,noreferrer');
-      }
-      await refresh();
-    } catch (error) {
-      setMessages((current) => [...current, { role: 'assistant', content: formatError(error) }]);
-    }
+    setActiveChatByUser((current) => ({ ...current, [selectedVm.id]: chatId }));
   }
 
-  async function launchHermes() {
-    if (!selectedVm) return;
+  function ensureChatForPrompt(id, prompt) {
+    const existing = activeChatByUser[id] ?? chatsByUser[id]?.[0]?.id;
+    if (existing) return existing;
 
-    try {
-      const result = await request(`/vms/${encodeURIComponent(selectedVm.name)}/hermes-ui`, {
-        method: 'POST',
-      });
-      const url = launchUrlFromResult(result);
-      if (url) {
-        window.open(url, '_blank', 'noopener,noreferrer');
-      }
-      await refresh();
-    } catch (error) {
-      setMessages((current) => [...current, { role: 'assistant', content: formatError(error) }]);
-    }
+    const chat = {
+      id: window.crypto?.randomUUID?.() ?? `${Date.now()}`,
+      title: chatTitle(prompt),
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      messages: [],
+    };
+    setChatsByUser((current) => ({
+      ...current,
+      [id]: [chat, ...(current[id] ?? [])],
+    }));
+    setActiveChatByUser((current) => ({ ...current, [id]: chat.id }));
+    return chat.id;
   }
 
-  function selectWorkspace(name) {
-    setSelectedName(name);
-    setMessages([]);
+  function appendMessage(id, chatId, message) {
+    setChatsByUser((current) => ({
+      ...current,
+      [id]: (current[id] ?? []).map((chat) =>
+        chat.id === chatId
+          ? {
+              ...chat,
+              title:
+                chat.title === 'New chat' && message.role === 'user'
+                  ? chatTitle(message.content)
+                  : chat.title,
+              updatedAt: Date.now(),
+              messages: [...chat.messages, message],
+            }
+          : chat,
+      ),
+    }));
   }
 
   return (
     <main className="appShell">
       <aside className="sidebar">
-        <div className="brandRow">
-          <div className="brandMark">A</div>
-          <button className="brandButton">
-            Agent Mom
-            <ChevronDown size={16} />
+        <div className="userDropdown">
+          <div className="brandRow">
+            <div className="brandMark">A</div>
+            <div className="brandButton">Agent Mom</div>
+          </div>
+        </div>
+
+        <div className="sidebarQuickActions">
+          <button className="newChatButton" onClick={() => setShowCreate(true)}>
+            <Plus size={24} strokeWidth={2.25} />
+            Create
+          </button>
+
+          <button className="launchButton" onClick={() => startNewChat()} disabled={!selectedVm}>
+            <Edit3 size={24} strokeWidth={2.25} />
+            New chat
           </button>
         </div>
 
-        <button className="createButton" onClick={() => setShowCreate(true)}>
-          <Plus size={18} />
-          Create
-        </button>
-
-        <button className="sidebarAction">
-          <Search size={18} />
-          Search workspaces
-        </button>
-
-        <div className="workspaceSection">
-          <h2>Today</h2>
-          <div className="workspaceList">
-            {vms.map((vm) => (
-              <button
-                key={vm.name}
-                className={`workspaceItem ${selectedVm?.name === vm.name ? 'active' : ''}`}
-                onClick={() => selectWorkspace(vm.name)}
-              >
-                <span>{workspaceDisplayName(vm)}</span>
-                <small>{friendlyStatus(vm.status)}</small>
-              </button>
-            ))}
-            {!vms.length && <p className="emptyList">No workspaces yet.</p>}
-          </div>
+        <div className="chatHistory">
+          {chatGroups.map((group) => (
+            <section className="chatHistoryGroup" key={group.label}>
+              <h2>{group.label}</h2>
+              <div className="chatHistoryList">
+                {group.chats.map((chat) => (
+                  <button
+                    key={chat.id}
+                    className={`chatHistoryItem ${chat.id === activeChatId ? 'active' : ''}`}
+                    onClick={() => selectChat(chat.id)}
+                  >
+                    <span>{chat.title}</span>
+                  </button>
+                ))}
+              </div>
+            </section>
+          ))}
+          {!selectedVm && <p className="emptyList">Create a user to start chatting.</p>}
+          {selectedVm && !selectedChats.length && <p className="emptyList">New chats will appear here.</p>}
         </div>
 
         <div className="sessionBox">
           <h2>Session</h2>
           <strong>Local workspace</strong>
-          <span>Signed in on this machine.</span>
+          <span>{userSession.email}</span>
         </div>
       </aside>
 
@@ -195,7 +464,7 @@ function App() {
             <PanelLeft size={20} />
           </button>
           <div>
-            <h1>{selectedVm ? workspaceDisplayName(selectedVm) : 'Agent workspace'}</h1>
+            <h1>{selectedVm?.name ?? 'Agent workspace'}</h1>
             <p>{selectedVm ? friendlyStatus(selectedVm.status) : 'Create a workspace to begin.'}</p>
           </div>
           <div className="headerActions">
@@ -208,18 +477,6 @@ function App() {
             <button className="refreshButton" onClick={refresh} disabled={busy}>
               <RefreshCcw size={17} />
               Refresh
-            </button>
-            <button
-              className="refreshButton"
-              onClick={launchOpencode}
-              disabled={!selectedVm || busy}
-            >
-              <ExternalLink size={17} />
-              OpenCode
-            </button>
-            <button className="refreshButton" onClick={launchHermes} disabled={!selectedVm || busy}>
-              <ExternalLink size={17} />
-              Hermes
             </button>
           </div>
         </header>
@@ -268,28 +525,28 @@ function App() {
             onMouseDown={(event) => event.stopPropagation()}
           >
             <div>
-              <h2>Create your bot</h2>
-              <p>Name the bot you want to chat with.</p>
+              <h2>Create new user</h2>
+              <p>Name yourself and the agent you want to chat with.</p>
             </div>
             <label>
-              <span>Your name</span>
+              <span>Name</span>
               <input
                 value={createForm.userName}
                 onChange={(event) =>
                   setCreateForm((current) => ({ ...current, userName: event.target.value }))
                 }
-                placeholder="Your name"
+                placeholder="Name"
                 autoFocus
               />
             </label>
             <label>
-              <span>Bot name</span>
+              <span>Agent name</span>
               <input
                 value={createForm.botName}
                 onChange={(event) =>
                   setCreateForm((current) => ({ ...current, botName: event.target.value }))
                 }
-                placeholder="Bot name"
+                placeholder="Agent name"
                 required
               />
             </label>
@@ -311,6 +568,7 @@ function App() {
 function AdminPage({ userSession }) {
   const [users, setUsers] = useState([]);
   const [accessCodeStatus, setAccessCodeStatus] = useState('Generate code');
+  const [adminAccessCode, setAdminAccessCode] = useState('');
   const [adminError, setAdminError] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -347,6 +605,15 @@ function AdminPage({ userSession }) {
 
   useEffect(() => {
     loadUsers().catch((error) => setAdminError(formatError(error)));
+  }, [userSession?.token]);
+
+  useEffect(() => {
+    fetch(`${API_BASE}/auth/config`, {
+      headers: authHeaders(userSession),
+    })
+      .then((response) => response.json())
+      .then((data) => setAdminAccessCode(data.admin_access_code ?? ''))
+      .catch(() => setAdminAccessCode(''));
   }, [userSession?.token]);
 
   useEffect(() => {
@@ -531,6 +798,12 @@ function AdminPage({ userSession }) {
                 <RefreshCcw size={17} />
               </button>
             </div>
+            {adminAccessCode && (
+              <div className="accessCodeControl staticAccessCode" aria-label="Admin access code">
+                <span>Admin</span>
+                <code>{adminAccessCode}</code>
+              </div>
+            )}
           </div>
         </header>
 
@@ -587,37 +860,95 @@ function friendlyStatus(status) {
   return status;
 }
 
-function workspaceDisplayName(workspace) {
-  return workspace.display_name ?? workspace.displayName ?? workspace.name ?? 'Agent workspace';
+function adminStatusLabel(status) {
+  if (status === 'active') return 'Active';
+  if (status === 'idle') return 'Idle';
+  if (status === 'stagnant') return 'Stagnant';
+  return 'Inactive';
 }
 
-function normalizeVmList(data) {
-  if (Array.isArray(data)) return data;
-  if (Array.isArray(data?.vms)) return data.vms;
-  return [];
+function normalizeAdminUser(user) {
+  return {
+    ...user,
+    id: String(user.id),
+    status: userDisplayStatus(user),
+  };
 }
 
-function findWorkspaceBySubmittedName(workspaces, submittedName) {
-  return workspaces.find((workspace) =>
-    [workspace.name, workspace.slug, workspace.display_name, workspace.displayName].includes(
-      submittedName,
-    ),
-  );
+function userDisplayStatus(user) {
+  if (user.status === 'inactive' || !user.last_active_at) return 'inactive';
+  const inactiveAfter = 15 * 60;
+  const stagnantAfter = 5 * 60;
+  const ageSeconds = Math.max(0, Math.floor(Date.now() / 1000) - user.last_active_at);
+  if (ageSeconds >= inactiveAfter) return 'inactive';
+  if (ageSeconds >= stagnantAfter) return 'stagnant';
+  return 'active';
 }
 
-function launchUrlFromResult(result) {
-  const rawUrl = result.stdout?.trim().split(/\s+/).at(-1);
-  if (!rawUrl) return '';
+function chatTitle(prompt) {
+  const title = prompt.trim().replace(/\s+/g, ' ');
+  return title.length > 34 ? `${title.slice(0, 34)}...` : title || 'New chat';
+}
 
-  try {
-    const url = new URL(rawUrl, window.location.href);
-    if (url.hostname === 'agentmom.xyz' && url.pathname.startsWith('/tunnels/')) {
-      return `${url.pathname}${url.search}${url.hash}`;
+function groupChatsByAge(chats, now) {
+  const startOfToday = new Date(now);
+  startOfToday.setHours(0, 0, 0, 0);
+
+  const startOfThisWeek = new Date(startOfToday);
+  startOfThisWeek.setDate(startOfThisWeek.getDate() - 6);
+
+  const groups = [
+    { label: 'Today', chats: [] },
+    { label: 'This week', chats: [] },
+    { label: 'Older', chats: [] },
+  ];
+
+  chats.forEach((chat) => {
+    const timestamp = chat.updatedAt ?? chat.createdAt ?? 0;
+    if (timestamp >= startOfToday.getTime()) {
+      groups[0].chats.push(chat);
+    } else if (timestamp >= startOfThisWeek.getTime()) {
+      groups[1].chats.push(chat);
+    } else {
+      groups[2].chats.push(chat);
     }
-    return url.href;
+  });
+
+  return groups.filter((group) => group.chats.length);
+}
+
+function loadStoredChats() {
+  try {
+    const stored = window.localStorage.getItem(CHAT_STORAGE_KEY);
+    if (!stored) return {};
+    const parsed = JSON.parse(stored);
+    return parsed && typeof parsed === 'object' ? parsed : {};
   } catch {
-    return rawUrl;
+    return {};
   }
+}
+
+function loadUserSession() {
+  try {
+    const stored = window.localStorage.getItem(USER_SESSION_KEY);
+    if (!stored) return null;
+    const parsed = JSON.parse(stored);
+    return parsed?.email && parsed?.token ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function userIdentity(email) {
+  return String(email ?? '').trim().toLowerCase();
+}
+
+function sameEmail(left, right) {
+  return userIdentity(left) === userIdentity(right);
+}
+
+function authHeaders(session = loadUserSession()) {
+  return session?.token ? { Authorization: `Bearer ${session.token}` } : {};
 }
 
 function renderResult(result) {
@@ -632,4 +963,4 @@ function formatError(error) {
   return error?.error ?? String(error);
 }
 
-createRoot(document.getElementById('root')).render(<App />);
+createRoot(document.getElementById('root')).render(<Root />);
