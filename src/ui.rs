@@ -105,6 +105,15 @@ pub(crate) fn api_routes() -> Router<Arc<ApiState>> {
         .route("/api/vms/{name}/hermes", post(hermes_vm))
         .route("/api/vms/{name}/hermes-ui", post(hermes_ui_vm))
         .route("/api/vms/{name}/opencode", post(opencode_vm))
+        .route("/api/workspaces/{name}/start", post(start_vm))
+        .route("/api/workspaces/{name}/stop", post(stop_vm))
+        .route("/api/workspaces/{name}/remove", post(remove_vm))
+        .route("/api/workspaces/{name}/doctor", post(doctor_vm))
+        .route("/api/workspaces/{name}/exec", post(exec_vm))
+        .route("/api/workspaces/{name}/codex", post(codex_vm))
+        .route("/api/workspaces/{name}/hermes", post(hermes_vm))
+        .route("/api/workspaces/{name}/hermes-ui", post(hermes_ui_vm))
+        .route("/api/workspaces/{name}/opencode", post(opencode_vm))
 }
 
 pub(crate) fn serve_assets(app: Router) -> Router {

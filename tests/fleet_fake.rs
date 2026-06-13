@@ -157,8 +157,11 @@ async fn fake_worker_start_stop_backup_jobs_update_central_state() -> Result<()>
     wait_for_job_status(&fleet.api_url, &create, "succeeded").await?;
     wait_for_workspace_status(&fleet.api_url, "alice", "running").await?;
 
-    let stop = create_job(&fleet.api_url, "alice", "stop").await?;
-    wait_for_job_status(&fleet.api_url, &stop, "succeeded").await?;
+    reqwest::Client::new()
+        .post(format!("{}/api/workspaces/alice/stop", fleet.api_url))
+        .send()
+        .await?
+        .error_for_status()?;
     wait_for_workspace_status(&fleet.api_url, "alice", "stopped").await?;
     assert_eq!(
         std::fs::read_to_string(node.msb_home.path().join("fake/alice/state"))?,
@@ -918,7 +921,7 @@ async fn service_open_routes_to_assigned_worker_url() -> Result<()> {
     let cookie = admin_cookie(&fleet.api_url).await?;
 
     let result = reqwest::Client::new()
-        .post(format!("{}/api/vms/svc/opencode", fleet.api_url))
+        .post(format!("{}/api/workspaces/svc/opencode", fleet.api_url))
         .header(reqwest::header::COOKIE, &cookie)
         .send()
         .await?
