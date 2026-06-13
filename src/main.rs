@@ -35,11 +35,7 @@ use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 const IMAGE: &str = "alpine";
 const LABEL_MANAGED: &str = "mom.managed";
 const LABEL_VERSION: &str = "mom.version";
-const GUEST_CODEX_HOME: &str = "/root/.codex";
 const GUEST_HERMES_HOME: &str = "/root/.hermes-agent";
-const GUEST_OPENCODE_DATA_HOME: &str = "/root/.local/share/opencode";
-const GUEST_OPENCODE_CONFIG_HOME: &str = "/root/.config/opencode";
-const OPENCODE_GUEST_PORT: u16 = 4096;
 const HERMES_GUEST_PORT: u16 = 9119;
 const BASE_BUILDER_NAME: &str = "mom-base-builder";
 const BASE_DOCTOR_NAME: &str = "mom-base-doctor";
@@ -152,19 +148,13 @@ enum WorkspaceCommand {
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
-    /// Run Codex in a workspace VM and update its activity timestamp.
-    Codex {
-        name: String,
-        #[arg(required = true)]
-        prompt: Vec<String>,
-    },
     /// Run Hermes in a workspace VM and update its activity timestamp.
     Hermes {
         name: String,
         #[arg(last = true)]
         args: Vec<String>,
     },
-    /// Re-apply Codex/Hermes/proxy configuration to an existing workspace VM.
+    /// Re-apply Hermes/proxy configuration to an existing workspace VM.
     RefreshConfig { name: String },
     /// Verify proxy-mode credentials and egress in a workspace VM.
     ProxySmoke { name: String },
@@ -631,12 +621,6 @@ async fn workspace_command(command: WorkspaceCommand) -> Result<()> {
             workspace_touch(&workspace.name)?;
             let sandbox = workspace_running_sandbox(&workspace).await?;
             run_guest_command(&sandbox, command).await
-        }
-        WorkspaceCommand::Codex { name, prompt } => {
-            let workspace = workspace_get(&name)?;
-            workspace_touch(&workspace.name)?;
-            let sandbox = workspace_running_sandbox(&workspace).await?;
-            run_codex(&sandbox, &prompt.join(" ")).await
         }
         WorkspaceCommand::Hermes { name, args } => {
             let workspace = workspace_get(&name)?;
@@ -1364,74 +1348,6 @@ async fn checked_shell(sandbox: &Sandbox, script: &str) -> Result<()> {
     Ok(())
 }
 
-fn codex_auth_as_hermes_auth(auth_path: &PathBuf) -> Result<String> {
-    let raw =
-        fs::read_to_string(&auth_path).with_context(|| format!("read {}", auth_path.display()))?;
-    let codex_auth: Value =
-        serde_json::from_str(&raw).with_context(|| format!("parse {}", auth_path.display()))?;
-    let tokens = codex_auth
-        .get("tokens")
-        .and_then(Value::as_object)
-        .ok_or_else(|| anyhow!("{} does not contain a tokens object", auth_path.display()))?;
-    let access_token = tokens
-        .get("access_token")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| anyhow!("{} is missing tokens.access_token", auth_path.display()))?;
-    let refresh_token = tokens
-        .get("refresh_token")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| anyhow!("{} is missing tokens.refresh_token", auth_path.display()))?;
-    let last_refresh = codex_auth
-        .get("last_refresh")
-        .and_then(Value::as_str)
-        .unwrap_or("2026-01-01T00:00:00Z");
-    let account_id = codex_auth
-        .get("account_id")
-        .and_then(Value::as_str)
-        .unwrap_or("codex-cli");
-
-    let payload = json!({
-        "version": 1,
-        "active_provider": "openai-codex",
-        "providers": {
-            "openai-codex": {
-                "tokens": tokens,
-                "last_refresh": last_refresh,
-                "auth_mode": "chatgpt",
-                "label": "Codex CLI"
-            }
-        },
-        "credential_pool": {
-            "openai-codex": [
-                {
-                    "id": format!("codex-cli-{account_id}"),
-                    "label": "Codex CLI",
-                    "source": "device_code",
-                    "auth_type": "oauth",
-                    "priority": 0,
-                    "access_token": access_token,
-                    "refresh_token": refresh_token,
-                    "last_refresh": last_refresh,
-                    "last_status": Value::Null,
-                    "last_status_at": Value::Null,
-                    "last_error_code": Value::Null,
-                    "last_error_reason": Value::Null,
-                    "last_error_message": Value::Null,
-                    "last_error_reset_at": Value::Null
-                }
-            ]
-        }
-    });
-
-    println!(
-        "will seed Hermes OpenAI Codex auth from {}",
-        auth_path.display()
-    );
-    Ok(serde_json::to_string_pretty(&payload)?)
-}
-
 async fn shutdown_signal() {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
@@ -1465,11 +1381,18 @@ struct ErrorBody {
 enum ApiError {
     Anyhow(anyhow::Error),
     Unauthorized(anyhow::Error),
+    Auth(auth::AuthError),
 }
 
 impl From<anyhow::Error> for ApiError {
     fn from(error: anyhow::Error) -> Self {
         Self::Anyhow(error)
+    }
+}
+
+impl From<auth::AuthError> for ApiError {
+    fn from(error: auth::AuthError) -> Self {
+        Self::Auth(error)
     }
 }
 
@@ -1490,6 +1413,7 @@ impl IntoResponse for ApiError {
                 }),
             )
                 .into_response(),
+            ApiError::Auth(error) => error.into_response(),
         }
     }
 }
@@ -1609,48 +1533,6 @@ fn now_epoch() -> Result<i64> {
         .context("system time does not fit in i64 seconds")?)
 }
 
-fn opencode_auth_from_file(auth_path: &PathBuf) -> Result<String> {
-    let raw =
-        fs::read_to_string(auth_path).with_context(|| format!("read {}", auth_path.display()))?;
-    let auth: Value =
-        serde_json::from_str(&raw).with_context(|| format!("parse {}", auth_path.display()))?;
-    let openai = auth
-        .get("openai")
-        .cloned()
-        .ok_or_else(|| anyhow!("{} is missing an openai auth entry", auth_path.display()))?;
-    let kind = openai
-        .get("type")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("{}.openai is missing type", auth_path.display()))?;
-
-    match kind {
-        "oauth" => {
-            for field in ["refresh", "access", "expires"] {
-                if openai.get(field).is_none() {
-                    return Err(anyhow!("{}.openai is missing {field}", auth_path.display()));
-                }
-            }
-        }
-        "api" => {
-            if openai.get("key").is_none() {
-                return Err(anyhow!("{}.openai is missing key", auth_path.display()));
-            }
-        }
-        other => {
-            return Err(anyhow!(
-                "{}.openai has unsupported auth type {other}",
-                auth_path.display()
-            ));
-        }
-    }
-
-    println!(
-        "will seed OpenCode OpenAI auth from {}",
-        auth_path.display()
-    );
-    Ok(serde_json::to_string_pretty(&json!({ "openai": openai }))?)
-}
-
 fn default_workspace_cpus() -> u8 {
     1
 }
@@ -1672,18 +1554,7 @@ fn default_workspace_backup_interval() -> u64 {
 }
 
 fn hermes_config_yaml(config: &MomConfig) -> String {
-    let credential_mode = config
-        .credential_mode()
-        .unwrap_or(CredentialMode::VmAuthJson);
     let model = config_string(config.model());
-    let provider = match credential_mode {
-        CredentialMode::VmAuthJson => "openai-codex",
-        CredentialMode::OpenRouterProxy => "openrouter",
-    };
-    let api_mode = match credential_mode {
-        CredentialMode::VmAuthJson => "  api_mode: codex_responses\n",
-        CredentialMode::OpenRouterProxy => "",
-    };
     let proxy = config
         .credential_proxy_url()
         .map(|url| {
@@ -1704,9 +1575,9 @@ env:
         .unwrap_or_default();
     format!(
         r#"model:
-  provider: {provider}
+  provider: openrouter
   default: {model}
-{api_mode}terminal:
+terminal:
   backend: local
   cwd: /workspace
   persistent_shell: true
@@ -1720,30 +1591,6 @@ toolsets:
     )
 }
 
-fn codex_config_toml(config: &MomConfig) -> String {
-    let credential_mode = config
-        .credential_mode()
-        .unwrap_or(CredentialMode::VmAuthJson);
-    let model = config_string(config.model());
-    let mut toml = format!(
-        r#"model = {model}
-approval_policy = "never"
-sandbox_mode = "danger-full-access"
-
-[projects."/workspace"]
-trust_level = "trusted"
-"#
-    );
-    if credential_mode == CredentialMode::OpenRouterProxy {
-        toml.push_str(
-            r#"
-# Codex subscription auth is intentionally not configured in openrouter-proxy mode.
-"#,
-        );
-    }
-    toml
-}
-
 fn proxy_env_sh(proxy_url: &str) -> String {
     let proxy_url = shell_quote(proxy_url);
     format!(
@@ -1755,28 +1602,6 @@ export OPENROUTER_API_KEY=agentmom-proxy
 export NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/agentmom-proxy.crt
 export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
-"#
-    )
-}
-
-fn opencode_config_json(config: &MomConfig) -> String {
-    let credential_mode = config
-        .credential_mode()
-        .unwrap_or(CredentialMode::VmAuthJson);
-    let model = match credential_mode {
-        CredentialMode::VmAuthJson => format!("openai/{}", config.model()),
-        CredentialMode::OpenRouterProxy => format!("openrouter/{}", config.model()),
-    };
-    let model = config_string(&model);
-    format!(
-        r#"{{
-  "$schema": "https://opencode.ai/config.json",
-  "model": {model},
-  "server": {{
-    "hostname": "0.0.0.0",
-    "port": {OPENCODE_GUEST_PORT}
-  }}
-}}
 "#
     )
 }
@@ -1797,16 +1622,13 @@ fn shell_quote(value: &str) -> String {
 mod tests {
     use super::*;
 
-    fn test_config(credential_mode: &str) -> MomConfig {
+    fn test_config() -> MomConfig {
         MomConfig {
             schema_version: 1,
             runtime: RuntimeConfig {
                 snapshot_name: Some("mom-base-testrev".to_string()),
             },
             credentials: CredentialConfig {
-                mode: credential_mode.to_string(),
-                codex_auth_path: PathBuf::from("/tmp/codex-auth.json"),
-                opencode_auth_path: PathBuf::from("/tmp/opencode-auth.json"),
                 proxy_url: Some("http://127.0.0.1:1080".to_string()),
                 proxy_ca_path: Some(PathBuf::from("/tmp/agentmom-proxy-ca.crt")),
             },
@@ -1818,53 +1640,23 @@ mod tests {
                 secret: Some("test-auth-secret".to_string()),
                 secret_file: None,
             },
-            features: FeatureConfig::default(),
         }
     }
 
     #[test]
-    fn vm_auth_json_mode_generates_codex_hermes_config() {
-        let config = test_config("vm-auth-json");
+    fn openrouter_proxy_generates_hermes_config() {
+        let config = test_config();
 
-        assert_eq!(
-            config.credential_mode().unwrap(),
-            CredentialMode::VmAuthJson
-        );
-        assert_eq!(
-            config.validate_for_guest_config().unwrap(),
-            CredentialMode::VmAuthJson
-        );
-
-        let hermes = hermes_config_yaml(&config);
-        assert!(hermes.contains("provider: openai-codex"));
-        assert!(hermes.contains("api_mode: codex_responses"));
-    }
-
-    #[test]
-    fn openrouter_proxy_mode_generates_proxy_hermes_config() {
-        let config = test_config("openrouter-proxy");
-
-        assert_eq!(
-            config.credential_mode().unwrap(),
-            CredentialMode::OpenRouterProxy
-        );
-        assert_eq!(
-            config.validate_for_guest_config().unwrap(),
-            CredentialMode::OpenRouterProxy
-        );
-
+        config.validate_for_guest_config().unwrap();
         let hermes = hermes_config_yaml(&config);
         assert!(hermes.contains("provider: openrouter"));
         assert!(!hermes.contains("api_mode: codex_responses"));
         assert!(hermes.contains("OPENROUTER_API_KEY: agentmom-proxy"));
-
-        let codex = codex_config_toml(&config);
-        assert!(codex.contains("Codex subscription auth is intentionally not configured"));
     }
 
     #[test]
     fn openrouter_proxy_mode_requires_proxy_config() {
-        let mut config = test_config("openrouter-proxy");
+        let mut config = test_config();
         config.credentials.proxy_url = None;
         assert!(config.validate_for_guest_config().is_err());
 
@@ -1875,7 +1667,7 @@ mod tests {
 
     #[test]
     fn missing_snapshot_name_is_invalid_for_node() {
-        let mut config = test_config("openrouter-proxy");
+        let mut config = test_config();
         config.runtime.snapshot_name = None;
         assert!(config.validate_for_node().is_err());
     }

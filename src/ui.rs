@@ -13,52 +13,13 @@ use serde_json::{Value, json};
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::{
-    ApiState, JobResponse, WorkspaceRecord, create_job, default_workspace_backup_interval,
-    default_workspace_cpus, default_workspace_idle_timeout, default_workspace_memory,
-    default_workspace_volume_quota, job_get, load_mom_config, node_worker_url, select_ready_node,
+    ApiState, JobResponse, WorkspaceRecord, create_job, job_get, node_worker_url,
     service_tunnel_hostname_registered, service_tunnel_upsert, worker_token, workspace_get,
-    workspace_upsert_pending,
 };
-
-#[derive(Debug, Deserialize)]
-struct CreateRequest {
-    name: String,
-    #[serde(default)]
-    user: Option<String>,
-    #[serde(default = "default_workspace_cpus")]
-    cpus: u8,
-    #[serde(default = "default_workspace_memory")]
-    memory: u64,
-    #[serde(default = "default_workspace_volume_quota")]
-    volume_quota: u32,
-    #[serde(default = "default_workspace_idle_timeout")]
-    idle_timeout: u64,
-    #[serde(default = "default_workspace_backup_interval")]
-    backup_interval: u64,
-    #[serde(default)]
-    rebuild_snapshot: bool,
-    #[serde(default)]
-    no_snapshot: bool,
-}
 
 #[derive(Debug, Deserialize)]
 struct CommandRequest {
     command: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct PromptRequest {
-    prompt: String,
-}
-
-#[derive(Debug, Serialize)]
-struct LegacyWorkspace {
-    workspace_id: String,
-    name: String,
-    slug: String,
-    display_name: String,
-    status: String,
-    image: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -67,12 +28,6 @@ struct CommandResult {
     code: Option<i32>,
     stdout: String,
     stderr: String,
-}
-
-#[derive(Debug, Serialize)]
-struct ListResponse {
-    vms: Vec<LegacyWorkspace>,
-    raw: CommandResult,
 }
 
 #[derive(Debug, Serialize)]
@@ -91,46 +46,20 @@ struct OpenWorkerServiceResponse {
     url: String,
 }
 
-#[derive(Debug, Serialize)]
-struct UiConfigResponse {
-    features: UiFeatureConfig,
-}
-
-#[derive(Debug, Serialize)]
-struct UiFeatureConfig {
-    opencode: bool,
-}
-
 pub(crate) fn api_routes() -> Router<Arc<ApiState>> {
     Router::new()
         .route("/api/ui/health", get(health))
-        .route("/api/ui/config", get(ui_config))
         .route("/api/tls-ask", get(tls_ask))
-        .route(
-            "/api/vms",
-            get(list_legacy_workspaces).post(create_workspace),
-        )
-        .route("/api/vms/{name}/start", post(start_workspace))
-        .route("/api/vms/{name}/stop", post(stop_workspace))
-        .route("/api/vms/{name}/remove", post(remove_workspace))
-        .route("/api/vms/{name}/doctor", post(doctor_workspace))
-        .route("/api/vms/{name}/exec", post(exec_workspace))
-        .route("/api/vms/{name}/codex", post(codex_workspace))
-        .route("/api/vms/{name}/hermes", post(hermes_workspace))
-        .route("/api/vms/{name}/hermes-ui", post(hermes_ui_workspace))
-        .route("/api/vms/{name}/opencode", post(opencode_workspace))
         .route("/api/workspaces/{name}/start", post(start_workspace))
         .route("/api/workspaces/{name}/stop", post(stop_workspace))
         .route("/api/workspaces/{name}/remove", post(remove_workspace))
         .route("/api/workspaces/{name}/doctor", post(doctor_workspace))
         .route("/api/workspaces/{name}/exec", post(exec_workspace))
-        .route("/api/workspaces/{name}/codex", post(codex_workspace))
         .route("/api/workspaces/{name}/hermes", post(hermes_workspace))
         .route(
             "/api/workspaces/{name}/hermes-ui",
             post(hermes_ui_workspace),
         )
-        .route("/api/workspaces/{name}/opencode", post(opencode_workspace))
 }
 
 pub(crate) fn serve_assets(app: Router) -> Router {
@@ -149,15 +78,6 @@ pub(crate) fn serve_assets(app: Router) -> Router {
 
 async fn health() -> Json<Value> {
     Json(json!({ "ok": true }))
-}
-
-async fn ui_config() -> Result<Json<UiConfigResponse>, UiError> {
-    let config = load_mom_config()?;
-    Ok(Json(UiConfigResponse {
-        features: UiFeatureConfig {
-            opencode: config.features.opencode,
-        },
-    }))
 }
 
 async fn tls_ask(Query(query): Query<HashMap<String, String>>) -> StatusCode {
@@ -189,78 +109,6 @@ fn service_tunnel_domain_allowed(domain: &str) -> bool {
 
 fn service_tunnel_registered(domain: &str) -> Result<bool> {
     service_tunnel_hostname_registered(domain)
-}
-
-async fn list_legacy_workspaces(headers: HeaderMap) -> Result<Json<ListResponse>, UiError> {
-    let vms = crate::auth::visible_workspaces(&headers)?
-        .into_iter()
-        .map(|workspace| LegacyWorkspace {
-            workspace_id: workspace.workspace_id,
-            name: workspace.name,
-            slug: workspace.slug,
-            display_name: workspace.display_name,
-            status: workspace.status,
-            image: workspace.desired_state,
-        })
-        .collect();
-    Ok(Json(ListResponse {
-        vms,
-        raw: CommandResult {
-            ok: true,
-            code: Some(0),
-            stdout: String::new(),
-            stderr: String::new(),
-        },
-    }))
-}
-
-async fn create_workspace(
-    State(state): State<Arc<ApiState>>,
-    headers: HeaderMap,
-    Json(request): Json<CreateRequest>,
-) -> Result<Json<CommandResult>, UiError> {
-    crate::auth::require_admin(&headers)?;
-    let display_name = request.name.trim().to_string();
-    let name = crate::workspace_slug_from_name(&request.name)?;
-    if workspace_get(&name).is_ok() {
-        return Err(UiError::Anyhow(anyhow!("workspace already exists: {name}")));
-    }
-    let node_id = select_ready_node(None)?;
-    let memory =
-        u32::try_from(request.memory).map_err(|_| anyhow!("memory must fit in u32 MiB"))?;
-    let user_id = request.user.clone().unwrap_or_else(|| name.clone());
-    workspace_upsert_pending(
-        &name,
-        &display_name,
-        &user_id,
-        None,
-        None,
-        &format!("mom-{name}"),
-        &format!("mom-{name}-workspace"),
-        Some(&node_id),
-        request.cpus,
-        memory,
-        request.volume_quota,
-        request.idle_timeout,
-        request.backup_interval,
-    )?;
-    let job = create_job(crate::CreateJobRequest {
-        workspace_name: name,
-        kind: "create".to_string(),
-        node_id: Some(node_id),
-        payload: json!({
-            "user": request.user,
-            "cpus": request.cpus,
-            "memory": request.memory,
-            "volume_quota": request.volume_quota,
-            "idle_timeout": request.idle_timeout,
-            "backup_interval": request.backup_interval,
-            "rebuild_snapshot": request.rebuild_snapshot,
-            "no_snapshot": request.no_snapshot
-        }),
-    })?;
-    let _ = state.notifier.send("job_available".to_string());
-    wait_for_job(&job.id).await
 }
 
 async fn start_workspace(
@@ -319,16 +167,6 @@ async fn exec_workspace(
     .await
 }
 
-async fn codex_workspace(
-    State(state): State<Arc<ApiState>>,
-    headers: HeaderMap,
-    Path(name): Path<String>,
-    Json(request): Json<PromptRequest>,
-) -> Result<Json<CommandResult>, UiError> {
-    crate::auth::authorize_workspace(&headers, &name)?;
-    create_and_wait_for_job(&state, &name, "codex", json!({ "prompt": request.prompt })).await
-}
-
 async fn hermes_workspace(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
@@ -339,29 +177,12 @@ async fn hermes_workspace(
     create_and_wait_for_job(&state, &name, "hermes", json!({ "args": request.command })).await
 }
 
-async fn opencode_workspace(
-    headers: HeaderMap,
-    Path(name): Path<String>,
-) -> Result<Json<CommandResult>, UiError> {
-    crate::auth::authorize_workspace(&headers, &name)?;
-    if !opencode_enabled()? {
-        return Err(UiError::Forbidden(
-            "OpenCode is disabled; set features.opencode=true to expose it".to_string(),
-        ));
-    }
-    open_workspace_service(&name, "opencode").await
-}
-
 async fn hermes_ui_workspace(
     headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Result<Json<CommandResult>, UiError> {
     crate::auth::authorize_workspace(&headers, &name)?;
     open_workspace_service(&name, "hermes").await
-}
-
-fn opencode_enabled() -> Result<bool> {
-    Ok(load_mom_config()?.features.opencode)
 }
 
 async fn open_workspace_service(name: &str, service: &str) -> Result<Json<CommandResult>, UiError> {
@@ -501,7 +322,6 @@ enum UiError {
     Anyhow(anyhow::Error),
     Auth(crate::auth::AuthError),
     Command(CommandResult),
-    Forbidden(String),
 }
 
 impl From<anyhow::Error> for UiError {
@@ -540,9 +360,6 @@ impl IntoResponse for UiError {
                     StatusCode::INTERNAL_SERVER_ERROR
                 };
                 (status, Json(result)).into_response()
-            }
-            UiError::Forbidden(error) => {
-                (StatusCode::FORBIDDEN, Json(ErrorBody { error })).into_response()
             }
         }
     }

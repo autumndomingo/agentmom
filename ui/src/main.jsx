@@ -13,18 +13,12 @@ import {
 import './styles.css';
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? '/api';
-const DEFAULT_UI_CONFIG = { features: { opencode: false } };
 
 function Root() {
   const [userSession, setUserSession] = useState(null);
   const [checkingSession, setCheckingSession] = useState(true);
-  const [uiConfig, setUiConfig] = useState(DEFAULT_UI_CONFIG);
 
   useEffect(() => {
-    fetchUiConfig()
-      .then(setUiConfig)
-      .catch(() => setUiConfig(DEFAULT_UI_CONFIG));
-
     validateSession()
       .then((session) => {
         setUserSession(session);
@@ -89,7 +83,7 @@ function Root() {
     return <SetupPage userSession={userSession} onSubmit={enterUserFlow} />;
   }
 
-  return <App userSession={userSession} uiConfig={uiConfig} />;
+  return <App userSession={userSession} />;
 }
 
 function LandingPage({ onSubmit }) {
@@ -180,19 +174,6 @@ async function validateSession() {
   return fetchMe();
 }
 
-async function fetchUiConfig() {
-  const response = await fetch(`${API_BASE}/ui/config`);
-  const data = await response.json();
-  if (!response.ok) {
-    throw data;
-  }
-  return {
-    features: {
-      opencode: Boolean(data.features?.opencode),
-    },
-  };
-}
-
 async function fetchMe() {
   const response = await fetch(`${API_BASE}/me`);
   const data = await response.json();
@@ -262,7 +243,7 @@ function SetupPage({ userSession, onSubmit }) {
   );
 }
 
-function App({ userSession, uiConfig }) {
+function App({ userSession }) {
   const [workspaces, setWorkspaces] = useState([]);
   const [selectedName, setSelectedName] = useState(userSession.workspaceName ?? '');
   const [busy, setBusy] = useState(false);
@@ -305,7 +286,7 @@ function App({ userSession, uiConfig }) {
 
   async function refresh() {
     setWorkspaceError('');
-    const allWorkspaces = normalizeWorkspaceList(await request('/vms'));
+    const allWorkspaces = normalizeWorkspaceList(await request('/workspaces'));
     const userWorkspace = selectUserWorkspace(allWorkspaces, userSession);
     const nextWorkspaces = userSession.workspaceName
       ? userWorkspace
@@ -345,16 +326,11 @@ function App({ userSession, uiConfig }) {
     const chatId = ensureChatForPrompt(selectedWorkspace.name, prompt);
     appendMessage(selectedWorkspace.name, chatId, { role: 'user', content: prompt });
 
-    try {
-      const result = await request(`/workspaces/${encodeURIComponent(selectedWorkspace.name)}/codex`, {
-        method: 'POST',
-        body: JSON.stringify({ prompt }),
-      });
-      appendMessage(selectedWorkspace.name, chatId, { role: 'assistant', content: renderResult(result) });
-      await refresh();
-    } catch (error) {
-      appendMessage(selectedWorkspace.name, chatId, { role: 'assistant', content: formatError(error) });
-    }
+    await launchHermes();
+    appendMessage(selectedWorkspace.name, chatId, {
+      role: 'assistant',
+      content: 'Hermes dashboard opened for this workspace.',
+    });
   }
 
   function startNewChat(id = selectedWorkspace?.name) {
@@ -414,23 +390,6 @@ function App({ userSession, uiConfig }) {
           : chat,
       ),
     }));
-  }
-
-  async function launchOpencode() {
-    if (!selectedWorkspace) return;
-
-    try {
-      const result = await request(`/workspaces/${encodeURIComponent(selectedWorkspace.name)}/opencode`, {
-        method: 'POST',
-      });
-      const url = launchUrlFromResult(result);
-      if (url) {
-        window.open(url, '_blank', 'noopener,noreferrer');
-      }
-      await refresh();
-    } catch (error) {
-      appendSystemMessage(formatError(error));
-    }
   }
 
   async function launchHermes() {
@@ -524,16 +483,6 @@ function App({ userSession, uiConfig }) {
               <RefreshCcw size={17} />
               Refresh
             </button>
-            {uiConfig.features?.opencode && (
-              <button
-                className="refreshButton"
-                onClick={launchOpencode}
-                disabled={!selectedWorkspace || busy}
-              >
-                <ExternalLink size={17} />
-                OpenCode
-              </button>
-            )}
             <button className="refreshButton" onClick={launchHermes} disabled={!selectedWorkspace || busy}>
               <ExternalLink size={17} />
               Hermes

@@ -134,9 +134,11 @@ async fn api_metrics() -> Result<String, ApiError> {
 
 async fn api_create_job(
     State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
     Json(mut request): Json<CreateJobRequest>,
 ) -> Result<Json<JobResponse>, ApiError> {
     let workspace = workspace_get(&request.workspace_name)?;
+    auth::authorize_workspace(&headers, &workspace.name)?;
     match (&request.node_id, &workspace.node_id) {
         (Some(requested), Some(assigned)) if requested != assigned => {
             return Err(ApiError::Anyhow(anyhow!(
@@ -163,18 +165,25 @@ async fn api_create_job(
     Ok(Json(JobResponse { job }))
 }
 
-async fn api_get_job(AxumPath(id): AxumPath<String>) -> Result<Json<JobResponse>, ApiError> {
-    Ok(Json(JobResponse { job: job_get(&id)? }))
+async fn api_get_job(
+    AxumPath(id): AxumPath<String>,
+    headers: HeaderMap,
+) -> Result<Json<JobResponse>, ApiError> {
+    let job = job_get(&id)?;
+    auth::authorize_workspace(&headers, &job.workspace_name)?;
+    Ok(Json(JobResponse { job }))
 }
 
-async fn api_list_workspaces() -> Result<Json<Vec<WorkspaceRecord>>, ApiError> {
-    Ok(Json(workspace_all()?))
+async fn api_list_workspaces(headers: HeaderMap) -> Result<Json<Vec<WorkspaceRecord>>, ApiError> {
+    Ok(Json(auth::visible_workspaces(&headers)?))
 }
 
 async fn api_create_workspace(
     State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
     Json(request): Json<CreateWorkspaceRequest>,
 ) -> Result<Json<JobResponse>, ApiError> {
+    auth::require_admin(&headers)?;
     let display_name = request.name.trim().to_string();
     let name = workspace_slug_from_name(&request.name)?;
     if workspace_get(&name).is_ok() {
@@ -219,7 +228,9 @@ async fn api_create_workspace(
 
 async fn api_workspace_events(
     AxumPath(name): AxumPath<String>,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<WorkspaceEvent>>, ApiError> {
+    auth::authorize_workspace(&headers, &name)?;
     Ok(Json(workspace_events_since(&name, 0)?))
 }
 

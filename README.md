@@ -1,30 +1,15 @@
 # Agent Mom
 
-`mom` is a small Rust CLI for managing Alpine microsandbox VMs for Codex and
-Hermes.
+`mom` is a small Rust CLI and browser UI for running durable Hermes workspaces
+on Alpine microsandbox VMs.
 
 It uses the microsandbox Rust SDK directly. It does not shell out to
 `npx microsandbox` for lifecycle operations.
 
-## Commands
-
-```sh
-mom create mybox --replace
-mom list
-mom enter mybox
-mom exec mybox -- pwd
-mom codex mybox "Reply exactly ok"
-mom hermes mybox -- --help
-mom doctor mybox
-mom stop mybox
-mom start mybox
-mom rm mybox --force
-```
-
 ## Single-Host Fleet Worker
 
-The next iteration treats a user workspace as the durable unit and the VM as
-replaceable compute. A workspace has:
+Agent Mom treats a user workspace as the durable unit and the VM as replaceable
+compute. A workspace has:
 
 - one SQLite row in `MOM_STATE_DIR/fleet.db`
 - one microsandbox VM named `mom-<workspace>`
@@ -34,7 +19,7 @@ replaceable compute. A workspace has:
 mom workspace create alice --user user_123 --replace
 mom workspace list
 mom workspace exec alice -- pwd
-mom workspace codex alice "Reply exactly ok"
+mom workspace hermes alice -- --help
 mom workspace inspect alice
 mom workspace events alice --since 2h
 mom workspace backup alice
@@ -144,7 +129,6 @@ typed `services.agentmom.*` options.
     "snapshot_name": "mom-base-fc3a7f7"
   },
   "credentials": {
-    "mode": "openrouter-proxy",
     "proxy_url": "http://192.168.83.1:1080",
     "proxy_ca_path": "/var/lib/agentmom/iron-proxy/ca.crt"
   },
@@ -154,25 +138,18 @@ typed `services.agentmom.*` options.
   },
   "auth": {
     "secret_file": "/run/secrets/agentmom-auth-secret"
-  },
-  "features": {
-    "opencode": false
   }
 }
 ```
 
 Required assumptions:
 
-- `credentials.mode` is either `vm-auth-json` or `openrouter-proxy`.
-- New structured configs default to `openrouter-proxy` when the mode is omitted; legacy flat configs keep their old `vm-auth-json` default.
-- `vm-auth-json` requires `credentials.codex_auth_path` to exist and contain Codex CLI OAuth tokens. This copies credentials into the VM.
-- `openrouter-proxy` requires `credentials.proxy_url` and `credentials.proxy_ca_path`. It writes proxy env into the VM and expects iron-proxy to inject the OpenRouter API key on the host.
+- `credentials.proxy_url` and `credentials.proxy_ca_path` are required for guest configuration. Agent Mom writes proxy env into the VM and expects iron-proxy to inject the OpenRouter API key on the host.
 - `guest.hermes_profile` is the guest profile name to create.
-- `guest.model` is the default model for the selected mode. Use an `openai-codex` model in `vm-auth-json` mode and an OpenRouter model ID in `openrouter-proxy` mode.
+- `guest.model` is the default OpenRouter model written into Hermes config.
 - `runtime.snapshot_name` is the versioned prebuilt microsandbox snapshot to boot new VMs from. It is required for worker/node VM operations and has no Rust default.
 - `auth.secret_file` is required for `mom api`. It signs browser sessions.
 - On an empty DB, the first login creates the admin user and auto-generates that user's login code. After that, new users are created with admin-generated invite codes and log in with their own generated user code.
-- `features.opencode` defaults to `false`. Set it to `true` only when the OpenCode debug escape hatch should be visible in the UI and callable through the API.
 
 `mom config doctor` validates the configured file and prints a redacted
 effective config.
@@ -180,24 +157,15 @@ effective config.
 `create` uses `runtime.snapshot_name` by default and requires that exact versioned
 snapshot to already exist. This is intentionally a hard deploy contract: worker
 hosts should run `mom node ensure-base` before serving the worker. That command
-builds the configured snapshot from `alpine` if missing, installs `nodejs`,
-`npm`, `python3`, `uv`, `@openai/codex`, `opencode-ai`, and `hermes-agent`, then
+builds the configured snapshot from `alpine` if missing, installs `python3`,
+`uv`, and `hermes-agent`, then
 boots a probe VM from the snapshot and runs `mom doctor` checks. Pass
 `--rebuild-snapshot` only for explicit operator rebuilds, or `--no-snapshot` to
 force the slow direct-Alpine provisioning path.
 
-Each new VM is then patched with auth and Hermes config for the selected mode.
+Each new VM is then patched with proxy and Hermes config:
 
-In `vm-auth-json` mode:
-
-- `credentials.codex_auth_path` -> `/root/.codex/auth.json`
-- a generated `/root/.codex/config.toml` with `approval_policy = "never"` and `sandbox_mode = "danger-full-access"`
-- OpenAI Codex tokens from `credentials.codex_auth_path` -> `/root/.hermes-agent/<guest.hermes_profile>/auth.json`
-- a minimal generated Hermes `config.yaml` selecting `openai-codex`
-
-In `openrouter-proxy` mode:
-
-- no Codex/Hermes auth files are written, and stale auth files are removed on `mom workspace refresh-config`
+- no raw OpenAI subscription auth files are written, and stale Hermes auth files are removed on `mom workspace refresh-config`
 - `/etc/profile.d/agentmom-proxy.sh` exports proxy variables and sentinel API-key values
 - Hermes `config.yaml` selects `provider: openrouter`
 - the configured iron-proxy CA is installed into the VM trust store
@@ -235,10 +203,12 @@ just dev
 `config.dev.json` by default, starts `mom api` and `mom worker`, and uses the
 real microsandbox runtime. On a fresh checkout the first run installs the local
 microsandbox helper under `.state/msb` and builds the configured base snapshot.
+It also creates local dev proxy CA material under `dev/iron-proxy/` so the
+configured proxy trust path exists. Start an iron-proxy-compatible service on
+`127.0.0.1:1080` with an OpenRouter key before exercising real Hermes model
+calls from inside a workspace.
 Hermes launch requests are routed from the API to the workspace's assigned
 worker over that worker's private `worker.url`.
-OpenCode is hidden by default; expose it only for debugging by setting
-`features.opencode` to `true` in the Agent Mom config.
 Foreground output is intentionally brief; detailed API, worker, build, and base
 image logs are written to `.state/logs/`.
 
@@ -264,10 +234,10 @@ its existing NixOS config:
     stateDir = "/var/lib/agentmom";
     microsandboxHome = "/var/lib/agentmom/microsandbox";
     runtime.snapshotName = "mom-base-${builtins.substring 0 12 inputs.agentmom.rev}";
-    credentials.mode = "openrouter-proxy";
+    credentials.proxyUrl = "http://127.0.0.1:1080";
+    credentials.proxyCaPath = "/var/lib/agentmom/iron-proxy/ca.crt";
     guest.model = "openai/gpt-5.5";
     auth.secretFile = "/run/secrets/agentmom-auth-secret";
-    features.opencode = false;
   };
 }
 ```
@@ -333,9 +303,9 @@ trusted reverse proxy for rate limiting, TLS, and network exposure control.
 
 Workers also expose private control endpoints, such as
 `POST /worker/services/{service}/open`, used by the API to open Hermes tunnels
-on the host that owns the workspace VM. OpenCode uses the same route only when
-explicitly enabled. Bind these endpoints to localhost for single-host
-deployments or to a Tailscale/private address for multi-host deployments.
+on the host that owns the workspace VM. Bind these endpoints to localhost for
+single-host deployments or to a Tailscale/private address for multi-host
+deployments.
 
 Worker endpoints require a bearer token through `workerTokenFile`,
 `MOM_WORKER_TOKEN`, or `MOM_WORKER_TOKEN_FILE`.

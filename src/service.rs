@@ -4,7 +4,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use microsandbox::{Sandbox, sandbox::SandboxStatus};
 use tokio::{process::Command, sync::Mutex, task::JoinHandle};
 
-use crate::{HERMES_GUEST_PORT, OPENCODE_GUEST_PORT, checked_shell, shell_quote};
+use crate::{HERMES_GUEST_PORT, checked_shell, shell_quote};
 
 struct ServiceTunnel {
     url: String,
@@ -30,38 +30,8 @@ struct GuestServiceSpec {
 
 #[derive(Clone, Default)]
 pub(crate) struct ServiceState {
-    opencode_tunnels: Arc<Mutex<HashMap<String, ServiceTunnel>>>,
     hermes_tunnels: Arc<Mutex<HashMap<String, ServiceTunnel>>>,
 }
-
-const OPENCODE_SERVICE: GuestServiceSpec = GuestServiceSpec {
-    id: "opencode",
-    label: "OpenCode",
-    guest_port: OPENCODE_GUEST_PORT,
-    health_path: "/global/health",
-    workdir: "/workspace",
-    log_path: "/tmp/mom-opencode/web.log",
-    command: &[
-        "opencode",
-        "web",
-        "--hostname",
-        "0.0.0.0",
-        "--port",
-        "{port}",
-    ],
-    env: &[("BROWSER", "/tmp/mom-opencode/bin/xdg-open")],
-    pre_start: Some(
-        r#"
-mkdir -p /tmp/mom-opencode/bin
-cat >/tmp/mom-opencode/bin/xdg-open <<'EOF'
-#!/bin/sh
-exit 0
-EOF
-chmod +x /tmp/mom-opencode/bin/xdg-open
-"#,
-    ),
-    readiness_attempts: 60,
-};
 
 const HERMES_SERVICE: GuestServiceSpec = GuestServiceSpec {
     id: "hermes",
@@ -92,15 +62,6 @@ pub(crate) async fn open_workspace_service(
     service_id: &str,
 ) -> Result<String> {
     match service_id {
-        "opencode" => {
-            ensure_guest_service_tunnel(
-                workspace_name,
-                sandbox_name,
-                &OPENCODE_SERVICE,
-                &state.opencode_tunnels,
-            )
-            .await
-        }
         "hermes" => {
             ensure_guest_service_tunnel(
                 workspace_name,

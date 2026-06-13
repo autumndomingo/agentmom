@@ -1,9 +1,10 @@
 use std::{
+    collections::HashMap,
     fs,
     net::TcpListener,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::{Arc, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -17,6 +18,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 const MOM_BIN: &str = env!("CARGO_BIN_EXE_mom");
 const WORKER_TOKEN: &str = "test-worker-token";
 static FLEET_TEST_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
+static ADMIN_COOKIES: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
 
 async fn fleet_test_guard() -> OwnedSemaphorePermit {
     FLEET_TEST_SEMAPHORE
@@ -58,6 +60,16 @@ struct TestFleet {
     api_addr: String,
     api_url: String,
     api: ChildGuard,
+}
+
+impl Drop for TestFleet {
+    fn drop(&mut self) {
+        if let Some(cache) = ADMIN_COOKIES.get() {
+            let _ = cache
+                .lock()
+                .map(|mut cookies| cookies.remove(&self.api_url));
+        }
+    }
 }
 
 #[tokio::test]
@@ -181,6 +193,36 @@ async fn fake_worker_start_stop_backup_jobs_update_central_state() -> Result<()>
     let backup = create_job(&fleet.api_url, "alice", "backup").await?;
     wait_for_job_status(&fleet.api_url, &backup, "succeeded").await?;
     wait_for_backup_count(fleet.api_state.path(), "alice", 1).await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn browser_workspace_routes_require_session_cookie() -> Result<()> {
+    let _guard = fleet_test_guard().await;
+    let fleet = TestFleet::start().await?;
+    let client = reqwest::Client::new();
+
+    let list = client
+        .get(format!("{}/api/workspaces", fleet.api_url))
+        .send()
+        .await?;
+    assert_eq!(list.status(), StatusCode::UNAUTHORIZED);
+
+    let create = client
+        .post(format!("{}/api/workspaces", fleet.api_url))
+        .json(&json!({ "name": "unauthenticated" }))
+        .send()
+        .await?;
+    assert_eq!(create.status(), StatusCode::UNAUTHORIZED);
+
+    let cookie = admin_cookie(&fleet.api_url).await?;
+    client
+        .get(format!("{}/api/workspaces", fleet.api_url))
+        .header(reqwest::header::COOKIE, cookie)
+        .send()
+        .await?
+        .error_for_status()?;
 
     Ok(())
 }
@@ -452,7 +494,7 @@ async fn worker_service_open_rejects_spoofed_sandbox_identity() -> Result<()> {
     wait_for_job_status(&fleet.api_url, &job_id, "succeeded").await?;
 
     let response = reqwest::Client::new()
-        .post(format!("{}/worker/services/opencode/open", node.worker_url))
+        .post(format!("{}/worker/services/hermes/open", node.worker_url))
         .bearer_auth(WORKER_TOKEN)
         .json(&json!({
             "workspace_name": "guard",
@@ -465,7 +507,7 @@ async fn worker_service_open_rejects_spoofed_sandbox_identity() -> Result<()> {
         !node
             .msb_home
             .path()
-            .join("fake/guard/service-opencode")
+            .join("fake/guard/service-hermes")
             .exists(),
         "worker should not open a service for a mismatched sandbox"
     );
@@ -511,8 +553,10 @@ async fn duplicate_create_does_not_move_existing_workspace() -> Result<()> {
 
     let create = create_workspace(&fleet.api_url, "dupe", "node-a", 0).await?;
     wait_for_job_status(&fleet.api_url, &create, "succeeded").await?;
+    let cookie = admin_cookie(&fleet.api_url).await?;
     let response = reqwest::Client::new()
         .post(format!("{}/api/workspaces", fleet.api_url))
+        .header(reqwest::header::COOKIE, &cookie)
         .json(&json!({
             "name": "dupe",
             "node_id": "node-b"
@@ -536,9 +580,11 @@ async fn explicit_create_rejects_full_node() -> Result<()> {
     let fleet = TestFleet::start().await?;
     insert_node_with_capacity(fleet.api_state.path(), "full-node", now_epoch()?, 1)?;
     insert_workspace(fleet.api_state.path(), "existing", "full-node")?;
+    let cookie = admin_cookie(&fleet.api_url).await?;
 
     let response = reqwest::Client::new()
         .post(format!("{}/api/workspaces", fleet.api_url))
+        .header(reqwest::header::COOKIE, &cookie)
         .json(&json!({
             "name": "overflow",
             "node_id": "full-node"
@@ -562,9 +608,11 @@ async fn idle_stopped_workspace_does_not_count_against_capacity() -> Result<()> 
         "stopped",
         "idle-stopped",
     )?;
+    let cookie = admin_cookie(&fleet.api_url).await?;
 
     let response = reqwest::Client::new()
         .post(format!("{}/api/workspaces", fleet.api_url))
+        .header(reqwest::header::COOKIE, &cookie)
         .json(&json!({
             "name": "replacement",
             "node_id": "node-a"
@@ -646,8 +694,10 @@ async fn offline_node_is_not_reenabled_by_stale_heartbeat() -> Result<()> {
         .error_for_status()?;
 
     assert_eq!(node_status(fleet.api_state.path(), "lost-node")?, "offline");
+    let cookie = admin_cookie(&fleet.api_url).await?;
     let response = client
         .post(format!("{}/api/workspaces", fleet.api_url))
+        .header(reqwest::header::COOKIE, &cookie)
         .json(&json!({
             "name": "should-not-place",
             "node_id": "lost-node"
@@ -706,8 +756,10 @@ async fn node_lifecycle_controls_placement_and_claims() -> Result<()> {
 
     run_mom(fleet.api_state.path(), &["node", "cordon", "node-a"])?;
     assert_eq!(node_status(fleet.api_state.path(), "node-a")?, "cordoned");
+    let cookie = admin_cookie(&fleet.api_url).await?;
     let response = reqwest::Client::new()
         .post(format!("{}/api/workspaces", fleet.api_url))
+        .header(reqwest::header::COOKIE, &cookie)
         .json(&json!({
             "name": "blocked-on-cordon",
             "node_id": "node-a"
@@ -956,52 +1008,6 @@ async fn service_open_routes_to_assigned_worker_url() -> Result<()> {
 }
 
 #[tokio::test]
-async fn opencode_service_requires_explicit_enable_flag() -> Result<()> {
-    let _guard = fleet_test_guard().await;
-    let mut fleet = TestFleet::start().await?;
-    let _node =
-        spawn_worker_with_options("node-a", &fleet.api_url, "1", Some("http://node-a.fake"))?;
-    wait_for_node(fleet.api_state.path(), "node-a").await?;
-
-    let job_id = create_workspace(&fleet.api_url, "opencode-svc", "node-a", 0).await?;
-    wait_for_job_status(&fleet.api_url, &job_id, "succeeded").await?;
-    wait_for_workspace_status(&fleet.api_url, "opencode-svc", "running").await?;
-    let cookie = admin_cookie(&fleet.api_url).await?;
-
-    let response = reqwest::Client::new()
-        .post(format!(
-            "{}/api/workspaces/opencode-svc/opencode",
-            fleet.api_url
-        ))
-        .header(reqwest::header::COOKIE, &cookie)
-        .send()
-        .await?;
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
-
-    fleet.stop_api()?;
-    fleet.start_api_with_options(&[], true).await?;
-
-    let result = reqwest::Client::new()
-        .post(format!(
-            "{}/api/workspaces/opencode-svc/opencode",
-            fleet.api_url
-        ))
-        .header(reqwest::header::COOKIE, &cookie)
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<Value>()
-        .await?;
-    let stdout = result.get("stdout").and_then(Value::as_str).unwrap_or("");
-    assert!(
-        stdout.contains("http://node-a.fake/opencode-svc/opencode"),
-        "OpenCode service should open only after explicit opt-in, got {stdout:?}"
-    );
-
-    Ok(())
-}
-
-#[tokio::test]
 async fn tls_ask_allows_only_registered_service_tunnel_hostnames() -> Result<()> {
     let _guard = fleet_test_guard().await;
     let fleet = TestFleet::start().await?;
@@ -1065,14 +1071,10 @@ impl TestFleet {
     }
 
     async fn start_with_api_env(envs: &[(&str, &str)]) -> Result<Self> {
-        Self::start_with_api_options(envs, false).await
-    }
-
-    async fn start_with_api_options(envs: &[(&str, &str)], opencode: bool) -> Result<Self> {
         let api_state = tempfile::tempdir()?;
         let api_addr = free_addr()?;
         let api_url = format!("http://{api_addr}");
-        let api = spawn_api(api_state.path(), &api_addr, envs, opencode)?;
+        let api = spawn_api(api_state.path(), &api_addr, envs)?;
         wait_ready(&api_url).await?;
         Ok(Self {
             api_state,
@@ -1087,25 +1089,12 @@ impl TestFleet {
     }
 
     async fn start_api(&mut self, envs: &[(&str, &str)]) -> Result<()> {
-        self.start_api_with_options(envs, false).await
-    }
-
-    async fn start_api_with_options(
-        &mut self,
-        envs: &[(&str, &str)],
-        opencode: bool,
-    ) -> Result<()> {
-        self.api = spawn_api(self.api_state.path(), &self.api_addr, envs, opencode)?;
+        self.api = spawn_api(self.api_state.path(), &self.api_addr, envs)?;
         wait_ready(&self.api_url).await
     }
 }
 
-fn spawn_api(
-    state_dir: &Path,
-    bind: &str,
-    envs: &[(&str, &str)],
-    opencode: bool,
-) -> Result<ChildGuard> {
+fn spawn_api(state_dir: &Path, bind: &str, envs: &[(&str, &str)]) -> Result<ChildGuard> {
     let config_path = state_dir.join("config.json");
     fs::write(
         &config_path,
@@ -1113,9 +1102,6 @@ fn spawn_api(
             "schema_version": 1,
             "auth": {
                 "secret": "test-auth-secret"
-            },
-            "features": {
-                "opencode": opencode
             }
         }))?,
     )
@@ -1251,8 +1237,10 @@ async fn create_workspace(
     node: &str,
     backup_interval: u64,
 ) -> Result<String> {
+    let cookie = admin_cookie(api_url).await?;
     let response = reqwest::Client::new()
         .post(format!("{api_url}/api/workspaces"))
+        .header(reqwest::header::COOKIE, cookie)
         .json(&json!({
             "name": name,
             "node_id": node,
@@ -1280,8 +1268,10 @@ async fn create_job(api_url: &str, workspace: &str, kind: &str) -> Result<String
 }
 
 async fn create_job_value(api_url: &str, workspace: &str, kind: &str) -> Result<Value> {
+    let cookie = admin_cookie(api_url).await?;
     Ok(reqwest::Client::new()
         .post(format!("{api_url}/api/jobs"))
+        .header(reqwest::header::COOKIE, cookie)
         .json(&json!({
             "workspace_name": workspace,
             "kind": kind
@@ -1474,7 +1464,11 @@ async fn wait_for_job_status(api_url: &str, job_id: &str, status: &str) -> Resul
 }
 
 async fn job_status(api_url: &str, job_id: &str) -> Result<String> {
-    let value = reqwest::get(format!("{api_url}/api/jobs/{job_id}"))
+    let cookie = admin_cookie(api_url).await?;
+    let value = reqwest::Client::new()
+        .get(format!("{api_url}/api/jobs/{job_id}"))
+        .header(reqwest::header::COOKIE, cookie)
+        .send()
         .await?
         .error_for_status()?
         .json::<Value>()
@@ -1521,7 +1515,11 @@ async fn wait_for_workspace_node(api_url: &str, name: &str, node: &str) -> Resul
 }
 
 async fn workspace(api_url: &str, name: &str) -> Result<Value> {
-    let values = reqwest::get(format!("{api_url}/api/workspaces"))
+    let cookie = admin_cookie(api_url).await?;
+    let values = reqwest::Client::new()
+        .get(format!("{api_url}/api/workspaces"))
+        .header(reqwest::header::COOKIE, cookie)
+        .send()
         .await?
         .error_for_status()?
         .json::<Vec<Value>>()
@@ -1533,7 +1531,28 @@ async fn workspace(api_url: &str, name: &str) -> Result<Value> {
 }
 
 async fn admin_cookie(api_url: &str) -> Result<String> {
-    let response = reqwest::Client::new()
+    if let Some(cookie) = ADMIN_COOKIES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("admin cookie cache should not be poisoned")
+        .get(api_url)
+        .cloned()
+    {
+        return Ok(cookie);
+    }
+
+    let client = reqwest::Client::new();
+    let cookie = admin_login(&client, api_url).await?;
+    ADMIN_COOKIES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("admin cookie cache should not be poisoned")
+        .insert(api_url.to_string(), cookie.clone());
+    Ok(cookie)
+}
+
+async fn admin_login(client: &reqwest::Client, api_url: &str) -> Result<String> {
+    let response = client
         .post(format!("{api_url}/api/auth/login"))
         .json(&json!({
             "email": "admin@example.com"
@@ -1545,7 +1564,8 @@ async fn admin_cookie(api_url: &str) -> Result<String> {
         let body = response.text().await.unwrap_or_default();
         bail!("admin login failed with {status}: {body}");
     }
-    session_cookie_from_response(&response)
+    let cookie = session_cookie_from_response(&response)?;
+    Ok(cookie)
 }
 
 fn session_cookie_from_response(response: &reqwest::Response) -> Result<String> {

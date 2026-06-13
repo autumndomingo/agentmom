@@ -38,7 +38,7 @@ In scope:
 
 - Rename public UI/API concepts from VM to workspace.
 - Make Hermes/OpenRouter/proxy the default production path.
-- Hide OpenCode and Codex subscription flows from the primary UI.
+- Delete OpenCode and Codex subscription auth flows from the baseline.
 - Add a Mom-native chat widget for the Hermes production path.
 - Hide or remove top-level direct sandbox commands.
 - Replace node-port service URLs with stable workspace routes.
@@ -53,6 +53,7 @@ Out of scope:
 - Burst VPS autoscaling.
 - Replacing SQLite.
 - Rebuilding the frontend design from scratch.
+- OpenCode service parity.
 
 ## Target Shape
 
@@ -70,7 +71,6 @@ Public browser routes:
 
 - `/`
 - `/w/<workspace-slug>/hermes`
-- `/w/<workspace-slug>/opencode` only when explicitly enabled
 
 Public API routes:
 
@@ -116,33 +116,24 @@ Conflict-resolution decisions made during the rebase:
 - Preserved admin cookies in fake fleet tests while changing route names.
   Tests that exercise browser-facing routes should include the admin session
   cookie unless they are explicitly testing unauthorized behavior.
-- Kept OpenCode authorization before the feature flag check. A caller must be
-  allowed to access the workspace before learning whether OpenCode is enabled.
-- Kept OpenCode hidden by default through the single Agent Mom config system:
-  `features.opencode = true` enables the API route and the browser button. Do
-  not add side-channel env vars such as `MOM_ENABLE_OPENCODE` or Vite build
-  flags for product behavior.
-
-Temporary route decision:
-
-The React workspace list currently uses the auth-filtered legacy compatibility
-route `/api/vms`, then normalizes the result as workspaces. This is intentional
-after the auth rebase. The canonical core `GET /api/workspaces` still belongs
-to the scheduler/control-plane API and currently returns all workspaces, while
-the auth-filtered browser list is implemented in `src/ui.rs` behind `/api/vms`.
-Moving the browser list back to `/api/workspaces` should be paired with one of
-these explicit follow-up decisions:
-
-- make core `GET /api/workspaces` cookie-aware and filtered for browser users,
-  while preserving an operator/admin path for full fleet listing;
-- split the unauthenticated/internal scheduler API away from public browser
-  `/api/workspaces`; or
-- add a new workspace-named browser list route that cannot be shadowed by the
-  existing core route.
-
-Until that API boundary is made explicit, keeping the one `/api/vms` list call
-is the safer inconsistency. Workspace action routes already use
-`/api/workspaces/<name>/...` and are auth-checked.
+- Resolved the `/api/vms` noun mismatch with the hard browser-auth choice:
+  `GET /api/workspaces` is now cookie-aware and filtered via
+  `visible_workspaces`, `POST /api/workspaces` requires admin, workspace events
+  require workspace authorization, and `/api/jobs` create/get require a session
+  authorized for the job workspace. Worker polling stays on bearer-token
+  `/worker/workspaces`.
+- HARD CUT OpenCode and OpenAI subscription auth. OpenCode service config,
+  routes, UI controls, tests, and Nix options are gone. `vm-auth-json`,
+  copied Codex/OpenCode auth paths, and legacy flat config migration are gone.
+  The baseline is Hermes with OpenRouter proxy credentials. This is intentional:
+  history can recover the deleted paths if they become necessary, but the
+  product surface should not carry them as dormant complexity.
+- Dev config now follows the same config path as production. `config.dev.json`
+  points at proxy credentials, and `scripts/dev-env` creates ignored local CA
+  material so `mom config doctor` is valid before the real dev proxy is started.
+  The dev proxy service itself is still an operator/dev prerequisite for real
+  Hermes model calls; we are not adding a second config mode just for local
+  convenience.
 
 ## Plan Of Attack
 
@@ -150,13 +141,12 @@ Stabilize the test guardrails first. Fake fleet tests should be reliable under
 the normal test command or explicitly serialized by the harness.
 
 Rename the primary UI/API surface from VM to workspace. Add workspace-named
-routes and stop returning `vms` in new response bodies. The browser action
-routes should use `/api/workspaces/...`; the browser list route remains the
-auth-filtered `/api/vms` compatibility endpoint until the canonical
-`/api/workspaces` list is secured or split from the internal control-plane API.
+routes and stop returning `vms` in new response bodies. The browser now uses
+cookie-authenticated `/api/workspaces`; worker/internal listing remains under
+`/worker/workspaces`.
 
-Make Hermes the only default visible service. OpenCode should require an
-explicit enable flag. Codex prompt flows should not appear in the primary UI.
+Make Hermes the only visible service. OpenCode and Codex prompt flows are not
+baseline features; add them back from history only with a concrete product need.
 
 Build the first Mom-native chat widget against the Hermes API server. Keep it
 small: session list, message history, composer, streaming response, cancel if
@@ -170,8 +160,8 @@ the terminal-rendered TUI the primary chat experience.
 Defer ACP. The chat worktree prototype proves ACP can work, but generic ACP adds
 process supervision, JSON-RPC event translation, permission plumbing, and
 multi-agent complexity. Revisit ACP only after the Hermes API chat hits a real
-missing capability such as permissions, richer tool timeline, durable session
-control, or a need for OpenCode parity.
+missing capability such as permissions, richer tool timeline, or durable
+session control.
 
 Replace node-port service URLs with stable workspace routes. The API should
 resolve workspace to assigned node and service internally; tunnel hostnames
@@ -183,18 +173,17 @@ commands behind compatibility aliases; remove them from the CLI. There are no
 external users to preserve, and deployments/databases can be reset while this is
 still early. Raw sandbox helpers may remain as Rust internals only when
 workspace/node code needs them. After this pass, the unused raw lifecycle
-wrappers were removed too; workspace-scoped exec/codex/hermes and base snapshot
-doctor paths remain because they are still part of the supported flow.
+wrappers were removed too; workspace-scoped exec/hermes and base snapshot doctor
+paths remain because they are still part of the supported flow.
 
 Tighten config around the happy path. Generated config and Nix examples should
-prefer `openrouter-proxy`; guest auth file mode should stay explicit and
-experimental.
+use OpenRouter proxy credentials directly; guest auth file mode is removed.
 
 All product/runtime flags should flow through the Agent Mom config file or the
 Nix module that generates it. Environment variables are still fine for process
 placement/secrets that are already process-local (`MOM_CONFIG`,
 `MOM_STATE_DIR`, worker URL/token plumbing, test-only fake runtime), but not for
-feature switches such as OpenCode visibility.
+product behavior.
 
 Keep runners dumb. The API owns placement and recovery. Workers claim assigned
 jobs, operate local VMs and volumes, open local services, run backup/restore,

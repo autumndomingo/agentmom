@@ -20,8 +20,27 @@ find_port() {
 api_port="$(find_port "${MOM_API_PORT:-8787}")"
 worker_port="$(find_port "${MOM_WORKER_PORT:-9090}")"
 
-mkdir -p .state/mom .state/msb .state/logs
+mkdir -p .state/mom .state/msb .state/logs dev/iron-proxy
 msb_path="${repo_root}/.state/msb/bin/msb"
+dev_ca_cert="${repo_root}/dev/iron-proxy/ca.crt"
+dev_ca_key="${repo_root}/dev/iron-proxy/ca.key"
+
+if [ ! -s "${dev_ca_cert}" ] || [ ! -s "${dev_ca_key}" ]; then
+  tmpdir="$(mktemp -d "${repo_root}/dev/iron-proxy/ca.XXXXXX")"
+  trap 'rm -rf "${tmpdir}"' EXIT
+  openssl genrsa -out "${tmpdir}/ca.key" 4096 >/dev/null 2>&1
+  openssl req -x509 -new -nodes \
+    -key "${tmpdir}/ca.key" \
+    -sha256 -days 3650 \
+    -subj "/CN=agentmom dev iron-proxy CA" \
+    -addext "basicConstraints=critical,CA:TRUE" \
+    -addext "keyUsage=critical,keyCertSign" \
+    -out "${tmpdir}/ca.crt" >/dev/null 2>&1
+  install -m 0400 "${tmpdir}/ca.key" "${dev_ca_key}"
+  install -m 0444 "${tmpdir}/ca.crt" "${dev_ca_cert}"
+  rm -rf "${tmpdir}"
+  trap - EXIT
+fi
 
 env_file=".state/dev.env"
 {

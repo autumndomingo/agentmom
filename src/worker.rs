@@ -395,18 +395,6 @@ async fn execute_job(api: &WorkerApi, job: &JobRecord) -> Result<Value> {
             let output = capture_guest_command(&sandbox, command).await?;
             Ok(output)
         }
-        "codex" => {
-            let prompt = payload
-                .get("prompt")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("codex job payload requires prompt"))?;
-            let workspace = api.workspace(&job.workspace_name).await?;
-            api.update_workspace(&workspace.name, None, None, true, false)
-                .await?;
-            let sandbox = workspace_running_sandbox_local(api, &workspace).await?;
-            run_codex(&sandbox, prompt).await?;
-            Ok(json!({ "ok": true }))
-        }
         "hermes" => {
             let empty_args = Vec::new();
             let args = payload

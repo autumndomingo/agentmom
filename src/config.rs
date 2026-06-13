@@ -1,7 +1,4 @@
-use std::{
-    env, fs,
-    path::{Path, PathBuf},
-};
+use std::{env, fs, path::PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -20,8 +17,6 @@ pub(crate) struct MomConfig {
     pub(crate) guest: GuestConfig,
     #[serde(default)]
     pub(crate) auth: AuthConfig,
-    #[serde(default)]
-    pub(crate) features: FeatureConfig,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -34,12 +29,6 @@ pub(crate) struct RuntimeConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CredentialConfig {
-    #[serde(default = "default_credential_mode")]
-    pub(crate) mode: String,
-    #[serde(default)]
-    pub(crate) codex_auth_path: PathBuf,
-    #[serde(default = "default_opencode_auth_path")]
-    pub(crate) opencode_auth_path: PathBuf,
     #[serde(default)]
     pub(crate) proxy_url: Option<String>,
     #[serde(default)]
@@ -49,9 +38,6 @@ pub(crate) struct CredentialConfig {
 impl Default for CredentialConfig {
     fn default() -> Self {
         Self {
-            mode: default_credential_mode(),
-            codex_auth_path: PathBuf::new(),
-            opencode_auth_path: default_opencode_auth_path(),
             proxy_url: None,
             proxy_ca_path: None,
         }
@@ -85,41 +71,6 @@ pub(crate) struct AuthConfig {
     pub(crate) secret_file: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct FeatureConfig {
-    #[serde(default)]
-    pub(crate) opencode: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CredentialMode {
-    VmAuthJson,
-    OpenRouterProxy,
-}
-
-impl CredentialMode {
-    pub(crate) fn parse(raw: &str) -> Result<Self> {
-        match raw {
-            "vm-auth-json" | "file" => Ok(Self::VmAuthJson),
-            "openrouter-proxy" | "proxy" => Ok(Self::OpenRouterProxy),
-            _ => {
-                bail!(
-                    "credentials.mode must be one of: vm-auth-json, openrouter-proxy; got {raw:?}"
-                )
-            }
-        }
-    }
-
-    pub(crate) fn uses_guest_auth_files(self) -> bool {
-        matches!(self, Self::VmAuthJson)
-    }
-
-    pub(crate) fn uses_proxy(self) -> bool {
-        matches!(self, Self::OpenRouterProxy)
-    }
-}
-
 impl MomConfig {
     pub(crate) fn snapshot_name(&self) -> Result<&str> {
         self.runtime
@@ -128,10 +79,6 @@ impl MomConfig {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .ok_or_else(|| anyhow!("runtime.snapshot_name is required"))
-    }
-
-    pub(crate) fn credential_mode(&self) -> Result<CredentialMode> {
-        CredentialMode::parse(&self.credentials.mode)
     }
 
     pub(crate) fn hermes_profile(&self) -> &str {
@@ -146,48 +93,25 @@ impl MomConfig {
         self.credentials.proxy_url.as_deref()
     }
 
-    pub(crate) fn validate_for_guest_config(&self) -> Result<CredentialMode> {
-        let credential_mode = self.credential_mode()?;
-        match credential_mode {
-            CredentialMode::VmAuthJson => {
-                if self.credentials.codex_auth_path.as_os_str().is_empty() {
-                    bail!("credentials.mode vm-auth-json requires credentials.codex_auth_path");
-                }
-            }
-            CredentialMode::OpenRouterProxy => {
-                let proxy_url = self.credential_proxy_url().unwrap_or("").trim();
-                if proxy_url.is_empty() {
-                    bail!("credentials.mode openrouter-proxy requires credentials.proxy_url");
-                }
-                if self.credentials.proxy_ca_path.is_none() {
-                    bail!("credentials.mode openrouter-proxy requires credentials.proxy_ca_path");
-                }
-            }
+    pub(crate) fn validate_for_guest_config(&self) -> Result<()> {
+        let proxy_url = self.credential_proxy_url().unwrap_or("").trim();
+        if proxy_url.is_empty() {
+            bail!("credentials.proxy_url is required");
         }
-        Ok(credential_mode)
+        if self.credentials.proxy_ca_path.is_none() {
+            bail!("credentials.proxy_ca_path is required");
+        }
+        Ok(())
     }
 
     pub(crate) fn validate_referenced_files(&self) -> Result<()> {
-        match self.validate_for_guest_config()? {
-            CredentialMode::VmAuthJson => {
-                resolve_required_file(
-                    &self.credentials.codex_auth_path,
-                    "credentials.codex_auth_path",
-                )?;
-                resolve_required_file(
-                    &self.credentials.opencode_auth_path,
-                    "credentials.opencode_auth_path",
-                )?;
-            }
-            CredentialMode::OpenRouterProxy => {
-                let ca_path = self
-                    .credentials
-                    .proxy_ca_path
-                    .as_ref()
-                    .expect("validate_for_guest_config requires proxy_ca_path");
-                resolve_required_file(ca_path, "credentials.proxy_ca_path")?;
-            }
-        }
+        self.validate_for_guest_config()?;
+        let ca_path = self
+            .credentials
+            .proxy_ca_path
+            .as_ref()
+            .expect("validate_for_guest_config requires proxy_ca_path");
+        resolve_required_file(ca_path, "credentials.proxy_ca_path")?;
         Ok(())
     }
 
@@ -218,9 +142,6 @@ impl MomConfig {
                 "snapshot_name": self.runtime.snapshot_name,
             },
             "credentials": {
-                "mode": self.credentials.mode,
-                "codex_auth_path": redact_path(&self.credentials.codex_auth_path),
-                "opencode_auth_path": redact_path(&self.credentials.opencode_auth_path),
                 "proxy_url": self.credentials.proxy_url,
                 "proxy_ca_path": self.credentials.proxy_ca_path.as_ref().map(|p| p.display().to_string()),
             },
@@ -231,63 +152,8 @@ impl MomConfig {
             "auth": {
                 "secret": self.auth.secret.as_ref().map(|_| "<redacted>"),
                 "secret_file": self.auth.secret_file.as_ref().map(|p| p.display().to_string()),
-            },
-            "features": {
-                "opencode": self.features.opencode,
             }
         })
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum ConfigFile {
-    Structured(MomConfig),
-    Legacy(LegacyMomConfig),
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LegacyMomConfig {
-    #[serde(default)]
-    codex_auth_path: PathBuf,
-    #[serde(default = "default_opencode_auth_path")]
-    opencode_auth_path: PathBuf,
-    #[serde(default = "default_hermes_profile")]
-    hermes_profile: String,
-    #[serde(default = "default_model")]
-    hermes_model: String,
-    #[serde(default)]
-    snapshot_name: Option<String>,
-    #[serde(default = "default_legacy_credential_mode")]
-    credential_mode: String,
-    #[serde(default)]
-    credential_proxy_url: Option<String>,
-    #[serde(default)]
-    credential_proxy_ca_path: Option<PathBuf>,
-}
-
-impl From<LegacyMomConfig> for MomConfig {
-    fn from(value: LegacyMomConfig) -> Self {
-        Self {
-            schema_version: 1,
-            runtime: RuntimeConfig {
-                snapshot_name: value.snapshot_name,
-            },
-            credentials: CredentialConfig {
-                mode: value.credential_mode,
-                codex_auth_path: value.codex_auth_path,
-                opencode_auth_path: value.opencode_auth_path,
-                proxy_url: value.credential_proxy_url,
-                proxy_ca_path: value.credential_proxy_ca_path,
-            },
-            guest: GuestConfig {
-                hermes_profile: value.hermes_profile,
-                model: value.hermes_model,
-            },
-            auth: AuthConfig::default(),
-            features: FeatureConfig::default(),
-        }
     }
 }
 
@@ -299,12 +165,7 @@ pub(crate) fn load_mom_config() -> Result<MomConfig> {
             path.display()
         )
     })?;
-    let config: ConfigFile = serde_json::from_str(&raw)
-        .with_context(|| format!("parse Agent Mom config {}", path.display()))?;
-    Ok(match config {
-        ConfigFile::Structured(config) => config,
-        ConfigFile::Legacy(config) => config.into(),
-    })
+    serde_json::from_str(&raw).with_context(|| format!("parse Agent Mom config {}", path.display()))
 }
 
 pub(crate) fn config_path() -> Result<PathBuf> {
@@ -365,14 +226,6 @@ fn default_schema_version() -> u32 {
     1
 }
 
-fn default_credential_mode() -> String {
-    "openrouter-proxy".to_string()
-}
-
-fn default_legacy_credential_mode() -> String {
-    "vm-auth-json".to_string()
-}
-
 fn default_hermes_profile() -> String {
     "main".to_string()
 }
@@ -381,32 +234,12 @@ fn default_model() -> String {
     "gpt-5.5".to_string()
 }
 
-fn default_opencode_auth_path() -> PathBuf {
-    home_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join(".local")
-        .join("share")
-        .join("opencode")
-        .join("auth.json")
-}
-
-fn redact_path(path: &Path) -> Option<String> {
-    if path.as_os_str().is_empty() {
-        None
-    } else {
-        Some(path.display().to_string())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn parse_config(raw: &str) -> MomConfig {
-        match serde_json::from_str::<ConfigFile>(raw).unwrap() {
-            ConfigFile::Structured(config) => config,
-            ConfigFile::Legacy(config) => config.into(),
-        }
+        serde_json::from_str(raw).unwrap()
     }
 
     #[test]
@@ -416,7 +249,6 @@ mod tests {
               "schema_version": 1,
               "runtime": { "snapshot_name": "mom-base-abc123" },
               "credentials": {
-                "mode": "openrouter-proxy",
                 "proxy_url": "http://127.0.0.1:1080",
                 "proxy_ca_path": "/tmp/ca.crt"
               },
@@ -426,25 +258,18 @@ mod tests {
               },
               "auth": {
                 "secret": "dev-secret"
-              },
-              "features": {
-                "opencode": true
               }
             }"#,
         );
 
         assert_eq!(config.snapshot_name().unwrap(), "mom-base-abc123");
-        assert_eq!(
-            config.credential_mode().unwrap(),
-            CredentialMode::OpenRouterProxy
-        );
         assert_eq!(config.model(), "openai/gpt-5.5");
         assert_eq!(config.auth_secret().unwrap(), "dev-secret");
-        assert!(config.features.opencode);
+        assert_eq!(config.credential_proxy_url(), Some("http://127.0.0.1:1080"));
     }
 
     #[test]
-    fn structured_config_defaults_to_openrouter_proxy() {
+    fn missing_proxy_credentials_are_invalid_for_guest_config() {
         let config = parse_config(
             r#"{
               "schema_version": 1,
@@ -452,48 +277,21 @@ mod tests {
             }"#,
         );
 
-        assert_eq!(
-            config.credential_mode().unwrap(),
-            CredentialMode::OpenRouterProxy
-        );
+        assert!(config.validate_for_guest_config().is_err());
     }
 
     #[test]
-    fn legacy_flat_config_defaults_to_vm_auth_json() {
-        let config = parse_config(
+    fn rejects_legacy_subscription_auth_keys() {
+        let error = serde_json::from_str::<MomConfig>(
             r#"{
-              "snapshot_name": "mom-base-legacy-default",
-              "codex_auth_path": "/tmp/codex-auth.json"
+              "schema_version": 1,
+              "credentials": {
+                "mode": "vm-auth-json",
+                "codex_auth_path": "/tmp/codex-auth.json"
+              }
             }"#,
-        );
-
-        assert_eq!(
-            config.credential_mode().unwrap(),
-            CredentialMode::VmAuthJson
-        );
-    }
-
-    #[test]
-    fn migrates_legacy_flat_config() {
-        let config = parse_config(
-            r#"{
-              "snapshot_name": "mom-base-legacy",
-              "credential_mode": "vm-auth-json",
-              "codex_auth_path": "/tmp/codex-auth.json",
-              "opencode_auth_path": "/tmp/opencode-auth.json",
-              "hermes_profile": "main",
-              "hermes_model": "gpt-5.5"
-            }"#,
-        );
-
-        assert_eq!(config.snapshot_name().unwrap(), "mom-base-legacy");
-        assert_eq!(
-            config.credential_mode().unwrap(),
-            CredentialMode::VmAuthJson
-        );
-        assert_eq!(
-            config.credentials.codex_auth_path,
-            PathBuf::from("/tmp/codex-auth.json")
-        );
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown field"));
     }
 }

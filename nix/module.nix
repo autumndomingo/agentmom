@@ -10,9 +10,6 @@ let
       snapshot_name = cfg.runtime.snapshotName;
     };
     credentials = {
-      mode = cfg.credentials.mode;
-      codex_auth_path = cfg.credentials.codexAuthPath;
-      opencode_auth_path = cfg.credentials.opencodeAuthPath;
       proxy_url =
         if cfg.credentials.proxyUrl != null then cfg.credentials.proxyUrl
         else if cfg.credentialProxy.enable then cfg.credentialProxy.guestProxyUrl
@@ -28,9 +25,6 @@ let
     };
     auth = {
       secret_file = cfg.auth.secretFile;
-    };
-    features = {
-      opencode = cfg.features.opencode;
     };
   };
   effectiveConfigFile =
@@ -217,34 +211,16 @@ in
     };
 
     credentials = {
-      mode = lib.mkOption {
-        type = lib.types.enum [ "vm-auth-json" "openrouter-proxy" ];
-        default = "vm-auth-json";
-        description = "Credential strategy used when configuring guest sandboxes.";
-      };
-
-      codexAuthPath = lib.mkOption {
-        type = lib.types.str;
-        default = "~/.codex/auth.json";
-        description = "Host path copied into guests when credentials.mode is vm-auth-json.";
-      };
-
-      opencodeAuthPath = lib.mkOption {
-        type = lib.types.str;
-        default = "~/.local/share/opencode/auth.json";
-        description = "Host path used to seed OpenCode auth when credentials.mode is vm-auth-json.";
-      };
-
       proxyUrl = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
-        description = "Proxy URL written into guest environments when credentials.mode is openrouter-proxy.";
+        description = "OpenRouter proxy URL written into guest environments.";
       };
 
       proxyCaPath = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
-        description = "CA certificate path trusted by guests when credentials.mode is openrouter-proxy.";
+        description = "CA certificate path trusted by guests for the OpenRouter proxy.";
       };
     };
 
@@ -258,7 +234,7 @@ in
       model = lib.mkOption {
         type = lib.types.str;
         default = "gpt-5.5";
-        description = "Default model written into guest Hermes, Codex, and OpenCode config.";
+        description = "Default OpenRouter model written into guest Hermes config.";
       };
     };
 
@@ -267,14 +243,6 @@ in
         type = lib.types.nullOr lib.types.str;
         default = null;
         description = "Runtime file containing the Agent Mom browser-session and invite HMAC secret.";
-      };
-    };
-
-    features = {
-      opencode = lib.mkOption {
-        type = lib.types.bool;
-        default = false;
-        description = "Expose OpenCode service launch controls in the browser UI and API.";
       };
     };
 
@@ -454,7 +422,7 @@ in
       serviceTunnelBindHost = lib.mkOption {
         type = lib.types.str;
         default = "127.0.0.1";
-        description = "Host address used for Hermes/OpenCode service tunnels created by this worker.";
+        description = "Host address used for Hermes service tunnels created by this worker.";
       };
 
       serviceTunnelBaseUrl = lib.mkOption {
@@ -667,12 +635,12 @@ in
         message = "services.agentmom.runtime.snapshotName is required when the generated config is used by services.agentmom.worker.";
       }
       {
-        assertion = cfg.credentials.mode != "openrouter-proxy" || cfg.configFile != null || cfg.credentials.proxyUrl != null || cfg.credentialProxy.enable;
-        message = "services.agentmom.credentials.proxyUrl or services.agentmom.credentialProxy.enable is required for openrouter-proxy mode.";
+        assertion = cfg.configFile != null || cfg.credentials.proxyUrl != null || cfg.credentialProxy.enable;
+        message = "services.agentmom.credentials.proxyUrl or services.agentmom.credentialProxy.enable is required when the generated config is used.";
       }
       {
-        assertion = cfg.credentials.mode != "openrouter-proxy" || cfg.configFile != null || cfg.credentials.proxyCaPath != null || cfg.credentialProxy.enable;
-        message = "services.agentmom.credentials.proxyCaPath or services.agentmom.credentialProxy.enable is required for openrouter-proxy mode.";
+        assertion = cfg.configFile != null || cfg.credentials.proxyCaPath != null || cfg.credentialProxy.enable;
+        message = "services.agentmom.credentials.proxyCaPath or services.agentmom.credentialProxy.enable is required when the generated config is used.";
       }
       {
         assertion = !cfg.catalogBackup.enable || cfg.api.enable;
