@@ -230,8 +230,10 @@ just dev
 `config.dev.json` by default, starts `mom api` and `mom worker`, and uses the
 real microsandbox runtime. On a fresh checkout the first run installs the local
 microsandbox helper under `.state/msb` and builds the configured base snapshot.
-Hermes/OpenCode launch requests are routed from the API to the workspace's
-assigned worker over that worker's private `worker.url`.
+Hermes launch requests are routed from the API to the workspace's assigned
+worker over that worker's private `worker.url`.
+OpenCode is hidden by default; expose it only for debugging by building the UI
+with `VITE_ENABLE_OPENCODE=1` and running the API with `MOM_ENABLE_OPENCODE=1`.
 Foreground output is intentionally brief; detailed API, worker, build, and base
 image logs are written to `.state/logs/`.
 
@@ -324,10 +326,10 @@ tokens for workers. Keep production behind Tailscale, Cloudflare, or another
 trusted reverse proxy for rate limiting, TLS, and network exposure control.
 
 Workers also expose private control endpoints, such as
-`POST /worker/services/{service}/open`, used by the API to open Hermes/OpenCode
-tunnels on the host that owns the workspace VM. Bind these endpoints to
-localhost for single-host deployments or to a Tailscale/private address for
-multi-host deployments.
+`POST /worker/services/{service}/open`, used by the API to open Hermes tunnels
+on the host that owns the workspace VM. OpenCode uses the same route only when
+explicitly enabled. Bind these endpoints to localhost for single-host
+deployments or to a Tailscale/private address for multi-host deployments.
 
 Worker endpoints require a bearer token through `workerTokenFile`,
 `MOM_WORKER_TOKEN`, or `MOM_WORKER_TOKEN_FILE`.
