@@ -3,6 +3,7 @@ use std::{
     net::TcpListener,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    sync::{Arc, OnceLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -11,9 +12,20 @@ use reqwest::StatusCode;
 use rusqlite::Connection;
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 const MOM_BIN: &str = env!("CARGO_BIN_EXE_mom");
 const WORKER_TOKEN: &str = "test-worker-token";
+static FLEET_TEST_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
+
+async fn fleet_test_guard() -> OwnedSemaphorePermit {
+    FLEET_TEST_SEMAPHORE
+        .get_or_init(|| Arc::new(Semaphore::new(1)))
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("fleet test semaphore should not close")
+}
 
 struct ChildGuard {
     child: Child,
@@ -136,6 +148,7 @@ async fn first_user_claims_admin_and_existing_users_need_their_own_code() -> Res
 
 #[tokio::test]
 async fn fake_worker_start_stop_backup_jobs_update_central_state() -> Result<()> {
+    let _guard = fleet_test_guard().await;
     let fleet = TestFleet::start().await?;
     let node = spawn_worker("node-a", &fleet.api_url)?;
     wait_for_node(fleet.api_state.path(), "node-a").await?;
@@ -169,6 +182,7 @@ async fn fake_worker_start_stop_backup_jobs_update_central_state() -> Result<()>
 
 #[tokio::test]
 async fn workspace_backup_cli_queues_remote_worker_job_when_volume_is_not_local() -> Result<()> {
+    let _guard = fleet_test_guard().await;
     let fleet = TestFleet::start().await?;
     let _node = spawn_worker("node-a", &fleet.api_url)?;
     wait_for_node(fleet.api_state.path(), "node-a").await?;
@@ -189,6 +203,7 @@ async fn workspace_backup_cli_queues_remote_worker_job_when_volume_is_not_local(
 
 #[tokio::test]
 async fn workspace_inspect_labels_remote_runtime_as_not_checked_locally() -> Result<()> {
+    let _guard = fleet_test_guard().await;
     let fleet = TestFleet::start().await?;
     let _node = spawn_worker("node-a", &fleet.api_url)?;
     wait_for_node(fleet.api_state.path(), "node-a").await?;
@@ -219,6 +234,7 @@ async fn workspace_inspect_labels_remote_runtime_as_not_checked_locally() -> Res
 
 #[tokio::test]
 async fn fake_workers_create_assigned_workspace_without_shared_sqlite() -> Result<()> {
+    let _guard = fleet_test_guard().await;
     let fleet = TestFleet::start().await?;
 
     let node_a = spawn_worker("node-a", &fleet.api_url)?;
@@ -246,6 +262,7 @@ async fn fake_workers_create_assigned_workspace_without_shared_sqlite() -> Resul
 
 #[tokio::test]
 async fn ui_create_selects_registered_worker_node() -> Result<()> {
+    let _guard = fleet_test_guard().await;
     let fleet = TestFleet::start().await?;
     let node = spawn_worker("node-a", &fleet.api_url)?;
     wait_for_node(fleet.api_state.path(), "node-a").await?;
@@ -271,6 +288,7 @@ async fn ui_create_selects_registered_worker_node() -> Result<()> {
 
 #[tokio::test]
 async fn unpinned_jobs_are_pinned_to_workspace_owner() -> Result<()> {
+    let _guard = fleet_test_guard().await;
     let fleet = TestFleet::start().await?;
     let node_a = spawn_worker("node-a", &fleet.api_url)?;
     let node_b = spawn_worker("node-b", &fleet.api_url)?;
@@ -304,6 +322,7 @@ async fn unpinned_jobs_are_pinned_to_workspace_owner() -> Result<()> {
 
 #[tokio::test]
 async fn worker_state_updates_require_assigned_node() -> Result<()> {
+    let _guard = fleet_test_guard().await;
     let fleet = TestFleet::start().await?;
     let _node_a = spawn_worker("node-a", &fleet.api_url)?;
     wait_for_node(fleet.api_state.path(), "node-a").await?;
@@ -328,6 +347,7 @@ async fn worker_state_updates_require_assigned_node() -> Result<()> {
 
 #[tokio::test]
 async fn worker_events_requires_worker_token() -> Result<()> {
+    let _guard = fleet_test_guard().await;
     let fleet = TestFleet::start().await?;
 
     let response = reqwest::Client::new()
@@ -341,6 +361,7 @@ async fn worker_events_requires_worker_token() -> Result<()> {
 
 #[tokio::test]
 async fn worker_workspace_list_requires_token_and_is_node_scoped() -> Result<()> {
+    let _guard = fleet_test_guard().await;
     let fleet = TestFleet::start().await?;
     let _node_a = spawn_worker("node-a", &fleet.api_url)?;
     let _node_b = spawn_worker("node-b", &fleet.api_url)?;
@@ -384,6 +405,7 @@ async fn worker_workspace_list_requires_token_and_is_node_scoped() -> Result<()>
 
 #[tokio::test]
 async fn recover_host_reassigns_and_restores_latest_backup_on_target_node() -> Result<()> {
+    let _guard = fleet_test_guard().await;
     let fleet = TestFleet::start().await?;
     let node_a = spawn_worker("node-a", &fleet.api_url)?;
     let node_b = spawn_worker("node-b", &fleet.api_url)?;
@@ -416,6 +438,7 @@ async fn recover_host_reassigns_and_restores_latest_backup_on_target_node() -> R
 
 #[tokio::test]
 async fn worker_service_open_rejects_spoofed_sandbox_identity() -> Result<()> {
+    let _guard = fleet_test_guard().await;
     let fleet = TestFleet::start().await?;
     let node = spawn_worker("node-a", &fleet.api_url)?;
     wait_for_node(fleet.api_state.path(), "node-a").await?;
@@ -447,6 +470,7 @@ async fn worker_service_open_rejects_spoofed_sandbox_identity() -> Result<()> {
 
 #[tokio::test]
 async fn create_selects_fresh_worker_over_stale_node() -> Result<()> {
+    let _guard = fleet_test_guard().await;
     let fleet = TestFleet::start().await?;
     insert_node(fleet.api_state.path(), "stale-node", now_epoch()? - 3600)?;
     let node = spawn_worker("fresh-node", &fleet.api_url)?;
@@ -473,6 +497,7 @@ async fn create_selects_fresh_worker_over_stale_node() -> Result<()> {
 
 #[tokio::test]
 async fn duplicate_create_does_not_move_existing_workspace() -> Result<()> {
+    let _guard = fleet_test_guard().await;
     let fleet = TestFleet::start().await?;
     let node_a = spawn_worker("node-a", &fleet.api_url)?;
     let node_b = spawn_worker("node-b", &fleet.api_url)?;
@@ -502,6 +527,7 @@ async fn duplicate_create_does_not_move_existing_workspace() -> Result<()> {
 
 #[tokio::test]
 async fn explicit_create_rejects_full_node() -> Result<()> {
+    let _guard = fleet_test_guard().await;
     let fleet = TestFleet::start().await?;
     insert_node_with_capacity(fleet.api_state.path(), "full-node", now_epoch()?, 1)?;
     insert_workspace(fleet.api_state.path(), "existing", "full-node")?;
@@ -521,6 +547,7 @@ async fn explicit_create_rejects_full_node() -> Result<()> {
 
 #[tokio::test]
 async fn idle_stopped_workspace_does_not_count_against_capacity() -> Result<()> {
+    let _guard = fleet_test_guard().await;
     let fleet = TestFleet::start().await?;
     insert_node_with_capacity(fleet.api_state.path(), "node-a", now_epoch()?, 1)?;
     insert_workspace_with_state(
@@ -550,6 +577,7 @@ async fn idle_stopped_workspace_does_not_count_against_capacity() -> Result<()> 
 
 #[tokio::test]
 async fn worker_reconcile_ignores_unassigned_and_idle_stopped_workspaces() -> Result<()> {
+    let _guard = fleet_test_guard().await;
     let fleet = TestFleet::start().await?;
     insert_unassigned_workspace(fleet.api_state.path(), "legacy")?;
     insert_workspace_with_state(
@@ -584,6 +612,7 @@ async fn worker_reconcile_ignores_unassigned_and_idle_stopped_workspaces() -> Re
 
 #[tokio::test]
 async fn offline_node_is_not_reenabled_by_stale_heartbeat() -> Result<()> {
+    let _guard = fleet_test_guard().await;
     let fleet = TestFleet::start().await?;
     let client = reqwest::Client::new();
     insert_node_with_status(
@@ -662,6 +691,7 @@ async fn offline_node_is_not_reenabled_by_stale_heartbeat() -> Result<()> {
 
 #[tokio::test]
 async fn node_lifecycle_controls_placement_and_claims() -> Result<()> {
+    let _guard = fleet_test_guard().await;
     let fleet = TestFleet::start().await?;
     let node = spawn_worker("node-a", &fleet.api_url)?;
     wait_for_node(fleet.api_state.path(), "node-a").await?;
@@ -707,6 +737,7 @@ async fn node_lifecycle_controls_placement_and_claims() -> Result<()> {
 
 #[tokio::test]
 async fn catalog_backup_and_monitor_check_cover_deployed_catalog() -> Result<()> {
+    let _guard = fleet_test_guard().await;
     let fleet = TestFleet::start().await?;
     let _node = spawn_worker("node-a", &fleet.api_url)?;
     wait_for_node(fleet.api_state.path(), "node-a").await?;
@@ -767,6 +798,7 @@ async fn catalog_backup_and_monitor_check_cover_deployed_catalog() -> Result<()>
 
 #[tokio::test]
 async fn worker_register_rejects_unspecified_worker_url() -> Result<()> {
+    let _guard = fleet_test_guard().await;
     let fleet = TestFleet::start().await?;
     let response = reqwest::Client::new()
         .post(format!("{}/worker/register", fleet.api_url))
@@ -790,6 +822,7 @@ async fn worker_register_rejects_unspecified_worker_url() -> Result<()> {
 
 #[tokio::test]
 async fn worker_register_rejects_urls_outside_allowlist() -> Result<()> {
+    let _guard = fleet_test_guard().await;
     let fleet =
         TestFleet::start_with_api_env(&[("MOM_WORKER_URL_ALLOWLIST", "http://100.64.0.42:9090")])
             .await?;
@@ -834,6 +867,7 @@ async fn worker_register_rejects_urls_outside_allowlist() -> Result<()> {
 
 #[tokio::test]
 async fn sse_wakes_worker_without_waiting_for_poll_interval() -> Result<()> {
+    let _guard = fleet_test_guard().await;
     let fleet = TestFleet::start().await?;
     let _node = spawn_worker_with_options("node-a", &fleet.api_url, "30", None)?;
     wait_for_node(fleet.api_state.path(), "node-a").await?;
@@ -851,6 +885,7 @@ async fn sse_wakes_worker_without_waiting_for_poll_interval() -> Result<()> {
 
 #[tokio::test]
 async fn worker_survives_transient_api_outage_and_claims_after_recovery() -> Result<()> {
+    let _guard = fleet_test_guard().await;
     let mut fleet = TestFleet::start().await?;
     let _node = spawn_worker("node-a", &fleet.api_url)?;
     wait_for_node(fleet.api_state.path(), "node-a").await?;
@@ -868,6 +903,7 @@ async fn worker_survives_transient_api_outage_and_claims_after_recovery() -> Res
 
 #[tokio::test]
 async fn service_open_routes_to_assigned_worker_url() -> Result<()> {
+    let _guard = fleet_test_guard().await;
     let fleet = TestFleet::start().await?;
     let node_a =
         spawn_worker_with_options("node-a", &fleet.api_url, "1", Some("http://node-a.fake"))?;
@@ -916,6 +952,7 @@ async fn service_open_routes_to_assigned_worker_url() -> Result<()> {
 
 #[tokio::test]
 async fn tls_ask_allows_only_registered_service_tunnel_hostnames() -> Result<()> {
+    let _guard = fleet_test_guard().await;
     let fleet = TestFleet::start().await?;
     let _node = spawn_worker_with_options(
         "mom-1",
