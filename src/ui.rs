@@ -228,7 +228,7 @@ fn worker_acp_ws_url(worker_url: &str, workspace: &WorkspaceRecord) -> Result<St
 }
 
 async fn proxy_acp_websocket(
-    browser_socket: axum::extract::ws::WebSocket,
+    mut browser_socket: axum::extract::ws::WebSocket,
     worker_ws_url: String,
 ) -> Result<()> {
     let token = worker_token()?;
@@ -237,7 +237,18 @@ async fn proxy_acp_websocket(
         AUTHORIZATION,
         HeaderValue::from_str(&format!("Bearer {token}"))?,
     );
-    let (worker_socket, _) = connect_async(request).await?;
+    let worker_socket = match connect_async(request).await {
+        Ok((socket, _)) => socket,
+        Err(error) => {
+            let _ = send_acp_status(
+                &mut browser_socket,
+                "error",
+                &format!("Hermes ACP worker websocket failed: {error}"),
+            )
+            .await;
+            return Err(error.into());
+        }
+    };
     let (mut browser_tx, mut browser_rx) = browser_socket.split();
     let (mut worker_tx, mut worker_rx) = worker_socket.split();
 
@@ -296,6 +307,28 @@ async fn proxy_acp_websocket(
         result = worker_to_browser => result?,
     }
     Ok(())
+}
+
+async fn send_acp_status(
+    socket: &mut axum::extract::ws::WebSocket,
+    state: &str,
+    message: &str,
+) -> Result<()> {
+    socket
+        .send(Message::Text(
+            json!({
+                "jsonrpc": "2.0",
+                "method": "mom/status",
+                "params": {
+                    "state": state,
+                    "message": message,
+                },
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .map_err(|error| anyhow!("send Hermes ACP websocket status: {error}"))
 }
 
 async fn open_hermes_dashboard(name: &str) -> Result<Json<CommandResult>, UiError> {

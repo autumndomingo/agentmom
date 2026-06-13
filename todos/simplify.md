@@ -238,3 +238,75 @@ now, and lost-host recovery remains an explicit operator command.
   `127.0.0.1:5177`.
 - Added fake-fleet WebSocket coverage for `/api/workspaces/<workspace>/chat/ws`
   routing through the assigned worker and carrying raw JSON-RPC frames.
+- Real `just dev` exposed a non-ACP runtime bug: the worktree-local
+  `.state/msb` path made Microsandbox's derived relay socket exceed macOS Unix
+  socket limits, so the worker could not create the sandbox and Hermes never
+  launched. Dev now uses a short per-repo `/tmp/mom-msb-*` home for
+  Microsandbox, and the browser WebSocket gets a concrete `mom/status` error
+  when the API cannot reach the worker ACP socket.
+- Browser e2e then reached Hermes itself. `initialize` succeeded, but
+  `session/new` exposed two launch/protocol hygiene issues: the ACP process must
+  be started with the configured `HERMES_HOME`, and Hermes 0.16 can print
+  dependency setup chatter to stdout before its JSON-RPC response. Mom still
+  stays dumb: it does not interpret ACP, but it now keeps the stdout transport
+  JSON-RPC-only by dropping non-JSON child output and logging it in the worker.
+- Playwright caught a UI readiness race that fake tests missed: the transport
+  status frame said `ready`, so the composer enabled before ACP `session/new`
+  returned and sent `session/prompt` with `sessionId: null`. Transport status is
+  now `connected`; only the JSON-RPC `session/new` result can make chat `ready`.
+- Added Playwright to the Nix dev shell because browser-level WebSocket frame
+  capture is now part of this feature's expected verification. The shell exposes
+  `playwright`, `require("playwright-core")`, and Nix-managed browsers without
+  ad hoc npm browser downloads.
+- The next Playwright pass showed browser ACP still lacked provider auth even
+  with `HERMES_HOME`; the live `initialize` auth methods omitted OpenRouter.
+  Direct workspace exec had sourced the guest proxy profile, while the ACP SSH
+  command had not. The ACP launch now sources `/etc/profile.d/agentmom-proxy.sh`
+  before `exec hermes-acp`, keeping provider/proxy configuration in the one
+  generated guest config path.
+- Dev credentials now use ignored repo-root `.env`, loaded by `just`. `just dev`
+  writes the local OpenRouter key into `.state/iron-proxy/openrouter-api-key`,
+  generates `.state/iron-proxy/config.yaml`, starts iron-proxy on
+  host loopback port `1080`, unsets the raw env var before API/worker launch,
+  and stops the proxy with the API/worker. Hard cut after review: no direct-key
+  ACP fallback, no dev-only Hermes credential mode, and no second Hermes config.
+  Hermes ACP always sources the generated guest proxy profile and uses the same
+  `credentials.proxy_url` path as production. The missing piece was sandbox
+  networking/config: `127.0.0.1:1080` was guest loopback, not the host proxy,
+  and Microsandbox's default policy allowed public egress but only host DNS.
+  `config.dev.json` now uses `host.microsandbox.internal:1080`, and
+  workspace/base sandboxes install an explicit policy for public egress, host
+  DNS, and host TCP `1080`. If the key is missing, `just dev` fails before
+  startup.
+- The live OpenRouter model catalog showed `openai/gpt-4o-mini` is available,
+  so `config.dev.json` now pins that model. This keeps dev e2e focused on Mom
+  and ACP behavior instead of a stale default model id.
+- Subagent review confirmed the hard-cut direction: delete the direct-key ACP
+  fallback rather than preserving dev/prod credential drift. Pulled only the
+  useful frontend pieces from `simplify-acp`: RPC response method metadata,
+  chunk-aware transcript normalization, permission/tool/content block rendering,
+  and matching block styles. Skipped its Rust ACP code because it regressed
+  readiness, proxy sourcing, and non-JSON stdout filtering.
+- Final local e2e after the hard cut: reset dev DB/workspaces, onboarded a
+  fresh admin/workspace, verified `mom workspace proxy-smoke` from inside the
+  VM, then Playwright logged in and sent a Hermes ACP prompt through
+  `/api/workspaces/.../chat/ws`. Hermes returned the unique token through
+  OpenRouter via iron-proxy, with no ACP control bookkeeping rendered in chat.
+- Prompt lifecycle tightened: the composer remains busy after `session/prompt`
+  until the matching JSON-RPC response, websocket error, close, or local send
+  failure. This prevents overlapping turns while Hermes is still streaming.
+- Added `just dev-reset` as a dev-only runtime broom. The reset contract is
+  pid-file based: `just dev` writes `.state/dev.pid` for the dev runner,
+  iron-proxy, API, and worker, and `just dev-reset` only kills those recorded
+  PIDs before deleting `.state/`, the repo-scoped `/tmp/mom-msb-*`
+  Microsandbox home, and `dev/iron-proxy/`. No port scanning, no DB surgery,
+  and no command-line matching in the committed reset path. Existing stale
+  processes from before the pid-file change were cleaned up manually once.
+- Sidebar chat state is now local product UI state instead of a disguised
+  workspace list. The backend ACP path remains a raw pipe. The UI keeps one ACP
+  websocket per selected workspace, creates a local chat record for each
+  `session/new`, stores the returned Hermes `sessionId` on that chat, groups
+  raw ACP frames by chat/session, and sends `session/prompt` to the active
+  chat's `sessionId`. This is intentionally not persisted yet; durable chat
+  metadata can be a small Mom-owned API/table later without teaching Rust ACP
+  semantics.

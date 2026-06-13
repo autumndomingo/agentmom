@@ -19,9 +19,11 @@ find_port() {
 
 api_port="$(find_port "${MOM_API_PORT:-8787}")"
 worker_port="$(find_port "${MOM_WORKER_PORT:-9090}")"
+repo_hash="$(printf '%s' "${repo_root}" | shasum -a 256 | cut -c1-10)"
+msb_home="/tmp/mom-msb-${repo_hash}"
 
-mkdir -p .state/mom .state/msb .state/logs dev/iron-proxy
-msb_path="${repo_root}/.state/msb/bin/msb"
+mkdir -p .state/mom .state/logs dev/iron-proxy "${msb_home}"
+msb_path="${msb_home}/bin/msb"
 dev_ca_cert="${repo_root}/dev/iron-proxy/ca.crt"
 dev_ca_key="${repo_root}/dev/iron-proxy/ca.key"
 
@@ -46,7 +48,7 @@ env_file=".state/dev.env"
 {
   printf 'MOM_CONFIG=%q\n' "${repo_root}/config.dev.json"
   printf 'MOM_STATE_DIR=%q\n' "${repo_root}/.state/mom"
-  printf 'MSB_HOME=%q\n' "${repo_root}/.state/msb"
+  printf 'MSB_HOME=%q\n' "${msb_home}"
   printf 'MSB_PATH=%q\n' "${msb_path}"
   printf 'MOM_WORKER_TOKEN_FILE=%q\n' "${repo_root}/dev/secrets/worker-token"
   printf 'MOM_UI_DIST=%q\n' "${repo_root}/ui/dist"

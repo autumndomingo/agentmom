@@ -1044,7 +1044,7 @@ async fn hermes_chat_websocket_routes_to_assigned_worker() -> Result<()> {
         .ok_or_else(|| anyhow!("chat websocket closed before status"))??;
     let status = ws_text_json(status)?;
     assert_eq!(status["method"], "mom/status");
-    assert_eq!(status["params"]["state"], "ready");
+    assert_eq!(status["params"]["state"], "connected");
     assert_eq!(status["params"]["workspace"], "chat");
 
     let ping = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} });

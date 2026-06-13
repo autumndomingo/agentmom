@@ -52,7 +52,7 @@ pub(crate) async fn fake_worker_socket(workspace_name: String, mut socket: WebSo
             json!({
                 "jsonrpc": "2.0",
                 "method": "mom/status",
-                "params": { "state": "ready", "workspace": workspace_name, "fake": true }
+                "params": { "state": "connected", "workspace": workspace_name, "fake": true }
             })
             .to_string()
             .into(),
@@ -85,6 +85,8 @@ async fn start_acp_process(
 ) -> Result<AcpProcess> {
     cleanup_workspace(state, workspace_name).await;
     preflight_hermes(sandbox).await?;
+    let config = crate::load_mom_config()?;
+    let command = acp_shell_command(&config);
 
     let key_dir = env::temp_dir().join(format!(
         "mom-hermes-acp-{workspace_name}-{}",
@@ -140,7 +142,6 @@ async fn start_acp_process(
         }
     });
 
-    let command = "cd /workspace && if command -v hermes-acp >/dev/null 2>&1; then exec hermes-acp; elif command -v hermes >/dev/null 2>&1; then exec hermes acp; else echo 'hermes-acp/hermes acp is not installed' >&2; exit 127; fi";
     let mut child = Command::new("ssh")
         .args(["-F", "/dev/null"])
         .arg("-i")
@@ -157,8 +158,8 @@ async fn start_acp_process(
             "-p",
             &ssh_port.to_string(),
             "root@127.0.0.1",
-            command,
         ])
+        .arg(command)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -187,13 +188,21 @@ async fn start_acp_process(
     Ok(AcpProcess { stdin, stdout })
 }
 
+fn acp_shell_command(config: &crate::config::MomConfig) -> String {
+    let hermes_home = format!("{}/{}", crate::GUEST_HERMES_HOME, config.hermes_profile());
+    let hermes_home = crate::shell_quote(&hermes_home);
+    format!(
+        "if [ -f /etc/profile.d/agentmom-proxy.sh ]; then . /etc/profile.d/agentmom-proxy.sh; fi; export HERMES_HOME={hermes_home}; cd /workspace && if command -v hermes-acp >/dev/null 2>&1; then exec hermes-acp; elif command -v hermes >/dev/null 2>&1; then exec hermes acp; else echo 'hermes-acp/hermes acp is not installed' >&2; exit 127; fi"
+    )
+}
+
 async fn pipe_socket_to_acp(mut socket: WebSocket, process: AcpProcess) {
     let _ = socket
         .send(Message::Text(
             json!({
                 "jsonrpc": "2.0",
                 "method": "mom/status",
-                "params": { "state": "ready" }
+                "params": { "state": "connected" }
             })
             .to_string()
             .into(),
@@ -212,6 +221,15 @@ async fn pipe_socket_to_acp(mut socket: WebSocket, process: AcpProcess) {
                 break;
             }
             let message = line.trim_end_matches(['\r', '\n']).to_string();
+            if !serde_json::from_str::<serde_json::Value>(&message)
+                .is_ok_and(|value| value.is_object())
+            {
+                eprintln!(
+                    "dropping non-JSON Hermes ACP stdout line ({} bytes)",
+                    message.len()
+                );
+                continue;
+            }
             if ws_tx.send(Message::Text(message.into())).await.is_err() {
                 break;
             }

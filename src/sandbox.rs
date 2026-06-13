@@ -1,5 +1,16 @@
 use super::*;
 
+fn workspace_network_policy() -> NetworkPolicy {
+    NetworkPolicy::builder()
+        .default_deny()
+        .egress(|egress| egress.allow_public())
+        .egress(|egress| egress.udp().port(53).allow_host())
+        .egress(|egress| egress.tcp().port(53).allow_host())
+        .egress(|egress| egress.tcp().port(1080).allow_host())
+        .build()
+        .expect("workspace network policy is valid")
+}
+
 pub(crate) async fn create_sandbox(
     args: CreateArgs,
     workspace: Option<WorkspaceMount>,
@@ -18,6 +29,7 @@ pub(crate) async fn create_sandbox(
         .memory(memory)
         .entrypoint(["tail", "-f", "/dev/null"])
         .shell("/bin/sh")
+        .network(|network| network.policy(workspace_network_policy()))
         .label(LABEL_MANAGED, "true")
         .label(LABEL_VERSION, env!("CARGO_PKG_VERSION"));
 
@@ -193,6 +205,7 @@ pub(crate) async fn build_base_snapshot(config: &MomConfig) -> Result<()> {
         .replace()
         .entrypoint(["tail", "-f", "/dev/null"])
         .shell("/bin/sh")
+        .network(|network| network.policy(workspace_network_policy()))
         .label(LABEL_MANAGED, "true")
         .label(LABEL_VERSION, env!("CARGO_PKG_VERSION"))
         .patch(move |patch| {
@@ -246,6 +259,7 @@ pub(crate) async fn doctor_base_snapshot(config: &MomConfig) -> Result<()> {
         .replace()
         .entrypoint(["tail", "-f", "/dev/null"])
         .shell("/bin/sh")
+        .network(|network| network.policy(workspace_network_policy()))
         .label(LABEL_MANAGED, "true")
         .label(LABEL_VERSION, env!("CARGO_PKG_VERSION"))
         .create()

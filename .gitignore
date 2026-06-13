@@ -6,3 +6,6 @@
 /dev/iron-proxy/
 /worktrees
 /result
+/.env
+/.env.local
+/.env.*.local

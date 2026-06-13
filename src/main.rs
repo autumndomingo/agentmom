@@ -22,7 +22,8 @@ use axum::{
 };
 use clap::{Args, Parser, Subcommand};
 use microsandbox::{
-    MicrosandboxError, Sandbox, Snapshot, SnapshotDestination, Volume, sandbox::SandboxStatus,
+    MicrosandboxError, NetworkPolicy, Sandbox, Snapshot, SnapshotDestination, Volume,
+    sandbox::SandboxStatus,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize};

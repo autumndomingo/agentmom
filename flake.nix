@@ -229,6 +229,21 @@
               exec cargo run --bin mom -- "$@"
             '';
           };
+          playwrightNodeModules = pkgs.runCommand "agentmom-playwright-node-modules" { } ''
+            mkdir -p "$out"
+            ln -s ${pkgs.playwright} "$out/playwright"
+            ln -s ${pkgs.playwright} "$out/playwright-core"
+          '';
+          playwrightCli = pkgs.writeShellApplication {
+            name = "playwright";
+            runtimeInputs = [ pkgs.nodejs ];
+            text = ''
+              export NODE_PATH="${playwrightNodeModules}:''${NODE_PATH:-}"
+              export PLAYWRIGHT_BROWSERS_PATH="${pkgs.playwright.browsers}"
+              export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+              exec node ${pkgs.playwright}/cli.js "$@"
+            '';
+          };
         in
         {
           default = pkgs.mkShell {
@@ -238,16 +253,22 @@
                 rustToolchain
                 pkgs.cargo-nextest
                 pkgs.curl
+                self.packages.${system}.iron-proxy
                 pkgs.just
                 pkgs.lsof
                 pkgs.nodejs
+                pkgs.playwright.browsers
                 pkgs.pkg-config
+                playwrightCli
                 pkgs.rust-analyzer
               ]
               ++ nixpkgs.lib.optionals pkgs.stdenv.isLinux [
                 pkgs.libcap_ng
                 pkgs.openssl
               ];
+            NODE_PATH = "${playwrightNodeModules}";
+            PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright.browsers}";
+            PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1";
             RUST_BACKTRACE = "1";
           };
         });

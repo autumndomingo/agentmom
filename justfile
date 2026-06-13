@@ -7,8 +7,11 @@ ui-build:
     npm --prefix ui run build
 
 dev:
-    @if ! command -v lsof >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1 || ! command -v cargo >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1; then exec nix develop --command just dev; fi
+    @if ! command -v lsof >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1 || ! command -v cargo >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1 || ! command -v iron-proxy >/dev/null 2>&1 || ! command -v playwright >/dev/null 2>&1; then exec nix develop --command just dev; fi
     @./scripts/dev-run
+
+dev-reset:
+    @./scripts/dev-reset
 
 dev-smoke:
     @./scripts/dev-smoke

@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${repo_root}"
+
+repo_hash="$(printf '%s' "${repo_root}" | shasum -a 256 | cut -c1-10)"
+msb_home="/tmp/mom-msb-${repo_hash}"
+pid_file="${repo_root}/.state/dev.pid"
+
+kill_pid() {
+  local pid="${1:-}"
+  case "${pid}" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+
+  if kill -0 "${pid}" >/dev/null 2>&1; then
+    kill "${pid}" >/dev/null 2>&1 || true
+  fi
+}
+
+kill_pid_hard() {
+  local pid="${1:-}"
+  case "${pid}" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+
+  if kill -0 "${pid}" >/dev/null 2>&1; then
+    kill -KILL "${pid}" >/dev/null 2>&1 || true
+  fi
+}
+
+if [ -f "${pid_file}" ]; then
+  # shellcheck disable=SC1090
+  source "${pid_file}"
+  kill_pid "${worker_pid:-}"
+  kill_pid "${api_pid:-}"
+  kill_pid "${proxy_pid:-}"
+  kill_pid "${dev_run_pid:-}"
+
+  sleep 1
+  kill_pid_hard "${worker_pid:-}"
+  kill_pid_hard "${api_pid:-}"
+  kill_pid_hard "${proxy_pid:-}"
+  kill_pid_hard "${dev_run_pid:-}"
+fi
+
+rm -rf "${repo_root}/.state" "${msb_home}" "${repo_root}/dev/iron-proxy"
+
+printf 'dev state reset\n'

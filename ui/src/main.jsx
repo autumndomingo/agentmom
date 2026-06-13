@@ -251,10 +251,14 @@ function App({ userSession }) {
   const [chatBusy, setChatBusy] = useState(false);
   const [chatInput, setChatInput] = useState('');
   const [acpByWorkspace, setAcpByWorkspace] = useState({});
-  const [chatRestartNonce, setChatRestartNonce] = useState(0);
+  const [chats, setChats] = useState([]);
+  const [activeChatId, setActiveChatId] = useState('');
+  const [chatStates, setChatStates] = useState({});
   const [workspaceError, setWorkspaceError] = useState('');
   const [now, setNow] = useState(() => Date.now());
   const chatSocketsRef = useRef({});
+  const chatStatesRef = useRef({});
+  const activeChatIdRef = useRef('');
   const pendingRpcRef = useRef({});
   const rpcIdRef = useRef(1);
 
@@ -262,23 +266,33 @@ function App({ userSession }) {
     () => workspaces.find((workspace) => workspace.name === selectedName) ?? workspaces[0],
     [selectedName, workspaces],
   );
-  const selectedKey = selectedWorkspace?.name ?? selectedName;
-  const acp = selectedKey ? acpByWorkspace[selectedKey] ?? emptyAcpState() : emptyAcpState();
-  const transcript = useMemo(() => buildTranscript(acp.events), [acp.events]);
-  const pendingPermissions = useMemo(() => buildPendingPermissions(acp.events), [acp.events]);
+  const selectedWorkspaceName = selectedWorkspace?.name ?? selectedName;
+  const acp = selectedWorkspaceName ? acpByWorkspace[selectedWorkspaceName] ?? emptyAcpState() : emptyAcpState();
+  const workspaceChats = useMemo(
+    () => chats.filter((chat) => chat.workspaceName === selectedWorkspace?.name),
+    [chats, selectedWorkspace?.name],
+  );
+  const activeChat =
+    workspaceChats.find((chat) => chat.id === activeChatId) ?? workspaceChats[0] ?? null;
+  const activeChatState = activeChat ? chatStates[activeChat.id] ?? emptyChatState() : emptyChatState();
+  const chatReady = acp.state === 'ready' && Boolean(activeChatState.session_id);
+  const transcript = useMemo(() => buildTranscript(activeChatState.events), [activeChatState.events]);
+  const pendingPermissions = useMemo(
+    () => buildPendingPermissions(activeChatState.events),
+    [activeChatState.events],
+  );
   const chatGroups = groupChatsByAge(
-    selectedWorkspace
-      ? [
-          {
-            id: selectedWorkspace.name,
-            title: workspaceDisplayName(selectedWorkspace),
-            createdAt: acp.startedAt ?? now,
-            updatedAt: acp.updatedAt ?? now,
-          },
-        ]
-      : [],
+    workspaceChats,
     now,
   );
+
+  useEffect(() => {
+    chatStatesRef.current = chatStates;
+  }, [chatStates]);
+
+  useEffect(() => {
+    activeChatIdRef.current = activeChatId;
+  }, [activeChatId]);
 
   useEffect(() => {
     const interval = window.setInterval(() => setNow(Date.now()), 30_000);
@@ -290,11 +304,28 @@ function App({ userSession }) {
   }, []);
 
   useEffect(() => {
+    if (!selectedWorkspace?.name) return;
+    const hasWorkspaceChat = chats.some((chat) => chat.workspaceName === selectedWorkspace.name);
+    if (!hasWorkspaceChat) {
+      createChat(selectedWorkspace.name, { select: true });
+    } else if (!activeChat || activeChat.workspaceName !== selectedWorkspace.name) {
+      setActiveChatId(workspaceChats[0]?.id ?? '');
+    }
+  }, [selectedWorkspace?.name, chats.length]);
+
+  useEffect(() => {
+    if (!selectedWorkspace?.name || !activeChatId) return;
+    if (acp.state !== 'ready' && acp.state !== 'open') return;
+    ensureChatSession(selectedWorkspace.name, activeChatId);
+  }, [selectedWorkspace?.name, activeChatId, acp.state]);
+
+  useEffect(() => {
     if (!selectedWorkspace?.name) return undefined;
 
     const workspaceName = selectedWorkspace.name;
     const socket = new WebSocket(chatWsUrl(workspaceName));
     let cancelled = false;
+    let terminalStatusReceived = false;
 
     chatSocketsRef.current[workspaceName]?.close();
     chatSocketsRef.current[workspaceName] = socket;
@@ -302,14 +333,12 @@ function App({ userSession }) {
       state: 'connecting',
       phase: 'websocket',
       error: null,
-      events: [],
-      session_id: null,
     });
 
     socket.onopen = () => {
       if (cancelled) return;
       setAcpConnectionState(workspaceName, { state: 'open', phase: 'initialize', error: null });
-      sendRpc(workspaceName, 'initialize', {
+      sendRpc(workspaceName, null, 'initialize', {
         protocolVersion: 1,
         clientCapabilities: {},
         clientInfo: { name: 'agent-mom', version: '0.1.1' },
@@ -319,10 +348,22 @@ function App({ userSession }) {
     socket.onmessage = (event) => {
       if (cancelled) return;
       const message = parseJsonMessage(event.data);
-      appendAcpEvent(workspaceName, 'in', message);
+      const responseKey = message.id != null ? rpcKey(workspaceName, message.id) : null;
+      const pendingRpc = responseKey ? pendingRpcRef.current[responseKey] : null;
+      const eventChatId = chatIdForAcpMessage(message, pendingRpc?.chatId);
+      if (eventChatId) {
+        appendChatEvent(eventChatId, 'in', message, pendingRpc?.method ? { rpcMethod: pendingRpc.method } : {});
+        const title = titleFromSessionUpdate(message);
+        if (title) {
+          touchChat(eventChatId, { title });
+        }
+      }
 
       if (message.method === 'mom/status') {
         const params = message.params ?? {};
+        if (params.state === 'error') {
+          terminalStatusReceived = true;
+        }
         setAcpConnectionState(workspaceName, {
           state: params.state === 'error' ? 'failed' : params.state ?? 'open',
           phase: params.state === 'ready' ? 'initialize' : params.state,
@@ -332,10 +373,16 @@ function App({ userSession }) {
       }
 
       if (message.id != null) {
-        const key = rpcKey(workspaceName, message.id);
-        const method = pendingRpcRef.current[key];
+        const key = responseKey ?? rpcKey(workspaceName, message.id);
+        const rpc = pendingRpcRef.current[key];
         delete pendingRpcRef.current[key];
+        const method = rpc?.method;
+        const chatId = rpc?.chatId;
         if (message.error) {
+          terminalStatusReceived = true;
+          if (method === 'session/prompt') {
+            setChatBusy(false);
+          }
           setAcpConnectionState(workspaceName, {
             state: 'failed',
             phase: method ?? 'rpc',
@@ -344,21 +391,31 @@ function App({ userSession }) {
           return;
         }
         if (method === 'initialize') {
-          setAcpConnectionState(workspaceName, { state: 'open', phase: 'session/new' });
-          sendRpc(workspaceName, 'session/new', { cwd: '/workspace', mcpServers: [] });
+          setAcpConnectionState(workspaceName, { state: 'open', phase: 'idle' });
+          ensureChatSession(workspaceName, activeChatIdRef.current);
         } else if (method === 'session/new') {
           const sessionId = message.result?.sessionId ?? message.result?.session_id;
+          if (chatId) {
+            setChatState(chatId, {
+              session_id: sessionId ?? null,
+              creatingSession: false,
+            });
+            touchChat(chatId, { acpSessionId: sessionId ?? null });
+          }
           setAcpConnectionState(workspaceName, {
             state: sessionId ? 'ready' : 'open',
             phase: 'ready',
-            session_id: sessionId ?? null,
           });
+        } else if (method === 'session/prompt') {
+          setChatBusy(false);
         }
       }
     };
 
     socket.onerror = () => {
       if (cancelled) return;
+      terminalStatusReceived = true;
+      setChatBusy(false);
       setAcpConnectionState(workspaceName, {
         state: 'failed',
         phase: 'websocket',
@@ -367,7 +424,8 @@ function App({ userSession }) {
     };
 
     socket.onclose = () => {
-      if (cancelled) return;
+      if (cancelled || terminalStatusReceived) return;
+      setChatBusy(false);
       setAcpConnectionState(workspaceName, { state: 'exited', phase: 'closed' });
     };
 
@@ -378,7 +436,7 @@ function App({ userSession }) {
       }
       socket.close();
     };
-  }, [selectedWorkspace?.name, chatRestartNonce]);
+  }, [selectedWorkspace?.name]);
 
   async function request(path, options = {}) {
     setBusy(true);
@@ -389,19 +447,83 @@ function App({ userSession }) {
     }
   }
 
-  function appendAcpEvent(workspaceName, direction, message) {
-    setAcpByWorkspace((current) => {
-      const previous = current[workspaceName] ?? emptyAcpState();
-      const seq = (previous.events.at(-1)?.seq ?? 0) + 1;
-      return {
+  function createChat(workspaceName, options = {}) {
+    const timestamp = Date.now();
+    const chat = {
+      id: newChatId(workspaceName),
+      workspaceName,
+      title: 'New chat',
+      acpSessionId: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    setChats((current) => {
+      const next = [chat, ...current];
+      return next;
+    });
+    setChatStates((current) => {
+      const next = {
         ...current,
-        [workspaceName]: {
+        [chat.id]: emptyChatState(),
+      };
+      chatStatesRef.current = next;
+      return next;
+    });
+    if (options.select) {
+      activeChatIdRef.current = chat.id;
+      setActiveChatId(chat.id);
+    }
+    return chat;
+  }
+
+  function touchChat(chatId, patch = {}) {
+    setChats((current) => {
+      const next = current.map((chat) =>
+        chat.id === chatId
+          ? {
+              ...chat,
+              ...patch,
+              updatedAt: Date.now(),
+            }
+          : chat,
+      );
+      return next;
+    });
+  }
+
+  function appendChatEvent(chatId, direction, message, metadata = {}) {
+    setChatStates((current) => {
+      const previous = current[chatId] ?? emptyChatState();
+      const seq = (previous.events.at(-1)?.seq ?? 0) + 1;
+      const next = {
+        ...current,
+        [chatId]: {
           ...previous,
-          events: [...previous.events, { seq, at: Date.now(), direction, message }],
+          events: [...previous.events, { seq, at: Date.now(), direction, message, ...metadata }],
           startedAt: previous.startedAt ?? Date.now(),
           updatedAt: Date.now(),
         },
       };
+      chatStatesRef.current = next;
+      return next;
+    });
+    touchChat(chatId);
+  }
+
+  function setChatState(chatId, patch) {
+    setChatStates((current) => {
+      const previous = current[chatId] ?? emptyChatState();
+      const next = {
+        ...current,
+        [chatId]: {
+          ...previous,
+          ...patch,
+          startedAt: previous.startedAt ?? Date.now(),
+          updatedAt: Date.now(),
+        },
+      };
+      chatStatesRef.current = next;
+      return next;
     });
   }
 
@@ -420,21 +542,63 @@ function App({ userSession }) {
     });
   }
 
-  function sendRpc(workspaceName, method, params = {}) {
+  function ensureChatSession(workspaceName, chatId) {
+    if (!workspaceName || !chatId) return;
+    const socket = chatSocketsRef.current[workspaceName];
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+
+    const state = chatStatesRef.current[chatId] ?? emptyChatState();
+    if (state.session_id || state.creatingSession) return;
+
+    setChatState(chatId, { creatingSession: true });
+    setAcpConnectionState(workspaceName, { state: 'open', phase: 'session/new', error: null });
+    try {
+      sendRpc(workspaceName, chatId, 'session/new', { cwd: '/workspace', mcpServers: [] });
+    } catch (error) {
+      setChatState(chatId, { creatingSession: false });
+      setAcpConnectionState(workspaceName, {
+        state: 'failed',
+        phase: 'session/new',
+        error: formatError(error),
+      });
+    }
+  }
+
+  function sendRpc(workspaceName, chatId, method, params = {}) {
     const id = rpcIdRef.current++;
     const message = { jsonrpc: '2.0', id, method, params };
-    pendingRpcRef.current[rpcKey(workspaceName, id)] = method;
-    sendAcpMessage(workspaceName, message);
+    pendingRpcRef.current[rpcKey(workspaceName, id)] = { method, chatId };
+    sendAcpMessage(workspaceName, message, chatId);
     return id;
   }
 
-  function sendAcpMessage(workspaceName, message) {
+  function sendAcpMessage(workspaceName, message, chatId = null) {
     const socket = chatSocketsRef.current[workspaceName];
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       throw new Error('Hermes ACP websocket is not connected.');
     }
     socket.send(JSON.stringify(message));
-    appendAcpEvent(workspaceName, 'out', message);
+    if (chatId) {
+      appendChatEvent(chatId, 'out', message);
+    }
+  }
+
+  function chatIdForAcpMessage(message, pendingChatId = null) {
+    if (pendingChatId) return pendingChatId;
+
+    const sessionId = extractSessionId(message);
+    if (sessionId) {
+      const match = Object.entries(chatStatesRef.current).find(
+        ([, state]) => state.session_id === sessionId,
+      );
+      if (match) return match[0];
+    }
+
+    if (message.method === 'session/update' || message.method === 'session/request_permission') {
+      return activeChatIdRef.current;
+    }
+
+    return null;
   }
 
   async function refresh() {
@@ -470,53 +634,52 @@ function App({ userSession }) {
 
   async function sendMessage(event) {
     event.preventDefault();
-    if (!selectedWorkspace) return;
+    if (!selectedWorkspace || !activeChat) return;
 
     const prompt = chatInput.trim();
     if (!prompt) return;
+    if (!activeChatState.session_id) {
+      ensureChatSession(selectedWorkspace.name, activeChat.id);
+      return;
+    }
 
     setChatInput('');
     setChatBusy(true);
     try {
-      sendRpc(selectedWorkspace.name, 'session/prompt', {
-        sessionId: acp.session_id,
+      if (activeChat.title === 'New chat') {
+        touchChat(activeChat.id, { title: chatTitle(prompt) });
+      }
+      sendRpc(selectedWorkspace.name, activeChat.id, 'session/prompt', {
+        sessionId: activeChatState.session_id,
         messageId: `agent-mom-${Date.now()}`,
         prompt: [{ type: 'text', text: prompt }],
       });
       await refresh();
     } catch (error) {
+      setChatBusy(false);
       setAcpConnectionState(selectedWorkspace.name, {
         state: 'failed',
         phase: 'send',
         error: formatError(error),
       });
-    } finally {
-      setChatBusy(false);
     }
   }
 
   async function restartChat() {
     if (!selectedWorkspace) return;
-    setChatBusy(true);
-    try {
-      chatSocketsRef.current[selectedWorkspace.name]?.close();
-      setChatRestartNonce((value) => value + 1);
-    } catch (error) {
-      setWorkspaceError(formatError(error));
-    } finally {
-      setChatBusy(false);
-    }
+    const chat = createChat(selectedWorkspace.name, { select: true });
+    ensureChatSession(selectedWorkspace.name, chat.id);
   }
 
   async function cancelChat() {
-    if (!selectedWorkspace) return;
+    if (!selectedWorkspace || !activeChat) return;
     setChatBusy(true);
     try {
       sendAcpMessage(selectedWorkspace.name, {
         jsonrpc: '2.0',
         method: 'session/cancel',
-        params: { sessionId: acp.session_id },
-      });
+        params: { sessionId: activeChatState.session_id },
+      }, activeChat.id);
     } catch (error) {
       setWorkspaceError(formatError(error));
     } finally {
@@ -525,14 +688,14 @@ function App({ userSession }) {
   }
 
   async function respondPermission(permission, optionId) {
-    if (!selectedWorkspace) return;
+    if (!selectedWorkspace || !activeChat) return;
     setChatBusy(true);
     try {
       sendAcpMessage(selectedWorkspace.name, {
         jsonrpc: '2.0',
         id: parseJsonRpcId(permission.id),
         result: permissionResult(optionId),
-      });
+      }, activeChat.id);
     } catch (error) {
       setWorkspaceError(formatError(error));
     } finally {
@@ -558,14 +721,14 @@ function App({ userSession }) {
   }
 
   function appendSystemMessage(content) {
-    if (!selectedWorkspace) {
+    if (!selectedWorkspace || !activeChat) {
       setWorkspaceError(content);
       return;
     }
-    setAcpConnectionState(selectedWorkspace.name, {
-      state: acp.state,
-      phase: acp.phase,
-      error: content,
+    appendChatEvent(activeChat.id, 'in', {
+      jsonrpc: '2.0',
+      method: 'mom/status',
+      params: { state: 'error', message: content },
     });
   }
 
@@ -594,8 +757,8 @@ function App({ userSession }) {
                 {group.chats.map((chat) => (
                   <button
                     key={chat.id}
-                    className="chatHistoryItem active"
-                    onClick={() => setSelectedName(chat.id)}
+                    className={`chatHistoryItem ${chat.id === activeChat?.id ? 'active' : ''}`}
+                    onClick={() => setActiveChatId(chat.id)}
                   >
                     <span>{chat.title}</span>
                   </button>
@@ -644,7 +807,7 @@ function App({ userSession }) {
               <ExternalLink size={17} />
               Hermes
             </button>
-            <button className="refreshButton" onClick={cancelChat} disabled={!selectedWorkspace || chatBusy || acp.state !== 'ready'}>
+            <button className="refreshButton" onClick={cancelChat} disabled={!selectedWorkspace || !activeChatState.session_id || chatBusy || !chatReady}>
               Cancel
             </button>
           </div>
@@ -658,7 +821,7 @@ function App({ userSession }) {
             </div>
           ) : transcript.items.length === 0 && !pendingPermissions.length ? (
             <div className="emptyChat">
-              <p>{acp.state === 'ready' ? 'Ready when you are.' : 'Starting Hermes ACP.'}</p>
+              <p>{chatReady ? 'Ready when you are.' : 'Starting Hermes ACP.'}</p>
               <h2>{acp.error || 'Message Hermes through Agent Mom.'}</h2>
             </div>
           ) : (
@@ -674,8 +837,7 @@ function App({ userSession }) {
               {transcript.items.map((message) => (
                 <article key={message.key} className={`message ${message.role}`}>
                   <span>{message.title}</span>
-                  {message.text && <p>{message.text}</p>}
-                  {!message.text && message.raw && <pre>{JSON.stringify(message.raw, null, 2)}</pre>}
+                  <MessageContent message={message} />
                 </article>
               ))}
             </div>
@@ -692,9 +854,9 @@ function App({ userSession }) {
             placeholder={
               selectedWorkspace ? 'Message Hermes in this workspace' : 'Create a workspace first'
             }
-            disabled={!selectedWorkspace || chatBusy || acp.state !== 'ready'}
+            disabled={!selectedWorkspace || !activeChat || chatBusy || !chatReady}
           />
-          <button className="sendButton" disabled={!selectedWorkspace || chatBusy || !chatInput.trim() || acp.state !== 'ready'}>
+          <button className="sendButton" disabled={!selectedWorkspace || !activeChat || chatBusy || !chatInput.trim() || !chatReady}>
             {chatBusy ? <Sparkles size={20} /> : <Send size={20} />}
           </button>
         </form>
@@ -702,6 +864,113 @@ function App({ userSession }) {
 
     </main>
   );
+}
+
+function MessageContent({ message }) {
+  const blocks = (message.blocks ?? []).filter(Boolean);
+  if (!blocks.length && message.text) {
+    return <p>{message.text}</p>;
+  }
+  if (!blocks.length && message.raw) {
+    return <pre>{JSON.stringify(message.raw, null, 2)}</pre>;
+  }
+  return (
+    <div className="messageContent">
+      {blocks.map((block, index) => (
+        <MessageBlock block={block} key={`${block.type}-${index}`} />
+      ))}
+    </div>
+  );
+}
+
+function MessageBlock({ block }) {
+  if (block.type === 'text') {
+    return <p>{block.text}</p>;
+  }
+  if (block.type === 'meta') {
+    return (
+      <dl className="metaBlock">
+        {block.entries.map((entry) => (
+          <React.Fragment key={entry.label}>
+            <dt>{entry.label}</dt>
+            <dd>{entry.value}</dd>
+          </React.Fragment>
+        ))}
+      </dl>
+    );
+  }
+  if (block.type === 'list') {
+    return (
+      <div className="listBlock">
+        <strong>{block.title}</strong>
+        <ul>
+          {block.items.map((item, index) => (
+            <li key={`${item}-${index}`}>{item}</li>
+          ))}
+        </ul>
+      </div>
+    );
+  }
+  if (block.type === 'plan') {
+    return (
+      <ol className="planBlock">
+        {block.entries.map((entry, index) => (
+          <li className={entry.status} key={`${entry.content}-${index}`}>
+            <span>{entry.status}</span>
+            <strong>{entry.content}</strong>
+            {entry.priority && <small>{entry.priority}</small>}
+          </li>
+        ))}
+      </ol>
+    );
+  }
+  if (block.type === 'diff') {
+    return (
+      <div className="diffBlock">
+        <strong>{block.path}</strong>
+        <pre>{formatDiffBlock(block)}</pre>
+      </div>
+    );
+  }
+  if (block.type === 'image') {
+    return (
+      <figure className="mediaBlock">
+        {block.src ? <img src={block.src} alt={block.label ?? 'ACP image'} /> : null}
+        <figcaption>{block.label ?? block.mime ?? 'Image'}</figcaption>
+      </figure>
+    );
+  }
+  if (block.type === 'audio') {
+    return (
+      <div className="mediaBlock">
+        {block.src ? <audio src={block.src} controls /> : null}
+        <span>{block.label ?? block.mime ?? 'Audio'}</span>
+      </div>
+    );
+  }
+  if (block.type === 'resource') {
+    return (
+      <div className="resourceBlock">
+        <strong>{block.title ?? block.uri ?? 'Resource'}</strong>
+        {block.uri && <code>{block.uri}</code>}
+        {[block.mime, block.size, block.description].filter(Boolean).length > 0 && (
+          <span>{[block.mime, block.size, block.description].filter(Boolean).join(' / ')}</span>
+        )}
+      </div>
+    );
+  }
+  if (block.type === 'terminal') {
+    return <code className="terminalBlock">Terminal: {block.terminalId}</code>;
+  }
+  if (block.type === 'json') {
+    return (
+      <details className="jsonBlock" open>
+        <summary>{block.title}</summary>
+        <pre>{JSON.stringify(block.value, null, 2)}</pre>
+      </details>
+    );
+  }
+  return <pre>{JSON.stringify(block, null, 2)}</pre>;
 }
 
 function AdminPage({ userSession }) {
@@ -885,12 +1154,22 @@ function friendlyStatus(status) {
 
 function emptyAcpState() {
   return {
-    events: [],
-    session_id: null,
     state: 'starting',
     phase: 'idle',
     error: null,
   };
+}
+
+function emptyChatState() {
+  return {
+    events: [],
+    session_id: null,
+    creatingSession: false,
+  };
+}
+
+function newChatId(workspaceName) {
+  return `${workspaceName}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 function chatWsUrl(workspaceName) {
@@ -912,6 +1191,24 @@ function parseJsonMessage(data) {
 
 function rpcKey(workspaceName, id) {
   return `${workspaceName}:${String(id)}`;
+}
+
+function extractSessionId(message) {
+  return (
+    message?.params?.sessionId ??
+    message?.params?.session_id ??
+    message?.result?.sessionId ??
+    message?.result?.session_id ??
+    null
+  );
+}
+
+function titleFromSessionUpdate(message) {
+  if (message?.method !== 'session/update') return '';
+  const update = message.params?.update ?? {};
+  const type = update.sessionUpdate ?? update.session_update ?? update.type;
+  if (type !== 'session_info_update') return '';
+  return String(update.title ?? '').trim();
 }
 
 function parseJsonRpcId(id) {
@@ -1116,6 +1413,17 @@ function groupChatsByAge(chats, now) {
   });
 
   return groups.filter((group) => group.chats.length);
+}
+
+function formatDiffBlock(block) {
+  const lines = [];
+  if (block.oldText) {
+    lines.push(...String(block.oldText).split('\n').map((line) => `- ${line}`));
+  }
+  if (block.newText) {
+    lines.push(...String(block.newText).split('\n').map((line) => `+ ${line}`));
+  }
+  return lines.join('\n') || 'No diff content.';
 }
 
 function userIdentity(email) {

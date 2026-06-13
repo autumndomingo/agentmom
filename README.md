@@ -204,9 +204,17 @@ just dev
 real microsandbox runtime. On a fresh checkout the first run installs the local
 microsandbox helper under `.state/msb` and builds the configured base snapshot.
 It also creates local dev proxy CA material under `dev/iron-proxy/` so the
-configured proxy trust path exists. Start an iron-proxy-compatible service on
-`127.0.0.1:1080` with an OpenRouter key before exercising real Hermes model
-calls from inside a workspace.
+configured proxy trust path exists. Put a local OpenRouter key in ignored
+`.env` as `OPENROUTER_API_KEY=...`; `just dev` will start iron-proxy on host
+loopback port `1080`, write the key to an ignored `0600` file, then unset it
+before starting API/worker. Hermes always uses the generated guest proxy config:
+`/etc/profile.d/agentmom-proxy.sh` points at `credentials.proxy_url`, and
+iron-proxy injects the real key on the host. Local dev uses
+`http://host.microsandbox.internal:1080` for `credentials.proxy_url`; production
+should use the equivalent worker-host address reachable from the guest.
+Workspace sandboxes allow public egress plus host DNS and host TCP `1080`, so
+the credential proxy path is the same in dev and production. If the key is
+missing, `just dev` fails before starting the stack.
 Hermes launch requests are routed from the API to the workspace's assigned
 worker over that worker's private `worker.url`.
 Foreground output is intentionally brief; detailed API, worker, build, and base
@@ -214,6 +222,10 @@ image logs are written to `.state/logs/`.
 
 With `just dev` running, use `just dev-smoke` in another shell to check the API
 health endpoint and cookie-based admin login.
+
+Use `just dev-reset` to stop the dev stack and delete dev runtime state:
+`.state/`, the repo-scoped `/tmp/mom-msb-...` Microsandbox home, and
+`dev/iron-proxy/`. It keeps `.env` and build caches.
 
 ## NixOS Service
 

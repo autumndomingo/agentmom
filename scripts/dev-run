@@ -4,8 +4,48 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_root}"
 
-log_dir="${repo_root}/.state/logs"
+state_dir="${repo_root}/.state"
+lock_dir="${state_dir}/dev.lock"
+pid_file="${state_dir}/dev.pid"
+mkdir -p "${state_dir}"
+
+acquire_lock() {
+  if mkdir "${lock_dir}" 2>/dev/null; then
+    printf '%s\n' "$$" >"${lock_dir}/pid"
+    return 0
+  fi
+
+  local existing_pid=""
+  if [ -f "${lock_dir}/pid" ]; then
+    existing_pid="$(cat "${lock_dir}/pid" 2>/dev/null || true)"
+  fi
+  if [ -n "${existing_pid}" ] && kill -0 "${existing_pid}" >/dev/null 2>&1; then
+    echo "just dev is already running in this worktree (pid ${existing_pid})." >&2
+    echo "Stop it or run: just dev-reset" >&2
+    exit 1
+  fi
+
+  rm -rf "${lock_dir}"
+  if ! mkdir "${lock_dir}" 2>/dev/null; then
+    echo "could not acquire dev lock at ${lock_dir}" >&2
+    exit 1
+  fi
+  printf '%s\n' "$$" >"${lock_dir}/pid"
+}
+
+acquire_lock
+
+log_dir="${state_dir}/logs"
 mkdir -p "${log_dir}"
+
+write_pid_file() {
+  {
+    printf 'dev_run_pid=%s\n' "$$"
+    printf 'proxy_pid=%s\n' "${proxy_pid:-}"
+    printf 'api_pid=%s\n' "${api_pid:-}"
+    printf 'worker_pid=%s\n' "${worker_pid:-}"
+  } >"${pid_file}"
+}
 
 run_step() {
   local name="$1"
@@ -43,6 +83,26 @@ wait_for_http() {
   exit 1
 }
 
+wait_for_tcp() {
+  local name="$1"
+  local port="$2"
+  local log_file="$3"
+
+  printf '  %-24s' "${name}..."
+  for _ in $(seq 1 60); do
+    if lsof -nP -iTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1; then
+      printf 'ok\n'
+      return 0
+    fi
+    sleep 1
+  done
+
+  printf 'failed\n\n'
+  echo "${name} did not listen on TCP ${port}. Last log lines from ${log_file}:"
+  tail -n 80 "${log_file}" || true
+  exit 1
+}
+
 wait_for_node() {
   local log_file="$1"
 
@@ -74,17 +134,91 @@ stop_children() {
   if [ -n "${api_pid:-}" ] && kill -0 "${api_pid}" >/dev/null 2>&1; then
     kill "${api_pid}" >/dev/null 2>&1 || true
   fi
-  wait "${worker_pid:-}" "${api_pid:-}" >/dev/null 2>&1 || true
+  if [ -n "${proxy_pid:-}" ] && kill -0 "${proxy_pid}" >/dev/null 2>&1; then
+    kill "${proxy_pid}" >/dev/null 2>&1 || true
+  fi
+  wait "${worker_pid:-}" "${api_pid:-}" "${proxy_pid:-}" >/dev/null 2>&1 || true
+  rm -f "${pid_file}"
+  rm -rf "${lock_dir}"
   exit "${status}"
 }
 
 trap stop_children INT TERM EXIT
+write_pid_file
 
 run_step "writing dev env" "${log_dir}/dev-env.log" ./scripts/dev-env
 
 set -a
 source .state/dev.env
 set +a
+
+if [ -z "${OPENROUTER_API_KEY:-}" ]; then
+  cat >&2 <<'EOF_PROXY_WARN'
+OPENROUTER_API_KEY is not set.
+Put it in ignored repo-root .env as:
+OPENROUTER_API_KEY=...
+EOF_PROXY_WARN
+  exit 1
+fi
+
+proxy_dir="${repo_root}/.state/iron-proxy"
+proxy_key_file="${proxy_dir}/openrouter-api-key"
+proxy_config_file="${proxy_dir}/config.yaml"
+mkdir -p "${proxy_dir}"
+install -m 0600 /dev/null "${proxy_key_file}"
+printf '%s' "${OPENROUTER_API_KEY}" >"${proxy_key_file}"
+unset OPENROUTER_API_KEY
+cat >"${proxy_config_file}" <<EOF_PROXY
+dns:
+  listen: 127.0.0.1:18053
+  proxy_ip: 127.0.0.1
+proxy:
+  http_listen: 127.0.0.1:18080
+  https_listen: 127.0.0.1:18443
+  tunnel_listen: 127.0.0.1:1080
+  upstream_response_header_timeout: 5m
+tls:
+  mode: mitm
+  ca_cert: ${repo_root}/dev/iron-proxy/ca.crt
+  ca_key: ${repo_root}/dev/iron-proxy/ca.key
+metrics:
+  listen: 127.0.0.1:19090
+transforms:
+  - name: allowlist
+    config:
+      domains:
+        - api.openai.com
+        - openrouter.ai
+        - github.com
+        - api.github.com
+        - raw.githubusercontent.com
+        - "*.githubusercontent.com"
+        - objects.githubusercontent.com
+        - registry.npmjs.org
+        - nodejs.org
+        - pypi.org
+        - files.pythonhosted.org
+        - astral.sh
+  - name: secrets
+    config:
+      secrets:
+        - source:
+            type: file
+            path: ${proxy_key_file}
+          inject:
+            header: Authorization
+            formatter: "Bearer {{ .Value }}"
+          rules:
+            - host: openrouter.ai
+              paths:
+                - /api/v1/*
+log:
+  level: info
+EOF_PROXY
+iron-proxy -config "${proxy_config_file}" >"${log_dir}/iron-proxy.log" 2>&1 &
+proxy_pid=$!
+write_pid_file
+wait_for_tcp "starting proxy" 1080 "${log_dir}/iron-proxy.log"
 
 run_step "building UI" "${log_dir}/ui-build.log" npm --prefix ui run build
 
@@ -96,6 +230,7 @@ run_step "building mom" "${log_dir}/cargo-build.log" cargo build --bin mom
 
 "${repo_root}/target/debug/mom" api --bind "${MOM_API_BIND}" >"${log_dir}/api.log" 2>&1 &
 api_pid=$!
+write_pid_file
 wait_for_http "starting API" "${MOM_API_URL}/health/ready" "${log_dir}/api.log"
 
 run_step "checking config" "${log_dir}/config-doctor.log" "${repo_root}/target/debug/mom" config doctor
@@ -103,6 +238,7 @@ run_step "checking base image" "${log_dir}/ensure-base.log" "${repo_root}/target
 
 "${repo_root}/target/debug/mom" worker --interval 5 >"${log_dir}/worker.log" 2>&1 &
 worker_pid=$!
+write_pid_file
 wait_for_http "starting worker" "${MOM_WORKER_URL}/worker/health" "${log_dir}/worker.log"
 wait_for_node "${log_dir}/node-inspect.log"
 
