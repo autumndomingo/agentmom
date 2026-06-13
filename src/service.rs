@@ -15,76 +15,34 @@ struct ServiceTunnel {
     key_dir: PathBuf,
 }
 
-struct GuestServiceSpec {
-    id: &'static str,
-    label: &'static str,
-    guest_port: u16,
-    health_path: &'static str,
-    workdir: &'static str,
-    log_path: &'static str,
-    command: &'static [&'static str],
-    env: &'static [(&'static str, &'static str)],
-    pre_start: Option<&'static str>,
-    readiness_attempts: u16,
-}
+const HERMES_SERVICE_ID: &str = "hermes";
+const HERMES_HEALTH_PATH: &str = "/api/status";
+const HERMES_WORKDIR: &str = "/workspace";
+const HERMES_LOG_PATH: &str = "/tmp/mom-hermes/dashboard.log";
+const HERMES_READINESS_ATTEMPTS: u16 = 90;
 
 #[derive(Clone, Default)]
 pub(crate) struct ServiceState {
     hermes_tunnels: Arc<Mutex<HashMap<String, ServiceTunnel>>>,
 }
 
-const HERMES_SERVICE: GuestServiceSpec = GuestServiceSpec {
-    id: "hermes",
-    label: "Hermes",
-    guest_port: HERMES_GUEST_PORT,
-    health_path: "/api/status",
-    workdir: "/workspace",
-    log_path: "/tmp/mom-hermes/dashboard.log",
-    command: &[
-        "hermes",
-        "dashboard",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        "{port}",
-        "--no-open",
-        "--insecure",
-    ],
-    env: &[],
-    pre_start: None,
-    readiness_attempts: 90,
-};
-
-pub(crate) async fn open_workspace_service(
+pub(crate) async fn open_hermes_dashboard(
     state: &ServiceState,
     workspace_name: &str,
     sandbox_name: &str,
-    service_id: &str,
 ) -> Result<String> {
-    match service_id {
-        "hermes" => {
-            ensure_guest_service_tunnel(
-                workspace_name,
-                sandbox_name,
-                &HERMES_SERVICE,
-                &state.hermes_tunnels,
-            )
-            .await
-        }
-        other => bail!("unknown workspace service: {other}"),
-    }
+    ensure_hermes_tunnel(workspace_name, sandbox_name, &state.hermes_tunnels).await
 }
 
-async fn ensure_guest_service_tunnel(
+async fn ensure_hermes_tunnel(
     workspace_name: &str,
     sandbox_name: &str,
-    service: &GuestServiceSpec,
     tunnels: &Arc<Mutex<HashMap<String, ServiceTunnel>>>,
 ) -> Result<String> {
     {
         let mut active = tunnels.lock().await;
         if let Some(tunnel) = active.get_mut(workspace_name) {
-            if tunnel_is_healthy(&tunnel.health_url, service.health_path).await {
+            if tunnel_is_healthy(&tunnel.health_url, HERMES_HEALTH_PATH).await {
                 return Ok(tunnel.url.clone());
             }
             let _ = tunnel.ssh_child.kill().await;
@@ -99,36 +57,21 @@ async fn ensure_guest_service_tunnel(
     let health_url = format!("http://127.0.0.1:{host_port}");
     let public_url = service_tunnel_public_url(&tunnel_bind_host, host_port);
     let sandbox = running_sandbox_owned(sandbox_name).await?;
-    ensure_guest_service(&sandbox, service).await?;
-    let tunnel = start_service_tunnel(
-        workspace_name,
-        service,
-        &sandbox,
-        &tunnel_bind_host,
-        host_port,
-    )
-    .await?;
-    wait_for_tunnel(
-        workspace_name,
-        tunnel,
-        &health_url,
-        &public_url,
-        service,
-        tunnels,
-    )
-    .await
+    ensure_hermes_dashboard(&sandbox).await?;
+    let tunnel =
+        start_hermes_tunnel(workspace_name, &sandbox, &tunnel_bind_host, host_port).await?;
+    wait_for_hermes_tunnel(workspace_name, tunnel, &health_url, &public_url, tunnels).await
 }
 
-async fn start_service_tunnel(
+async fn start_hermes_tunnel(
     workspace_name: &str,
-    service: &GuestServiceSpec,
     sandbox: &Sandbox,
     tunnel_bind_host: &str,
     host_port: u16,
 ) -> Result<ServiceTunnel> {
     let key_dir = env::temp_dir().join(format!(
         "mom-{}-{}-{}",
-        service.id,
+        HERMES_SERVICE_ID,
         workspace_name,
         std::process::id()
     ));
@@ -141,7 +84,7 @@ async fn start_service_tunnel(
         .stdin(Stdio::null())
         .output()
         .await
-        .with_context(|| format!("generate {} tunnel SSH key", service.label))?;
+        .context("generate Hermes tunnel SSH key")?;
     if !keygen.status.success() {
         bail!(
             "ssh-keygen failed: {}",
@@ -198,10 +141,7 @@ async fn start_service_tunnel(
             "LogLevel=ERROR",
             "-N",
             "-L",
-            &format!(
-                "{tunnel_bind_host}:{host_port}:127.0.0.1:{}",
-                service.guest_port
-            ),
+            &format!("{tunnel_bind_host}:{host_port}:127.0.0.1:{HERMES_GUEST_PORT}"),
             "-p",
             &ssh_port.to_string(),
             "root@127.0.0.1",
@@ -210,7 +150,7 @@ async fn start_service_tunnel(
         .stdout(Stdio::null())
         .stderr(ssh_stderr)
         .spawn()
-        .with_context(|| format!("start local {} SSH tunnel", service.label))?;
+        .context("start local Hermes SSH tunnel")?;
 
     Ok(ServiceTunnel {
         url: service_tunnel_public_url(tunnel_bind_host, host_port),
@@ -222,16 +162,15 @@ async fn start_service_tunnel(
     })
 }
 
-async fn wait_for_tunnel(
+async fn wait_for_hermes_tunnel(
     workspace_name: &str,
     mut tunnel: ServiceTunnel,
     health_url: &str,
     public_url: &str,
-    service: &GuestServiceSpec,
     tunnels: &Arc<Mutex<HashMap<String, ServiceTunnel>>>,
 ) -> Result<String> {
     for _ in 0..50 {
-        if tunnel_is_healthy(health_url, service.health_path).await {
+        if tunnel_is_healthy(health_url, HERMES_HEALTH_PATH).await {
             tunnels
                 .lock()
                 .await
@@ -252,10 +191,7 @@ async fn wait_for_tunnel(
         .unwrap_or_else(|| "ssh was still running".to_string());
     let ssh_log = std::fs::read_to_string(tunnel.key_dir.join("ssh.log")).unwrap_or_default();
     let _ = std::fs::remove_dir_all(&tunnel.key_dir);
-    bail!(
-        "{} tunnel did not become reachable at {public_url}; {ssh_status}\n{ssh_log}",
-        service.label
-    );
+    bail!("Hermes tunnel did not become reachable at {public_url}; {ssh_status}\n{ssh_log}");
 }
 
 async fn tunnel_is_healthy(url: &str, path: &str) -> bool {
@@ -286,38 +222,30 @@ async fn running_sandbox_owned(name: &str) -> Result<Sandbox> {
     }
 }
 
-async fn ensure_guest_service(sandbox: &Sandbox, service: &GuestServiceSpec) -> Result<()> {
-    checked_shell(sandbox, &guest_service_script(service)).await
+async fn ensure_hermes_dashboard(sandbox: &Sandbox) -> Result<()> {
+    checked_shell(sandbox, &hermes_dashboard_script()).await
 }
 
-fn guest_service_script(service: &GuestServiceSpec) -> String {
-    let executable = service
-        .command
-        .first()
-        .expect("guest service command must not be empty");
-    let pre_start = service.pre_start.unwrap_or("");
-    let log_dir = service
-        .log_path
+fn hermes_dashboard_script() -> String {
+    let log_dir = HERMES_LOG_PATH
         .rsplit_once('/')
         .map(|(dir, _)| dir)
         .unwrap_or("/tmp");
-    let command = guest_service_command(service);
 
     format!(
         r#"
 set -eu
-if ! command -v {executable_q} >/dev/null 2>&1; then
-  echo "{label} is not installed in this VM; recreate it with the current snapshot" >&2
+if ! command -v hermes >/dev/null 2>&1; then
+  echo "Hermes is not installed in this VM; recreate it with the current snapshot" >&2
   exit 1
 fi
 mkdir -p {workdir_q} {log_dir_q}
-{pre_start}
 if wget -q -O /dev/null --timeout=2 http://127.0.0.1:{port}{health_path} >/dev/null 2>&1; then
   exit 0
 fi
 cd {workdir_q}
 if ! netstat -ltn 2>/dev/null | grep -q ':{port}[[:space:]]'; then
-  setsid sh -c {command_q} &
+  setsid hermes dashboard --host 0.0.0.0 --port {port} --no-open --insecure </dev/null >{log_path_q} 2>&1 &
 fi
 for _ in $(seq 1 {readiness_attempts}); do
   if wget -q -O /dev/null --timeout=2 http://127.0.0.1:{port}{health_path} >/dev/null 2>&1; then
@@ -328,33 +256,13 @@ done
 cat {log_path_q} >&2 || true
 exit 1
 "#,
-        executable_q = shell_quote(executable),
-        label = service.label,
-        workdir_q = shell_quote(service.workdir),
+        workdir_q = shell_quote(HERMES_WORKDIR),
         log_dir_q = shell_quote(log_dir),
-        port = service.guest_port,
-        health_path = service.health_path,
-        command_q = shell_quote(&command),
-        readiness_attempts = service.readiness_attempts,
-        log_path_q = shell_quote(service.log_path),
+        port = HERMES_GUEST_PORT,
+        health_path = HERMES_HEALTH_PATH,
+        readiness_attempts = HERMES_READINESS_ATTEMPTS,
+        log_path_q = shell_quote(HERMES_LOG_PATH),
     )
-}
-
-fn guest_service_command(service: &GuestServiceSpec) -> String {
-    let env = service
-        .env
-        .iter()
-        .map(|(key, value)| format!("{key}={}", shell_quote(value)));
-    let argv = service.command.iter().map(|arg| {
-        let value = if *arg == "{port}" {
-            service.guest_port.to_string()
-        } else {
-            (*arg).to_string()
-        };
-        shell_quote(&value)
-    });
-    env.chain(argv).collect::<Vec<_>>().join(" ")
-        + &format!(" </dev/null >{} 2>&1", shell_quote(service.log_path))
 }
 
 async fn reserve_host_port() -> Result<u16> {

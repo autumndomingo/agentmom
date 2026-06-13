@@ -134,6 +134,11 @@ Conflict-resolution decisions made during the rebase:
   The dev proxy service itself is still an operator/dev prerequisite for real
   Hermes model calls; we are not adding a second config mode just for local
   convenience.
+- Follow-up cleanup removed generic service matching that only had one surviving
+  variant. Worker service open is now the explicit Hermes endpoint, fake runtime
+  opens Hermes directly, and the tunnel code uses Hermes constants instead of a
+  reusable service enum/spec shape. This keeps the hard cut reflected in the
+  code, not just hidden behind one-option abstractions.
 
 ## Plan Of Attack
 

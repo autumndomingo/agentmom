@@ -117,7 +117,7 @@ fn worker_sse_client() -> Result<reqwest::Client> {
 async fn run_worker_http(listener: tokio::net::TcpListener, state: Arc<WorkerState>) -> Result<()> {
     let app = Router::new()
         .route("/worker/health", get(worker_health))
-        .route("/worker/services/{service}/open", post(worker_open_service))
+        .route("/worker/services/hermes/open", post(worker_open_hermes))
         .with_state(state);
     let addr = listener
         .local_addr()
@@ -138,9 +138,8 @@ async fn worker_health() -> Json<Value> {
     Json(json!({ "ok": true }))
 }
 
-async fn worker_open_service(
+async fn worker_open_hermes(
     State(state): State<Arc<WorkerState>>,
-    AxumPath(service): AxumPath<String>,
     headers: HeaderMap,
     Json(request): Json<OpenServiceRequest>,
 ) -> Result<Json<Value>, ApiError> {
@@ -163,18 +162,14 @@ async fn worker_open_service(
         )));
     }
     if fake_runtime_enabled() {
-        let url = fake_open_service(&workspace.name, &service)
+        let url = fake_open_hermes(&workspace.name)
             .await
             .map_err(ApiError::Anyhow)?;
         return Ok(Json(json!({ "url": url })));
     }
-    let url = service::open_workspace_service(
-        &state.services,
-        &workspace.name,
-        &workspace.sandbox_name,
-        &service,
-    )
-    .await?;
+    let url =
+        service::open_hermes_dashboard(&state.services, &workspace.name, &workspace.sandbox_name)
+            .await?;
     Ok(Json(json!({ "url": url })))
 }
 
@@ -1258,16 +1253,15 @@ async fn fake_restore_workspace(
     .await
 }
 
-async fn fake_open_service(workspace_name: &str, service: &str) -> Result<String> {
+async fn fake_open_hermes(workspace_name: &str) -> Result<String> {
     let dir = microsandbox_home()?.join("fake").join(workspace_name);
     fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    fs::write(dir.join(format!("service-{service}")), b"opened")?;
+    fs::write(dir.join("service-hermes"), b"opened")?;
     let base = env::var("MOM_FAKE_SERVICE_BASE_URL")
         .unwrap_or_else(|_| "http://fake.agentmom.local".to_string());
     Ok(format!(
-        "{}/{}/{}",
+        "{}/{}/hermes",
         base.trim_end_matches('/'),
-        workspace_name,
-        service
+        workspace_name
     ))
 }

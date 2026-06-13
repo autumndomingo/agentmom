@@ -26,22 +26,13 @@ pub(crate) struct RuntimeConfig {
     pub(crate) snapshot_name: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CredentialConfig {
     #[serde(default)]
     pub(crate) proxy_url: Option<String>,
     #[serde(default)]
     pub(crate) proxy_ca_path: Option<PathBuf>,
-}
-
-impl Default for CredentialConfig {
-    fn default() -> Self {
-        Self {
-            proxy_url: None,
-            proxy_ca_path: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

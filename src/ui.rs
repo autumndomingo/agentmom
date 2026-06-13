@@ -182,10 +182,10 @@ async fn hermes_ui_workspace(
     Path(name): Path<String>,
 ) -> Result<Json<CommandResult>, UiError> {
     crate::auth::authorize_workspace(&headers, &name)?;
-    open_workspace_service(&name, "hermes").await
+    open_hermes_dashboard(&name).await
 }
 
-async fn open_workspace_service(name: &str, service: &str) -> Result<Json<CommandResult>, UiError> {
+async fn open_hermes_dashboard(name: &str) -> Result<Json<CommandResult>, UiError> {
     let workspace = workspace_get(name)?;
     let worker_url = workspace_worker_url(&workspace)?;
     let workspace_name = workspace.name.clone();
@@ -200,7 +200,7 @@ async fn open_workspace_service(name: &str, service: &str) -> Result<Json<Comman
         .timeout(Duration::from_secs(120))
         .build()?
         .post(format!(
-            "{}/worker/services/{service}/open",
+            "{}/worker/services/hermes/open",
             worker_url.trim_end_matches('/')
         ))
         .with_worker_token()
@@ -213,7 +213,7 @@ async fn open_workspace_service(name: &str, service: &str) -> Result<Json<Comman
         .error_for_status()?
         .json::<OpenWorkerServiceResponse>()
         .await?;
-    service_tunnel_upsert(&workspace_name, node, service, &response.url)?;
+    service_tunnel_upsert(&workspace_name, node, "hermes", &response.url)?;
     Ok(Json(CommandResult {
         ok: true,
         code: Some(0),
