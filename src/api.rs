@@ -8,6 +8,7 @@ pub(crate) async fn api(args: ApiArgs) -> Result<()> {
         .route("/health/live", get(api_health_live))
         .route("/health/ready", get(api_health_ready))
         .route("/metrics", get(api_metrics))
+        .route("/api/tunnel-domain-allowed", get(api_tunnel_domain_allowed))
         .route("/api/jobs", post(api_create_job))
         .route("/api/jobs/{id}", get(api_get_job))
         .route(
@@ -67,6 +68,30 @@ async fn api_health_ready() -> Result<Json<HealthResponse>, ApiError> {
         node: node_id()?,
         db: fleet_state_dir()?.join("fleet.db").display().to_string(),
     }))
+}
+
+async fn api_tunnel_domain_allowed(Query(query): Query<TunnelDomainQuery>) -> StatusCode {
+    if tunnel_domain_allowed(&query.domain) {
+        StatusCode::OK
+    } else {
+        StatusCode::FORBIDDEN
+    }
+}
+
+fn tunnel_domain_allowed(domain: &str) -> bool {
+    let domain = domain.trim_end_matches('.').to_ascii_lowercase();
+    for node in ["mom-1", "mom-2"] {
+        let Some(port) = domain
+            .strip_prefix(&format!("{node}-"))
+            .and_then(|rest| rest.strip_suffix(".agentmom.xyz"))
+        else {
+            continue;
+        };
+        if port.parse::<u16>().is_ok() {
+            return true;
+        }
+    }
+    false
 }
 
 async fn api_metrics() -> Result<String, ApiError> {
@@ -398,4 +423,23 @@ async fn api_worker_events(
         }
     });
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tunnel_domain_allowed;
+
+    #[test]
+    fn tunnel_domain_allowlist_accepts_worker_port_subdomains() {
+        assert!(tunnel_domain_allowed("mom-1-37701.agentmom.xyz"));
+        assert!(tunnel_domain_allowed("mom-2-40243.agentmom.xyz."));
+    }
+
+    #[test]
+    fn tunnel_domain_allowlist_rejects_other_domains() {
+        assert!(!tunnel_domain_allowed("agentmom.xyz"));
+        assert!(!tunnel_domain_allowed("mom-3-37701.agentmom.xyz"));
+        assert!(!tunnel_domain_allowed("mom-1-nope.agentmom.xyz"));
+        assert!(!tunnel_domain_allowed("mom-1-37701.example.com"));
+    }
 }

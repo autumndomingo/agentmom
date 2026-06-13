@@ -439,13 +439,13 @@ mod tests {
     use super::service_tunnel_public_url_from_base;
 
     #[test]
-    fn service_tunnel_url_supports_path_template() {
+    fn service_tunnel_url_supports_port_template() {
         let url = service_tunnel_public_url_from_base(
             "0.0.0.0",
             45887,
-            Some("https://agentmom.xyz/tunnels/mom-1/{port}/"),
+            Some("https://mom-1-{port}.agentmom.xyz/"),
         );
-        assert_eq!(url, "https://agentmom.xyz/tunnels/mom-1/45887/");
+        assert_eq!(url, "https://mom-1-45887.agentmom.xyz/");
     }
 
     #[test]

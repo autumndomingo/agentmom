@@ -551,6 +551,11 @@ struct WorkerWorkspacesQuery {
     node_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct TunnelDomainQuery {
+    domain: String,
+}
+
 #[derive(Debug, Clone)]
 struct ApiState {
     notifier: broadcast::Sender<String>,
