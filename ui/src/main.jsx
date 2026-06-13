@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   Edit3,
+  ExternalLink,
   PanelLeft,
   Plus,
   RefreshCcw,
@@ -94,7 +95,7 @@ function Root() {
     }
   }
 
-  if (!userSession.userName || !userSession.agentName) {
+  if (!userSession.userName || !userSession.agentName || !userSession.workspaceName) {
     return <SetupPage userSession={userSession} onSubmit={enterUserFlow} />;
   }
 
@@ -211,19 +212,32 @@ function SetupPage({ userSession, onSubmit }) {
     userName: userSession.userName ?? '',
     agentName: userSession.agentName ?? '',
   });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
 
-  function submitSetup(event) {
+  async function submitSetup(event) {
     event.preventDefault();
     const userName = form.userName.trim();
     const agentName = form.agentName.trim();
     if (!userName || !agentName) return;
 
-    onSubmit({
-      ...userSession,
-      userName,
-      agentName,
-      completedSetupAt: Date.now(),
-    });
+    setBusy(true);
+    setError('');
+    try {
+      const workspace = await createWorkspaceFromOnboarding(userSession, userName, agentName);
+      onSubmit({
+        ...userSession,
+        userName,
+        agentName,
+        workspaceName: workspace.name,
+        workspaceDisplayName: workspaceDisplayName(workspace),
+        completedSetupAt: Date.now(),
+      });
+    } catch (setupError) {
+      setError(formatError(setupError));
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
@@ -250,7 +264,10 @@ function SetupPage({ userSession, onSubmit }) {
             placeholder="Agent name"
             required
           />
-          <button disabled={!form.userName.trim() || !form.agentName.trim()}>Continue</button>
+          {error && <p className="accessError">{error}</p>}
+          <button disabled={busy || !form.userName.trim() || !form.agentName.trim()}>
+            {busy ? 'Creating workspace...' : 'Continue'}
+          </button>
         </form>
       </section>
     </main>
@@ -258,28 +275,20 @@ function SetupPage({ userSession, onSubmit }) {
 }
 
 function App({ userSession }) {
-  const currentUserId = userIdentity(userSession.email);
-  const [vms, setVms] = useState(() => [
-    {
-      id: currentUserId,
-      email: userSession.email,
-      name: userSession.agentName,
-      userName: userSession.userName,
-      status: 'running',
-    },
-  ]);
-  const [selectedUserId, setSelectedUserId] = useState(currentUserId);
+  const [vms, setVms] = useState([]);
+  const [selectedName, setSelectedName] = useState(userSession.workspaceName ?? '');
   const [busy, setBusy] = useState(false);
   const [chatInput, setChatInput] = useState('');
   const [chatsByUser, setChatsByUser] = useState(() => loadStoredChats());
   const [activeChatByUser, setActiveChatByUser] = useState({});
+  const [workspaceError, setWorkspaceError] = useState('');
   const [now, setNow] = useState(() => Date.now());
 
   const selectedVm = useMemo(
-    () => vms.find((vm) => vm.id === selectedUserId) ?? vms[0],
-    [selectedUserId, vms],
+    () => vms.find((vm) => vm.name === selectedName) ?? vms[0],
+    [selectedName, vms],
   );
-  const selectedKey = selectedVm?.id;
+  const selectedKey = selectedVm?.name ?? selectedName;
   const selectedChats = selectedKey ? chatsByUser[selectedKey] ?? [] : [];
   const activeChatId = selectedKey
     ? activeChatByUser[selectedKey] ?? selectedChats[0]?.id
@@ -297,10 +306,44 @@ function App({ userSession }) {
     window.localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(chatsByUser));
   }, [chatsByUser]);
 
+  useEffect(() => {
+    refresh().catch((error) => setWorkspaceError(formatError(error)));
+  }, []);
+
+  async function request(path, options = {}) {
+    setBusy(true);
+    try {
+      return await apiRequest(path, options, userSession);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function refresh() {
-    setVms((current) =>
-      current.map((vm) => (vm.id === selectedUserId ? { ...vm, status: 'running' } : vm)),
-    );
+    setWorkspaceError('');
+    const allWorkspaces = normalizeVmList(await request('/vms'));
+    const userWorkspace = selectUserWorkspace(allWorkspaces, userSession);
+    const nextVms = userSession.workspaceName
+      ? userWorkspace
+        ? [userWorkspace]
+        : []
+      : allWorkspaces;
+    setVms(nextVms);
+
+    if (userWorkspace) {
+      setSelectedName(userWorkspace.name);
+    } else if (userSession.workspaceName) {
+      setSelectedName(userSession.workspaceName);
+      setWorkspaceError(
+        `Workspace ${userSession.workspaceDisplayName ?? userSession.workspaceName} was not returned by the backend.`,
+      );
+    } else if (nextVms.length && !nextVms.some((vm) => vm.name === selectedName)) {
+      setSelectedName(nextVms[0].name);
+    } else if (!nextVms.length) {
+      setSelectedName('');
+    }
+
+    return nextVms;
   }
 
   function openAdminPage() {
@@ -315,16 +358,22 @@ function App({ userSession }) {
     if (!prompt) return;
 
     setChatInput('');
-    const chatId = ensureChatForPrompt(selectedVm.id, prompt);
-    appendMessage(selectedVm.id, chatId, { role: 'user', content: prompt });
+    const chatId = ensureChatForPrompt(selectedVm.name, prompt);
+    appendMessage(selectedVm.name, chatId, { role: 'user', content: prompt });
 
-    appendMessage(selectedVm.id, chatId, {
-      role: 'assistant',
-      content: 'This prototype is connected through the local onboarding flow. Backend chat wiring can be added after the screen flow is finalized.',
-    });
+    try {
+      const result = await request(`/vms/${encodeURIComponent(selectedVm.name)}/codex`, {
+        method: 'POST',
+        body: JSON.stringify({ prompt }),
+      });
+      appendMessage(selectedVm.name, chatId, { role: 'assistant', content: renderResult(result) });
+      await refresh();
+    } catch (error) {
+      appendMessage(selectedVm.name, chatId, { role: 'assistant', content: formatError(error) });
+    }
   }
 
-  function startNewChat(id = selectedVm?.id) {
+  function startNewChat(id = selectedVm?.name) {
     if (!id) return;
     const chat = {
       id: window.crypto?.randomUUID?.() ?? `${Date.now()}`,
@@ -342,7 +391,7 @@ function App({ userSession }) {
 
   function selectChat(chatId) {
     if (!selectedVm) return;
-    setActiveChatByUser((current) => ({ ...current, [selectedVm.id]: chatId }));
+    setActiveChatByUser((current) => ({ ...current, [selectedVm.name]: chatId }));
   }
 
   function ensureChatForPrompt(id, prompt) {
@@ -381,6 +430,49 @@ function App({ userSession }) {
           : chat,
       ),
     }));
+  }
+
+  async function launchOpencode() {
+    if (!selectedVm) return;
+
+    try {
+      const result = await request(`/vms/${encodeURIComponent(selectedVm.name)}/opencode`, {
+        method: 'POST',
+      });
+      const url = launchUrlFromResult(result);
+      if (url) {
+        window.open(url, '_blank', 'noopener,noreferrer');
+      }
+      await refresh();
+    } catch (error) {
+      appendSystemMessage(formatError(error));
+    }
+  }
+
+  async function launchHermes() {
+    if (!selectedVm) return;
+
+    try {
+      const result = await request(`/vms/${encodeURIComponent(selectedVm.name)}/hermes-ui`, {
+        method: 'POST',
+      });
+      const url = launchUrlFromResult(result);
+      if (url) {
+        window.open(url, '_blank', 'noopener,noreferrer');
+      }
+      await refresh();
+    } catch (error) {
+      appendSystemMessage(formatError(error));
+    }
+  }
+
+  function appendSystemMessage(content) {
+    if (!selectedVm) {
+      setWorkspaceError(content);
+      return;
+    }
+    const chatId = ensureChatForPrompt(selectedVm.name, 'Workspace action');
+    appendMessage(selectedVm.name, chatId, { role: 'assistant', content });
   }
 
   return (
@@ -433,7 +525,7 @@ function App({ userSession }) {
             <PanelLeft size={20} />
           </button>
           <div>
-            <h1>{selectedVm?.name ?? 'Agent workspace'}</h1>
+            <h1>{selectedVm ? workspaceDisplayName(selectedVm) : 'Agent workspace'}</h1>
             <p>{selectedVm ? friendlyStatus(selectedVm.status) : 'Create a workspace to begin.'}</p>
           </div>
           <div className="headerActions">
@@ -447,11 +539,28 @@ function App({ userSession }) {
               <RefreshCcw size={17} />
               Refresh
             </button>
+            <button
+              className="refreshButton"
+              onClick={launchOpencode}
+              disabled={!selectedVm || busy}
+            >
+              <ExternalLink size={17} />
+              OpenCode
+            </button>
+            <button className="refreshButton" onClick={launchHermes} disabled={!selectedVm || busy}>
+              <ExternalLink size={17} />
+              Hermes
+            </button>
           </div>
         </header>
 
         <div className="chatBody">
-          {messages.length === 0 ? (
+          {workspaceError ? (
+            <div className="emptyChat">
+              <p>Workspace error</p>
+              <h2>{workspaceError}</h2>
+            </div>
+          ) : messages.length === 0 ? (
             <div className="emptyChat">
               <p>Ready when you are.</p>
               <h2>Ask Agent Mom about your workspace.</h2>
@@ -783,6 +892,102 @@ function friendlyStatus(status) {
   if (lower === 'paused') return 'Paused';
   if (lower === 'crashed') return 'Needs attention';
   return status;
+}
+
+async function createWorkspaceFromOnboarding(session, userName, agentName) {
+  try {
+    await apiRequest(
+      '/vms',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          name: agentName,
+          user: userIdentity(session.email) || userName,
+          replace: true,
+        }),
+      },
+      session,
+    );
+  } catch (error) {
+    if (!workspaceAlreadyExists(error)) {
+      throw error;
+    }
+  }
+
+  const list = await apiRequest('/vms', {}, session);
+  const workspaces = normalizeVmList(list);
+  const workspace = findWorkspaceBySubmittedName(workspaces, agentName);
+  if (workspace) {
+    return workspace;
+  }
+  throw new Error(`Workspace was created, but ${agentName} was not returned by the backend.`);
+}
+
+async function apiRequest(path, options = {}, session) {
+  const headers = {
+    'Content-Type': 'application/json',
+    ...authHeaders(session),
+    ...(options.headers ?? {}),
+  };
+  const response = await fetch(`${API_BASE}${path}`, {
+    ...options,
+    headers,
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw data;
+  }
+  return data;
+}
+
+function workspaceAlreadyExists(error) {
+  const message = formatError(error).toLowerCase();
+  return message.includes('already exists') || message.includes('replace');
+}
+
+function workspaceDisplayName(workspace) {
+  return workspace.display_name ?? workspace.displayName ?? workspace.name ?? 'Agent workspace';
+}
+
+function normalizeVmList(data) {
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data?.vms)) return data.vms;
+  return [];
+}
+
+function selectUserWorkspace(workspaces, session) {
+  const savedName = session.workspaceName;
+  if (savedName) {
+    return workspaces.find((workspace) => workspace.name === savedName) ?? null;
+  }
+  return findWorkspaceBySubmittedName(workspaces, session.agentName);
+}
+
+function findWorkspaceBySubmittedName(workspaces, submittedName) {
+  const normalized = String(submittedName ?? '').trim().toLowerCase();
+  if (!normalized) return null;
+  return (
+    workspaces.find((workspace) =>
+      [workspace.name, workspace.slug, workspace.display_name, workspace.displayName]
+        .filter(Boolean)
+        .some((value) => String(value).trim().toLowerCase() === normalized),
+    ) ?? null
+  );
+}
+
+function launchUrlFromResult(result) {
+  const rawUrl = result.stdout?.trim().split(/\s+/).at(-1);
+  if (!rawUrl) return '';
+
+  try {
+    const url = new URL(rawUrl, window.location.href);
+    if (url.hostname === 'agentmom.xyz' && url.pathname.startsWith('/tunnels/')) {
+      return `${url.pathname}${url.search}${url.hash}`;
+    }
+    return url.href;
+  } catch {
+    return rawUrl;
+  }
 }
 
 function adminStatusLabel(status) {
