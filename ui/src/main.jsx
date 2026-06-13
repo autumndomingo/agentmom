@@ -68,6 +68,11 @@ function Root() {
   }, [userSession?.token]);
 
   function enterUserFlow(session) {
+    if (!session) {
+      window.localStorage.removeItem(USER_SESSION_KEY);
+      setUserSession(null);
+      return;
+    }
     window.localStorage.setItem(USER_SESSION_KEY, JSON.stringify(session));
     setUserSession(session);
   }
@@ -164,8 +169,13 @@ function LandingPage({ onSubmit }) {
             required
           />
           {error && <p className="accessError">{error}</p>}
-          <button disabled={busy || !form.email.trim() || !form.accessCode.trim()}>
-            {busy ? 'Checking...' : 'Continue'}
+          <button
+            className="visuallyHiddenSubmit"
+            aria-hidden="true"
+            tabIndex={-1}
+            disabled={busy}
+          >
+            Continue
           </button>
         </form>
       </section>
@@ -211,9 +221,13 @@ function SetupPage({ userSession, onSubmit }) {
     userName: userSession.userName ?? '',
     agentName: userSession.agentName ?? '',
   });
+  const previewSession = {
+    ...userSession,
+    userName: userSession.userName || 'Local workspace',
+    agentName: userSession.agentName || 'Workspace',
+  };
 
-  function submitSetup(event) {
-    event.preventDefault();
+  function completeSetup() {
     const userName = form.userName.trim();
     const agentName = form.agentName.trim();
     if (!userName || !agentName) return;
@@ -226,12 +240,37 @@ function SetupPage({ userSession, onSubmit }) {
     });
   }
 
-  return (
-    <main className="landingPage">
-      <section className="landingPanel setupPanel" aria-label="Create your workspace">
-        <BuildersTableBrand />
+  function submitSetup(event) {
+    event.preventDefault();
+    completeSetup();
+  }
 
-        <form className="landingForm setupForm" onSubmit={submitSetup}>
+  function submitSetupOnEnter(event) {
+    if (event.key !== 'Enter' || event.shiftKey || event.metaKey || event.ctrlKey || event.altKey) {
+      return;
+    }
+    event.preventDefault();
+    completeSetup();
+  }
+
+  function goBack() {
+    window.localStorage.removeItem(USER_SESSION_KEY);
+    onSubmit(null);
+  }
+
+  return (
+    <div className="setupPage">
+      <div className="setupBackground" aria-hidden="true">
+        <App userSession={previewSession} />
+      </div>
+      <div className="setupOverlay" role="presentation">
+        <form
+          className="setupForm"
+          aria-label="Create your workspace"
+          onSubmit={submitSetup}
+          onKeyDown={submitSetupOnEnter}
+        >
+          <h1>You are almost ready to go</h1>
           <input
             value={form.userName}
             onChange={(event) =>
@@ -250,10 +289,13 @@ function SetupPage({ userSession, onSubmit }) {
             placeholder="Agent name"
             required
           />
-          <button disabled={!form.userName.trim() || !form.agentName.trim()}>Continue</button>
+          <button className="setupBackLink" type="button" onClick={goBack}>
+            <span aria-hidden="true">←</span>
+            Back
+          </button>
         </form>
-      </section>
-    </main>
+      </div>
+    </div>
   );
 }
 
@@ -383,6 +425,11 @@ function App({ userSession }) {
     }));
   }
 
+  function logOut() {
+    window.localStorage.removeItem(USER_SESSION_KEY);
+    window.location.href = '/';
+  }
+
   return (
     <main className="appShell">
       <aside className="sidebar">
@@ -424,6 +471,9 @@ function App({ userSession }) {
           <h2>Session</h2>
           <strong>Local workspace</strong>
           <span>{userSession.email}</span>
+          <button className="sessionLogoutButton" type="button" onClick={logOut}>
+            Log out
+          </button>
         </div>
       </aside>
 
