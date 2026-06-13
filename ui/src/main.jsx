@@ -50,14 +50,15 @@ function App() {
   }
 
   async function refresh() {
-    const data = await request('/vms');
-    setVms(data.vms);
-    if (data.vms.length && !data.vms.some((vm) => vm.name === selectedName)) {
-      setSelectedName(data.vms[0].name);
+    const nextVms = normalizeVmList(await request('/vms'));
+    setVms(nextVms);
+    if (nextVms.length && !nextVms.some((vm) => vm.name === selectedName)) {
+      setSelectedName(nextVms[0].name);
     }
-    if (!data.vms.length) {
+    if (!nextVms.length) {
       setSelectedName('');
     }
+    return nextVms;
   }
 
   async function createWorkspace(event) {
@@ -69,11 +70,12 @@ function App() {
       method: 'POST',
       body: JSON.stringify({ name, replace: true }),
     });
+    const nextVms = await refresh();
+    const createdWorkspace = findWorkspaceBySubmittedName(nextVms, name);
     setCreateForm({ userName: '', botName: '' });
     setShowCreate(false);
-    setSelectedName(name);
+    setSelectedName(createdWorkspace?.name ?? nextVms[0]?.name ?? '');
     setMessages([]);
-    await refresh();
   }
 
   async function sendMessage(event) {
@@ -105,7 +107,7 @@ function App() {
       const result = await request(`/vms/${encodeURIComponent(selectedVm.name)}/opencode`, {
         method: 'POST',
       });
-      const url = result.stdout.trim().split(/\s+/).at(-1);
+      const url = launchUrlFromResult(result);
       if (url) {
         window.open(url, '_blank', 'noopener,noreferrer');
       }
@@ -122,7 +124,7 @@ function App() {
       const result = await request(`/vms/${encodeURIComponent(selectedVm.name)}/hermes-ui`, {
         method: 'POST',
       });
-      const url = result.stdout.trim().split(/\s+/).at(-1);
+      const url = launchUrlFromResult(result);
       if (url) {
         window.open(url, '_blank', 'noopener,noreferrer');
       }
@@ -306,6 +308,35 @@ function friendlyStatus(status) {
 
 function workspaceDisplayName(workspace) {
   return workspace.display_name ?? workspace.displayName ?? workspace.name ?? 'Agent workspace';
+}
+
+function normalizeVmList(data) {
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data?.vms)) return data.vms;
+  return [];
+}
+
+function findWorkspaceBySubmittedName(workspaces, submittedName) {
+  return workspaces.find((workspace) =>
+    [workspace.name, workspace.slug, workspace.display_name, workspace.displayName].includes(
+      submittedName,
+    ),
+  );
+}
+
+function launchUrlFromResult(result) {
+  const rawUrl = result.stdout?.trim().split(/\s+/).at(-1);
+  if (!rawUrl) return '';
+
+  try {
+    const url = new URL(rawUrl, window.location.href);
+    if (url.hostname === 'agentmom.xyz' && url.pathname.startsWith('/tunnels/')) {
+      return `${url.pathname}${url.search}${url.hash}`;
+    }
+    return url.href;
+  } catch {
+    return rawUrl;
+  }
 }
 
 function renderResult(result) {
