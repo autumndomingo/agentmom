@@ -243,7 +243,7 @@ function SetupPage({ userSession, onSubmit }) {
 }
 
 function App({ userSession }) {
-  const [vms, setVms] = useState([]);
+  const [workspaces, setWorkspaces] = useState([]);
   const [selectedName, setSelectedName] = useState(userSession.workspaceName ?? '');
   const [busy, setBusy] = useState(false);
   const [chatInput, setChatInput] = useState('');
@@ -252,11 +252,11 @@ function App({ userSession }) {
   const [workspaceError, setWorkspaceError] = useState('');
   const [now, setNow] = useState(() => Date.now());
 
-  const selectedVm = useMemo(
-    () => vms.find((vm) => vm.name === selectedName) ?? vms[0],
-    [selectedName, vms],
+  const selectedWorkspace = useMemo(
+    () => workspaces.find((workspace) => workspace.name === selectedName) ?? workspaces[0],
+    [selectedName, workspaces],
   );
-  const selectedKey = selectedVm?.name ?? selectedName;
+  const selectedKey = selectedWorkspace?.name ?? selectedName;
   const selectedChats = selectedKey ? chatsByUser[selectedKey] ?? [] : [];
   const activeChatId = selectedKey
     ? activeChatByUser[selectedKey] ?? selectedChats[0]?.id
@@ -285,14 +285,14 @@ function App({ userSession }) {
 
   async function refresh() {
     setWorkspaceError('');
-    const allWorkspaces = normalizeVmList(await request('/workspaces'));
+    const allWorkspaces = normalizeWorkspaceList(await request('/workspaces'));
     const userWorkspace = selectUserWorkspace(allWorkspaces, userSession);
-    const nextVms = userSession.workspaceName
+    const nextWorkspaces = userSession.workspaceName
       ? userWorkspace
         ? [userWorkspace]
         : []
       : allWorkspaces;
-    setVms(nextVms);
+    setWorkspaces(nextWorkspaces);
 
     if (userWorkspace) {
       setSelectedName(userWorkspace.name);
@@ -301,13 +301,13 @@ function App({ userSession }) {
       setWorkspaceError(
         `Workspace ${userSession.workspaceDisplayName ?? userSession.workspaceName} was not returned by the backend.`,
       );
-    } else if (nextVms.length && !nextVms.some((vm) => vm.name === selectedName)) {
-      setSelectedName(nextVms[0].name);
-    } else if (!nextVms.length) {
+    } else if (nextWorkspaces.length && !nextWorkspaces.some((workspace) => workspace.name === selectedName)) {
+      setSelectedName(nextWorkspaces[0].name);
+    } else if (!nextWorkspaces.length) {
       setSelectedName('');
     }
 
-    return nextVms;
+    return nextWorkspaces;
   }
 
   function openAdminPage() {
@@ -316,28 +316,28 @@ function App({ userSession }) {
 
   async function sendMessage(event) {
     event.preventDefault();
-    if (!selectedVm) return;
+    if (!selectedWorkspace) return;
 
     const prompt = chatInput.trim();
     if (!prompt) return;
 
     setChatInput('');
-    const chatId = ensureChatForPrompt(selectedVm.name, prompt);
-    appendMessage(selectedVm.name, chatId, { role: 'user', content: prompt });
+    const chatId = ensureChatForPrompt(selectedWorkspace.name, prompt);
+    appendMessage(selectedWorkspace.name, chatId, { role: 'user', content: prompt });
 
     try {
-      const result = await request(`/workspaces/${encodeURIComponent(selectedVm.name)}/codex`, {
+      const result = await request(`/workspaces/${encodeURIComponent(selectedWorkspace.name)}/codex`, {
         method: 'POST',
         body: JSON.stringify({ prompt }),
       });
-      appendMessage(selectedVm.name, chatId, { role: 'assistant', content: renderResult(result) });
+      appendMessage(selectedWorkspace.name, chatId, { role: 'assistant', content: renderResult(result) });
       await refresh();
     } catch (error) {
-      appendMessage(selectedVm.name, chatId, { role: 'assistant', content: formatError(error) });
+      appendMessage(selectedWorkspace.name, chatId, { role: 'assistant', content: formatError(error) });
     }
   }
 
-  function startNewChat(id = selectedVm?.name) {
+  function startNewChat(id = selectedWorkspace?.name) {
     if (!id) return;
     const chat = {
       id: window.crypto?.randomUUID?.() ?? `${Date.now()}`,
@@ -354,8 +354,8 @@ function App({ userSession }) {
   }
 
   function selectChat(chatId) {
-    if (!selectedVm) return;
-    setActiveChatByUser((current) => ({ ...current, [selectedVm.name]: chatId }));
+    if (!selectedWorkspace) return;
+    setActiveChatByUser((current) => ({ ...current, [selectedWorkspace.name]: chatId }));
   }
 
   function ensureChatForPrompt(id, prompt) {
@@ -397,10 +397,10 @@ function App({ userSession }) {
   }
 
   async function launchOpencode() {
-    if (!selectedVm) return;
+    if (!selectedWorkspace) return;
 
     try {
-      const result = await request(`/workspaces/${encodeURIComponent(selectedVm.name)}/opencode`, {
+      const result = await request(`/workspaces/${encodeURIComponent(selectedWorkspace.name)}/opencode`, {
         method: 'POST',
       });
       const url = launchUrlFromResult(result);
@@ -414,10 +414,10 @@ function App({ userSession }) {
   }
 
   async function launchHermes() {
-    if (!selectedVm) return;
+    if (!selectedWorkspace) return;
 
     try {
-      const result = await request(`/workspaces/${encodeURIComponent(selectedVm.name)}/hermes-ui`, {
+      const result = await request(`/workspaces/${encodeURIComponent(selectedWorkspace.name)}/hermes-ui`, {
         method: 'POST',
       });
       const url = launchUrlFromResult(result);
@@ -431,12 +431,12 @@ function App({ userSession }) {
   }
 
   function appendSystemMessage(content) {
-    if (!selectedVm) {
+    if (!selectedWorkspace) {
       setWorkspaceError(content);
       return;
     }
-    const chatId = ensureChatForPrompt(selectedVm.name, 'Workspace action');
-    appendMessage(selectedVm.name, chatId, { role: 'assistant', content });
+    const chatId = ensureChatForPrompt(selectedWorkspace.name, 'Workspace action');
+    appendMessage(selectedWorkspace.name, chatId, { role: 'assistant', content });
   }
 
   return (
@@ -450,7 +450,7 @@ function App({ userSession }) {
         </div>
 
         <div className="sidebarQuickActions">
-          <button className="launchButton" onClick={() => startNewChat()} disabled={!selectedVm}>
+          <button className="launchButton" onClick={() => startNewChat()} disabled={!selectedWorkspace}>
             <Edit3 size={24} strokeWidth={2.25} />
             New chat
           </button>
@@ -473,7 +473,7 @@ function App({ userSession }) {
               </div>
             </section>
           ))}
-          {selectedVm && !selectedChats.length && <p className="emptyList">New chats will appear here.</p>}
+          {selectedWorkspace && !selectedChats.length && <p className="emptyList">New chats will appear here.</p>}
         </div>
 
         <div className="sessionBox">
@@ -490,8 +490,8 @@ function App({ userSession }) {
             <PanelLeft size={20} />
           </button>
           <div>
-            <h1>{selectedVm ? workspaceDisplayName(selectedVm) : 'Agent workspace'}</h1>
-            <p>{selectedVm ? friendlyStatus(selectedVm.status) : 'Create a workspace to begin.'}</p>
+            <h1>{selectedWorkspace ? workspaceDisplayName(selectedWorkspace) : 'Agent workspace'}</h1>
+            <p>{selectedWorkspace ? friendlyStatus(selectedWorkspace.status) : 'Create a workspace to begin.'}</p>
           </div>
           <div className="headerActions">
             {userSession.role === 'admin' && (
@@ -507,12 +507,12 @@ function App({ userSession }) {
             <button
               className="refreshButton"
               onClick={launchOpencode}
-              disabled={!selectedVm || busy}
+              disabled={!selectedWorkspace || busy}
             >
               <ExternalLink size={17} />
               OpenCode
             </button>
-            <button className="refreshButton" onClick={launchHermes} disabled={!selectedVm || busy}>
+            <button className="refreshButton" onClick={launchHermes} disabled={!selectedWorkspace || busy}>
               <ExternalLink size={17} />
               Hermes
             </button>
@@ -543,18 +543,18 @@ function App({ userSession }) {
         </div>
 
         <form className="composer" onSubmit={sendMessage}>
-          <button type="button" disabled={!selectedVm || busy} title="Add context">
+          <button type="button" disabled={!selectedWorkspace || busy} title="Add context">
             <Plus size={20} />
           </button>
           <input
             value={chatInput}
             onChange={(event) => setChatInput(event.target.value)}
             placeholder={
-              selectedVm ? 'Ask Agent Mom anything about this workspace' : 'Create a workspace first'
+              selectedWorkspace ? 'Ask Agent Mom anything about this workspace' : 'Create a workspace first'
             }
-            disabled={!selectedVm || busy}
+            disabled={!selectedWorkspace || busy}
           />
-          <button className="sendButton" disabled={!selectedVm || busy || !chatInput.trim()}>
+          <button className="sendButton" disabled={!selectedWorkspace || busy || !chatInput.trim()}>
             {busy ? <Sparkles size={20} /> : <Send size={20} />}
           </button>
         </form>
@@ -794,7 +794,7 @@ function workspaceDisplayName(workspace) {
   return workspace.display_name ?? workspace.displayName ?? workspace.name ?? 'Agent workspace';
 }
 
-function normalizeVmList(data) {
+function normalizeWorkspaceList(data) {
   if (Array.isArray(data)) return data;
   if (Array.isArray(data?.vms)) return data.vms;
   return [];
