@@ -304,7 +304,6 @@ input:disabled {
   gap: 8px;
 }
 
-.newChatButton,
 .launchButton {
   width: 100%;
   min-height: 56px;
@@ -319,14 +318,6 @@ input:disabled {
   font-size: 18px;
   font-weight: 750;
   line-height: 1;
-}
-
-.newChatButton {
-  background: var(--panel);
-}
-
-.newChatButton:hover:not(:disabled) {
-  background: #303030;
 }
 
 .launchButton:hover {
@@ -686,91 +677,6 @@ input:disabled {
 }
 
 .composer .sendButton:hover:not(:disabled) {
-  background: #ffffff;
-}
-
-.modalBackdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 20;
-  padding: 20px;
-  display: grid;
-  place-items: center;
-  background: rgb(0 0 0 / 62%);
-}
-
-.createModal {
-  width: min(420px, 100%);
-  padding: 22px;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  display: grid;
-  gap: 16px;
-  background: #111113;
-  box-shadow: 0 24px 90px rgb(0 0 0 / 50%);
-}
-
-.createModal h2 {
-  margin: 0;
-  color: var(--text);
-  font-size: 22px;
-  line-height: 1.2;
-}
-
-.createModal p {
-  margin: 6px 0 0;
-  color: var(--muted);
-  font-size: 14px;
-}
-
-.createModal label {
-  display: grid;
-  gap: 7px;
-  color: var(--muted);
-  font-size: 14px;
-  font-weight: 700;
-}
-
-.createModal input {
-  width: 100%;
-  height: 46px;
-  border: 1px solid #4a4a52;
-  border-radius: 8px;
-  outline: 0;
-  background: #070707;
-  color: var(--text);
-  padding: 0 13px;
-}
-
-.createModal input:focus {
-  border-color: #7b7b86;
-}
-
-.modalActions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 10px;
-}
-
-.modalActions button {
-  height: 40px;
-  padding: 0 14px;
-  border-radius: 8px;
-  background: var(--panel);
-  color: var(--text);
-  font-weight: 750;
-}
-
-.modalActions button:hover:not(:disabled) {
-  background: var(--panel-hover);
-}
-
-.modalActions .confirmButton {
-  background: var(--accent);
-  color: #0a0a0b;
-}
-
-.modalActions .confirmButton:hover:not(:disabled) {
   background: #ffffff;
 }
 
