@@ -15,8 +15,8 @@ use tower_http::services::{ServeDir, ServeFile};
 use crate::{
     ApiState, JobResponse, WorkspaceRecord, create_job, default_workspace_backup_interval,
     default_workspace_cpus, default_workspace_idle_timeout, default_workspace_memory,
-    default_workspace_volume_quota, job_get, node_worker_url, sanitize_workspace_name,
-    select_ready_node, worker_token, workspace_all, workspace_get, workspace_upsert_pending,
+    default_workspace_volume_quota, job_get, node_worker_url, select_ready_node, worker_token,
+    workspace_all, workspace_get, workspace_upsert_pending,
 };
 
 #[derive(Debug, Deserialize)]
@@ -52,7 +52,10 @@ struct PromptRequest {
 
 #[derive(Debug, Serialize)]
 struct Vm {
+    workspace_id: String,
     name: String,
+    slug: String,
+    display_name: String,
     status: String,
     image: String,
 }
@@ -124,7 +127,10 @@ async fn list_vms() -> Result<Json<ListResponse>, UiError> {
     let vms = workspace_all()?
         .into_iter()
         .map(|workspace| Vm {
+            workspace_id: workspace.workspace_id,
             name: workspace.name,
+            slug: workspace.slug,
+            display_name: workspace.display_name,
             status: workspace.status,
             image: workspace.desired_state,
         })
@@ -144,7 +150,8 @@ async fn create_vm(
     State(state): State<Arc<ApiState>>,
     Json(request): Json<CreateRequest>,
 ) -> Result<Json<CommandResult>, UiError> {
-    let name = sanitize_workspace_name(&request.name)?;
+    let display_name = request.name.trim().to_string();
+    let name = crate::workspace_slug_from_name(&request.name)?;
     if workspace_get(&name).is_ok() {
         return Err(UiError::Anyhow(anyhow!("workspace already exists: {name}")));
     }
@@ -154,6 +161,7 @@ async fn create_vm(
     let user_id = request.user.clone().unwrap_or_else(|| name.clone());
     workspace_upsert_pending(
         &name,
+        &display_name,
         &user_id,
         &format!("mom-{name}"),
         &format!("mom-{name}-workspace"),

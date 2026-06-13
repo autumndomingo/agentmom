@@ -27,6 +27,7 @@ use microsandbox::{
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tokio::process::Command as TokioCommand;
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
@@ -380,7 +381,10 @@ struct WorkspaceMount {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WorkspaceRecord {
+    workspace_id: String,
     name: String,
+    slug: String,
+    display_name: String,
     user_id: String,
     sandbox_name: String,
     volume_name: String,
@@ -549,11 +553,6 @@ struct WorkerEventsQuery {
 #[derive(Debug, Deserialize)]
 struct WorkerWorkspacesQuery {
     node_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct TunnelDomainQuery {
-    domain: String,
 }
 
 #[derive(Debug, Clone)]
@@ -999,7 +998,8 @@ fn fleet_recover_host(from: &str, to: &str, dry_run: bool) -> Result<()> {
 }
 
 async fn workspace_create(args: WorkspaceCreateArgs) -> Result<()> {
-    let name = sanitize_workspace_name(&args.name)?;
+    let display_name = args.name.trim().to_string();
+    let name = workspace_slug_from_name(&args.name)?;
     let sandbox_name = format!("mom-{name}");
     let volume_name = format!("mom-{name}-workspace");
     let memory = u32::try_from(args.memory).context("memory must fit in u32 MiB")?;
@@ -1021,6 +1021,7 @@ async fn workspace_create(args: WorkspaceCreateArgs) -> Result<()> {
 
     workspace_upsert_pending(
         &name,
+        &display_name,
         &user_id,
         &sandbox_name,
         &volume_name,
@@ -1070,14 +1071,14 @@ async fn workspace_create(args: WorkspaceCreateArgs) -> Result<()> {
 fn workspace_list() -> Result<()> {
     let records = workspace_all()?;
     println!(
-        "{:<24} {:<16} {:<16} {:<12} {:<8} {:<8} {:<8} VOLUME",
-        "WORKSPACE", "USER", "NODE", "DESIRED", "CPUS", "MEM", "QUOTA"
+        "{:<24} {:<24} {:<16} {:<12} {:<8} {:<8} {:<8} VOLUME",
+        "SLUG", "DISPLAY", "NODE", "DESIRED", "CPUS", "MEM", "QUOTA"
     );
     for record in records {
         println!(
-            "{:<24} {:<16} {:<16} {:<12} {:<8} {:<8} {:<8} {}",
-            record.name,
-            record.user_id,
+            "{:<24} {:<24} {:<16} {:<12} {:<8} {:<8} {:<8} {}",
+            record.slug,
+            record.display_name,
             record.node_id.as_deref().unwrap_or("-"),
             record.desired_state,
             record.cpus,
@@ -1111,6 +1112,9 @@ async fn workspace_inspect(name: &str) -> Result<()> {
     let events = workspace_recent_events(name, 5)?;
 
     println!("Workspace: {}", record.name);
+    println!("Workspace ID: {}", record.workspace_id);
+    println!("Slug: {}", record.slug);
+    println!("Display name: {}", record.display_name);
     println!("User: {}", record.user_id);
     println!("Node: {}", record.node_id.as_deref().unwrap_or("-"));
     println!("Inspecting node: {local_node}");
@@ -1618,6 +1622,62 @@ fn sanitize_workspace_name(name: &str) -> Result<String> {
     Ok(name.to_string())
 }
 
+pub(crate) fn workspace_slug_from_name(name: &str) -> Result<String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        bail!("workspace name must not be empty");
+    }
+    if trimmed.len() > 128 {
+        bail!("workspace name must be at most 128 bytes");
+    }
+
+    let mut slug = String::new();
+    let mut last_was_dash = false;
+    for ch in trimmed.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            last_was_dash = false;
+        } else if !last_was_dash && !slug.is_empty() {
+            slug.push('-');
+            last_was_dash = true;
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+
+    let hash = short_hash(trimmed, 12);
+    if slug.is_empty() {
+        return Ok(format!("workspace-{hash}"));
+    }
+
+    let normalized_without_hash = slug == trimmed && slug.len() <= 64;
+    if normalized_without_hash {
+        return Ok(slug);
+    }
+
+    let suffix_len = hash.len() + 1;
+    if slug.len() + suffix_len > 64 {
+        slug.truncate(64 - suffix_len);
+        while slug.ends_with('-') {
+            slug.pop();
+        }
+    }
+    Ok(format!("{slug}-{hash}"))
+}
+
+pub(crate) fn workspace_id_from_slug(slug: &str) -> String {
+    format!("ws_{}", short_hash(slug, 16))
+}
+
+fn short_hash(value: &str, chars: usize) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value.as_bytes());
+    let digest = hasher.finalize();
+    let hex = format!("{digest:x}");
+    hex[..chars].to_string()
+}
+
 fn now_epoch() -> Result<i64> {
     Ok(SystemTime::now()
         .duration_since(UNIX_EPOCH)?
@@ -1956,5 +2016,31 @@ mod tests {
         config.credential_proxy_url = Some("http://127.0.0.1:1080".to_string());
         config.credential_proxy_ca_path = None;
         assert!(validate_credential_config(&config, CredentialMode::OpenRouterProxy).is_err());
+    }
+
+    #[test]
+    fn workspace_slug_keeps_simple_names_readable() {
+        assert_eq!(workspace_slug_from_name("justin2").unwrap(), "justin2");
+        assert_eq!(
+            workspace_slug_from_name("build-agent").unwrap(),
+            "build-agent"
+        );
+    }
+
+    #[test]
+    fn workspace_slug_hashes_when_normalization_changes_name() {
+        let slug = workspace_slug_from_name("My Bot").unwrap();
+        assert!(slug.starts_with("my-bot-"));
+        assert_ne!(slug, "my-bot");
+        assert_eq!(workspace_slug_from_name("My Bot").unwrap(), slug);
+    }
+
+    #[test]
+    fn workspace_id_is_deterministic_from_slug() {
+        assert_eq!(
+            workspace_id_from_slug("justin2"),
+            workspace_id_from_slug("justin2")
+        );
+        assert!(workspace_id_from_slug("justin2").starts_with("ws_"));
     }
 }

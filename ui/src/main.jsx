@@ -445,7 +445,7 @@ function App({ userSession }) {
                     onClick={() => selectWorkspace(vm.id)}
                   >
                     <span className={`statusDot ${status}`} />
-                    <span>{vm.userName ?? userSession.userName}</span>
+                    <span>{workspaceDisplayName(vm)}</span>
                     <small>{statusLabel(status)}</small>
                   </button>
                 );
@@ -501,7 +501,7 @@ function App({ userSession }) {
             <PanelLeft size={20} />
           </button>
           <div>
-            <h1>{selectedVm?.name ?? 'Agent workspace'}</h1>
+            <h1>{selectedVm ? workspaceDisplayName(selectedVm) : 'Agent workspace'}</h1>
             <p>{selectedVm ? friendlyStatus(selectedVm.status) : 'Create a workspace to begin.'}</p>
           </div>
           <div className="headerActions">
@@ -977,6 +977,10 @@ function userIdentity(email) {
 
 function sameEmail(left, right) {
   return userIdentity(left) === userIdentity(right);
+}
+
+function workspaceDisplayName(workspace) {
+  return workspace.display_name ?? workspace.displayName ?? workspace.name ?? workspace.slug ?? 'Agent workspace';
 }
 
 function authHeaders(session = loadUserSession()) {

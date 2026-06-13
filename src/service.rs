@@ -443,9 +443,9 @@ mod tests {
         let url = service_tunnel_public_url_from_base(
             "0.0.0.0",
             45887,
-            Some("https://mom-1-{port}.agentmom.xyz/"),
+            Some("https://example.test/tunnels/{port}/"),
         );
-        assert_eq!(url, "https://mom-1-45887.agentmom.xyz/");
+        assert_eq!(url, "https://example.test/tunnels/45887/");
     }
 
     #[test]
