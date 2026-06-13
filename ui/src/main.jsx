@@ -525,7 +525,7 @@ function AdminPage({ userSession }) {
       }
       throw data;
     }
-    setUsers((data.users ?? []).map(normalizeAdminUser));
+    setUsers(visibleAdminUsers(data.users));
   }
 
   useEffect(() => {
@@ -595,9 +595,12 @@ function AdminPage({ userSession }) {
         throw data;
       }
       const updatedUser = normalizeAdminUser(data);
-      setUsers((current) =>
-        current.map((user) => (user.id === updatedUser.id ? updatedUser : user)),
-      );
+      setUsers((current) => {
+        if (updatedUser.status === 'inactive') {
+          return current.filter((user) => user.id !== updatedUser.id);
+        }
+        return current.map((user) => (user.id === updatedUser.id ? updatedUser : user));
+      });
       if (sameEmail(updatedUser.email, userSession.email)) {
         const updatedSession = { ...userSession, role: updatedUser.role };
         if (updatedUser.role !== 'ADMN') {
@@ -648,11 +651,7 @@ function AdminPage({ userSession }) {
     }
 
     const previousUsers = users;
-    setUsers((current) =>
-      current.map((currentUser) =>
-        currentUser.id === user.id ? { ...currentUser, status: 'inactive' } : currentUser,
-      ),
-    );
+    setUsers((current) => current.filter((currentUser) => currentUser.id !== user.id));
     setAdminError('');
 
     try {
@@ -680,7 +679,7 @@ function AdminPage({ userSession }) {
     }
 
     const previousUsers = users;
-    setUsers((current) => current.map((user) => ({ ...user, status: 'inactive' })));
+    setUsers([]);
     setAdminError('');
 
     try {
@@ -798,6 +797,12 @@ function normalizeAdminUser(user) {
     id: String(user.id),
     status: userDisplayStatus(user),
   };
+}
+
+function visibleAdminUsers(users) {
+  return (users ?? [])
+    .map(normalizeAdminUser)
+    .filter((user) => user.status !== 'inactive');
 }
 
 function userDisplayStatus(user) {
