@@ -118,9 +118,10 @@ Conflict-resolution decisions made during the rebase:
   cookie unless they are explicitly testing unauthorized behavior.
 - Kept OpenCode authorization before the feature flag check. A caller must be
   allowed to access the workspace before learning whether OpenCode is enabled.
-- Kept OpenCode hidden by default on both sides:
-  `VITE_ENABLE_OPENCODE=1` for the React button and `MOM_ENABLE_OPENCODE=1` for
-  the API route.
+- Kept OpenCode hidden by default through the single Agent Mom config system:
+  `features.opencode = true` enables the API route and the browser button. Do
+  not add side-channel env vars such as `MOM_ENABLE_OPENCODE` or Vite build
+  flags for product behavior.
 
 Temporary route decision:
 
@@ -176,13 +177,24 @@ Replace node-port service URLs with stable workspace routes. The API should
 resolve workspace to assigned node and service internally; tunnel hostnames
 should be implementation detail.
 
-Hide legacy direct sandbox commands. The supported operator shape is workspace,
-node, fleet, db, config, api, and worker. Raw sandbox lifecycle commands belong
-behind an internal/debug namespace if they remain at all.
+HARD CUT legacy direct sandbox commands. The supported operator shape is
+workspace, node, fleet, db, config, api, and worker. Do not hide old top-level
+commands behind compatibility aliases; remove them from the CLI. There are no
+external users to preserve, and deployments/databases can be reset while this is
+still early. Raw sandbox helpers may remain as Rust internals only when
+workspace/node code needs them. After this pass, the unused raw lifecycle
+wrappers were removed too; workspace-scoped exec/codex/hermes and base snapshot
+doctor paths remain because they are still part of the supported flow.
 
 Tighten config around the happy path. Generated config and Nix examples should
 prefer `openrouter-proxy`; guest auth file mode should stay explicit and
 experimental.
+
+All product/runtime flags should flow through the Agent Mom config file or the
+Nix module that generates it. Environment variables are still fine for process
+placement/secrets that are already process-local (`MOM_CONFIG`,
+`MOM_STATE_DIR`, worker URL/token plumbing, test-only fake runtime), but not for
+feature switches such as OpenCode visibility.
 
 Keep runners dumb. The API owns placement and recovery. Workers claim assigned
 jobs, operate local VMs and volumes, open local services, run backup/restore,

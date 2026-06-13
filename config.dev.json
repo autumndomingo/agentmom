@@ -10,5 +10,8 @@
   },
   "auth": {
     "secret_file": "dev/secrets/auth-secret"
+  },
+  "features": {
+    "opencode": false
   }
 }

@@ -20,6 +20,8 @@ pub(crate) struct MomConfig {
     pub(crate) guest: GuestConfig,
     #[serde(default)]
     pub(crate) auth: AuthConfig,
+    #[serde(default)]
+    pub(crate) features: FeatureConfig,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -81,6 +83,13 @@ pub(crate) struct AuthConfig {
     pub(crate) secret: Option<String>,
     #[serde(default)]
     pub(crate) secret_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FeatureConfig {
+    #[serde(default)]
+    pub(crate) opencode: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -222,6 +231,9 @@ impl MomConfig {
             "auth": {
                 "secret": self.auth.secret.as_ref().map(|_| "<redacted>"),
                 "secret_file": self.auth.secret_file.as_ref().map(|p| p.display().to_string()),
+            },
+            "features": {
+                "opencode": self.features.opencode,
             }
         })
     }
@@ -274,6 +286,7 @@ impl From<LegacyMomConfig> for MomConfig {
                 model: value.hermes_model,
             },
             auth: AuthConfig::default(),
+            features: FeatureConfig::default(),
         }
     }
 }
@@ -413,6 +426,9 @@ mod tests {
               },
               "auth": {
                 "secret": "dev-secret"
+              },
+              "features": {
+                "opencode": true
               }
             }"#,
         );
@@ -424,6 +440,7 @@ mod tests {
         );
         assert_eq!(config.model(), "openai/gpt-5.5");
         assert_eq!(config.auth_secret().unwrap(), "dev-secret");
+        assert!(config.features.opencode);
     }
 
     #[test]

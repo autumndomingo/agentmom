@@ -29,6 +29,9 @@ let
     auth = {
       secret_file = cfg.auth.secretFile;
     };
+    features = {
+      opencode = cfg.features.opencode;
+    };
   };
   effectiveConfigFile =
     if cfg.configFile != null then cfg.configFile else generatedConfigFile;
@@ -264,6 +267,14 @@ in
         type = lib.types.nullOr lib.types.str;
         default = null;
         description = "Runtime file containing the Agent Mom browser-session and invite HMAC secret.";
+      };
+    };
+
+    features = {
+      opencode = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = "Expose OpenCode service launch controls in the browser UI and API.";
       };
     };
 

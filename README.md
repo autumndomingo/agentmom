@@ -154,6 +154,9 @@ typed `services.agentmom.*` options.
   },
   "auth": {
     "secret_file": "/run/secrets/agentmom-auth-secret"
+  },
+  "features": {
+    "opencode": false
   }
 }
 ```
@@ -169,6 +172,7 @@ Required assumptions:
 - `runtime.snapshot_name` is the versioned prebuilt microsandbox snapshot to boot new VMs from. It is required for worker/node VM operations and has no Rust default.
 - `auth.secret_file` is required for `mom api`. It signs browser sessions.
 - On an empty DB, the first login creates the admin user and auto-generates that user's login code. After that, new users are created with admin-generated invite codes and log in with their own generated user code.
+- `features.opencode` defaults to `false`. Set it to `true` only when the OpenCode debug escape hatch should be visible in the UI and callable through the API.
 
 `mom config doctor` validates the configured file and prints a redacted
 effective config.
@@ -233,8 +237,8 @@ real microsandbox runtime. On a fresh checkout the first run installs the local
 microsandbox helper under `.state/msb` and builds the configured base snapshot.
 Hermes launch requests are routed from the API to the workspace's assigned
 worker over that worker's private `worker.url`.
-OpenCode is hidden by default; expose it only for debugging by building the UI
-with `VITE_ENABLE_OPENCODE=1` and running the API with `MOM_ENABLE_OPENCODE=1`.
+OpenCode is hidden by default; expose it only for debugging by setting
+`features.opencode` to `true` in the Agent Mom config.
 Foreground output is intentionally brief; detailed API, worker, build, and base
 image logs are written to `.state/logs/`.
 
@@ -263,6 +267,7 @@ its existing NixOS config:
     credentials.mode = "openrouter-proxy";
     guest.model = "openai/gpt-5.5";
     auth.secretFile = "/run/secrets/agentmom-auth-secret";
+    features.opencode = false;
   };
 }
 ```

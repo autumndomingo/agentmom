@@ -13,14 +13,18 @@ import {
 import './styles.css';
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? '/api';
-const ENABLE_OPENCODE =
-  import.meta.env.VITE_ENABLE_OPENCODE === '1' || import.meta.env.VITE_ENABLE_OPENCODE === 'true';
+const DEFAULT_UI_CONFIG = { features: { opencode: false } };
 
 function Root() {
   const [userSession, setUserSession] = useState(null);
   const [checkingSession, setCheckingSession] = useState(true);
+  const [uiConfig, setUiConfig] = useState(DEFAULT_UI_CONFIG);
 
   useEffect(() => {
+    fetchUiConfig()
+      .then(setUiConfig)
+      .catch(() => setUiConfig(DEFAULT_UI_CONFIG));
+
     validateSession()
       .then((session) => {
         setUserSession(session);
@@ -85,7 +89,7 @@ function Root() {
     return <SetupPage userSession={userSession} onSubmit={enterUserFlow} />;
   }
 
-  return <App userSession={userSession} />;
+  return <App userSession={userSession} uiConfig={uiConfig} />;
 }
 
 function LandingPage({ onSubmit }) {
@@ -176,6 +180,19 @@ async function validateSession() {
   return fetchMe();
 }
 
+async function fetchUiConfig() {
+  const response = await fetch(`${API_BASE}/ui/config`);
+  const data = await response.json();
+  if (!response.ok) {
+    throw data;
+  }
+  return {
+    features: {
+      opencode: Boolean(data.features?.opencode),
+    },
+  };
+}
+
 async function fetchMe() {
   const response = await fetch(`${API_BASE}/me`);
   const data = await response.json();
@@ -245,7 +262,7 @@ function SetupPage({ userSession, onSubmit }) {
   );
 }
 
-function App({ userSession }) {
+function App({ userSession, uiConfig }) {
   const [workspaces, setWorkspaces] = useState([]);
   const [selectedName, setSelectedName] = useState(userSession.workspaceName ?? '');
   const [busy, setBusy] = useState(false);
@@ -507,7 +524,7 @@ function App({ userSession }) {
               <RefreshCcw size={17} />
               Refresh
             </button>
-            {ENABLE_OPENCODE && (
+            {uiConfig.features?.opencode && (
               <button
                 className="refreshButton"
                 onClick={launchOpencode}

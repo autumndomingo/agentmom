@@ -15,7 +15,7 @@ use tower_http::services::{ServeDir, ServeFile};
 use crate::{
     ApiState, JobResponse, WorkspaceRecord, create_job, default_workspace_backup_interval,
     default_workspace_cpus, default_workspace_idle_timeout, default_workspace_memory,
-    default_workspace_volume_quota, job_get, node_worker_url, select_ready_node,
+    default_workspace_volume_quota, job_get, load_mom_config, node_worker_url, select_ready_node,
     service_tunnel_hostname_registered, service_tunnel_upsert, worker_token, workspace_get,
     workspace_upsert_pending,
 };
@@ -91,9 +91,20 @@ struct OpenWorkerServiceResponse {
     url: String,
 }
 
+#[derive(Debug, Serialize)]
+struct UiConfigResponse {
+    features: UiFeatureConfig,
+}
+
+#[derive(Debug, Serialize)]
+struct UiFeatureConfig {
+    opencode: bool,
+}
+
 pub(crate) fn api_routes() -> Router<Arc<ApiState>> {
     Router::new()
         .route("/api/ui/health", get(health))
+        .route("/api/ui/config", get(ui_config))
         .route("/api/tls-ask", get(tls_ask))
         .route(
             "/api/vms",
@@ -138,6 +149,15 @@ pub(crate) fn serve_assets(app: Router) -> Router {
 
 async fn health() -> Json<Value> {
     Json(json!({ "ok": true }))
+}
+
+async fn ui_config() -> Result<Json<UiConfigResponse>, UiError> {
+    let config = load_mom_config()?;
+    Ok(Json(UiConfigResponse {
+        features: UiFeatureConfig {
+            opencode: config.features.opencode,
+        },
+    }))
 }
 
 async fn tls_ask(Query(query): Query<HashMap<String, String>>) -> StatusCode {
@@ -324,9 +344,9 @@ async fn opencode_workspace(
     Path(name): Path<String>,
 ) -> Result<Json<CommandResult>, UiError> {
     crate::auth::authorize_workspace(&headers, &name)?;
-    if !opencode_enabled() {
+    if !opencode_enabled()? {
         return Err(UiError::Forbidden(
-            "OpenCode is disabled; set MOM_ENABLE_OPENCODE=1 to expose it".to_string(),
+            "OpenCode is disabled; set features.opencode=true to expose it".to_string(),
         ));
     }
     open_workspace_service(&name, "opencode").await
@@ -340,8 +360,8 @@ async fn hermes_ui_workspace(
     open_workspace_service(&name, "hermes").await
 }
 
-fn opencode_enabled() -> bool {
-    env::var("MOM_ENABLE_OPENCODE").is_ok_and(|value| value == "1" || value == "true")
+fn opencode_enabled() -> Result<bool> {
+    Ok(load_mom_config()?.features.opencode)
 }
 
 async fn open_workspace_service(name: &str, service: &str) -> Result<Json<CommandResult>, UiError> {

@@ -1,9 +1,5 @@
 use super::*;
 
-pub(crate) async fn create(args: CreateArgs) -> Result<()> {
-    create_sandbox(args, None).await
-}
-
 pub(crate) async fn create_sandbox(
     args: CreateArgs,
     workspace: Option<WorkspaceMount>,
@@ -395,118 +391,6 @@ EOF
         ),
     )
     .await
-}
-
-pub(crate) async fn list(all: bool) -> Result<()> {
-    let handles = Sandbox::list().await?;
-    println!("{:<24} {:<10} IMAGE", "NAME", "STATUS");
-    for handle in handles {
-        let config = handle.config()?;
-        let managed = config
-            .labels
-            .get(LABEL_MANAGED)
-            .is_some_and(|value| value == "true");
-        if !all && !managed {
-            continue;
-        }
-
-        println!(
-            "{:<24} {:<10} {}",
-            handle.name(),
-            format!("{:?}", handle.status()),
-            image_label(&config)
-        );
-    }
-    Ok(())
-}
-
-pub(crate) async fn start(name: &str) -> Result<()> {
-    let handle = Sandbox::get(name).await?;
-    if handle.status() == SandboxStatus::Running {
-        println!("{name} already running");
-        return Ok(());
-    }
-    let sandbox = handle.start_detached().await?;
-    println!("started {}", sandbox.name());
-    Ok(())
-}
-
-pub(crate) async fn stop(name: &str) -> Result<()> {
-    let handle = Sandbox::get(name).await?;
-    handle.stop_with_timeout(Duration::from_secs(10)).await?;
-    println!("stopped {name}");
-    Ok(())
-}
-
-pub(crate) async fn remove(name: Option<&str>, all: bool, force: bool) -> Result<()> {
-    if !force {
-        bail!("refusing to remove without --force");
-    }
-
-    if all {
-        if let Some(name) = name {
-            bail!("refusing ambiguous remove: pass either {name} or --all, not both");
-        }
-        return remove_all_managed().await;
-    }
-
-    let name = name.ok_or_else(|| anyhow!("missing VM name; pass a name or --all"))?;
-    remove_one(name).await
-}
-
-pub(crate) async fn remove_one(name: &str) -> Result<()> {
-    if let Ok(handle) = Sandbox::get(name).await {
-        if handle.status() == SandboxStatus::Running || handle.status() == SandboxStatus::Draining {
-            handle.stop_with_timeout(Duration::from_secs(10)).await?;
-        }
-    }
-
-    Sandbox::remove(name).await?;
-    println!("removed {name}");
-    Ok(())
-}
-
-pub(crate) async fn remove_all_managed() -> Result<()> {
-    let handles = Sandbox::list().await?;
-    let mut removed = 0usize;
-
-    for handle in handles {
-        let config = handle.config()?;
-        let managed = config
-            .labels
-            .get(LABEL_MANAGED)
-            .is_some_and(|value| value == "true");
-        if !managed {
-            continue;
-        }
-
-        let name = handle.name().to_string();
-        if handle.status() == SandboxStatus::Running || handle.status() == SandboxStatus::Draining {
-            handle.stop_with_timeout(Duration::from_secs(10)).await?;
-        }
-        Sandbox::remove(&name).await?;
-        println!("removed {name}");
-        removed += 1;
-    }
-
-    println!("removed {removed} Agent Mom-managed VM(s)");
-    Ok(())
-}
-
-pub(crate) async fn running_sandbox(name: &str) -> Result<Sandbox> {
-    let handle = Sandbox::get(name)
-        .await
-        .with_context(|| format!("find sandbox '{name}'"))?;
-    match handle.status() {
-        SandboxStatus::Running | SandboxStatus::Draining => handle
-            .connect_with_timeout(Duration::from_secs(30))
-            .await
-            .with_context(|| format!("connect to running sandbox '{name}'")),
-        SandboxStatus::Stopped | SandboxStatus::Crashed | SandboxStatus::Paused => handle
-            .start()
-            .await
-            .with_context(|| format!("start sandbox '{name}'")),
-    }
 }
 
 pub(crate) async fn run_codex(sandbox: &Sandbox, prompt: &str) -> Result<()> {

@@ -979,7 +979,7 @@ async fn opencode_service_requires_explicit_enable_flag() -> Result<()> {
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
 
     fleet.stop_api()?;
-    fleet.start_api(&[("MOM_ENABLE_OPENCODE", "1")]).await?;
+    fleet.start_api_with_options(&[], true).await?;
 
     let result = reqwest::Client::new()
         .post(format!(
@@ -1065,10 +1065,14 @@ impl TestFleet {
     }
 
     async fn start_with_api_env(envs: &[(&str, &str)]) -> Result<Self> {
+        Self::start_with_api_options(envs, false).await
+    }
+
+    async fn start_with_api_options(envs: &[(&str, &str)], opencode: bool) -> Result<Self> {
         let api_state = tempfile::tempdir()?;
         let api_addr = free_addr()?;
         let api_url = format!("http://{api_addr}");
-        let api = spawn_api(api_state.path(), &api_addr, envs)?;
+        let api = spawn_api(api_state.path(), &api_addr, envs, opencode)?;
         wait_ready(&api_url).await?;
         Ok(Self {
             api_state,
@@ -1083,12 +1087,25 @@ impl TestFleet {
     }
 
     async fn start_api(&mut self, envs: &[(&str, &str)]) -> Result<()> {
-        self.api = spawn_api(self.api_state.path(), &self.api_addr, envs)?;
+        self.start_api_with_options(envs, false).await
+    }
+
+    async fn start_api_with_options(
+        &mut self,
+        envs: &[(&str, &str)],
+        opencode: bool,
+    ) -> Result<()> {
+        self.api = spawn_api(self.api_state.path(), &self.api_addr, envs, opencode)?;
         wait_ready(&self.api_url).await
     }
 }
 
-fn spawn_api(state_dir: &Path, bind: &str, envs: &[(&str, &str)]) -> Result<ChildGuard> {
+fn spawn_api(
+    state_dir: &Path,
+    bind: &str,
+    envs: &[(&str, &str)],
+    opencode: bool,
+) -> Result<ChildGuard> {
     let config_path = state_dir.join("config.json");
     fs::write(
         &config_path,
@@ -1096,6 +1113,9 @@ fn spawn_api(state_dir: &Path, bind: &str, envs: &[(&str, &str)]) -> Result<Chil
             "schema_version": 1,
             "auth": {
                 "secret": "test-auth-secret"
+            },
+            "features": {
+                "opencode": opencode
             }
         }))?,
     )

@@ -70,60 +70,6 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Create and provision a new Alpine VM.
-    #[command(hide = true)]
-    Create(CreateArgs),
-    /// List Agent Mom-managed VMs.
-    #[command(hide = true)]
-    List {
-        /// Include sandboxes not created by Agent Mom.
-        #[arg(long)]
-        all: bool,
-    },
-    /// Start a stopped VM in the background.
-    #[command(hide = true)]
-    Start { name: String },
-    /// Stop a VM.
-    #[command(hide = true)]
-    Stop { name: String },
-    /// Remove a VM, stopping it first if needed.
-    #[command(hide = true)]
-    Rm {
-        name: Option<String>,
-        /// Remove all Agent Mom-managed VMs.
-        #[arg(long)]
-        all: bool,
-        /// Do not ask for confirmation.
-        #[arg(short, long)]
-        force: bool,
-    },
-    /// Run a command in a VM and print captured output.
-    #[command(hide = true)]
-    Exec {
-        name: String,
-        #[arg(last = true, required = true)]
-        command: Vec<String>,
-    },
-    /// Open an interactive shell in a VM.
-    #[command(hide = true)]
-    Enter { name: String },
-    /// Run Codex inside a VM.
-    #[command(hide = true)]
-    Codex {
-        name: String,
-        #[arg(required = true)]
-        prompt: Vec<String>,
-    },
-    /// Run Hermes inside a VM.
-    #[command(hide = true)]
-    Hermes {
-        name: String,
-        #[arg(last = true)]
-        args: Vec<String>,
-    },
-    /// Run basic tool checks inside a VM.
-    #[command(hide = true)]
-    Doctor { name: String },
     /// Manage durable user workspaces backed by named volumes.
     #[command(alias = "ws")]
     Workspace {
@@ -661,36 +607,6 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Create(args) => create(args).await,
-        Command::List { all } => list(all).await,
-        Command::Start { name } => start(&name).await,
-        Command::Stop { name } => stop(&name).await,
-        Command::Rm { name, all, force } => remove(name.as_deref(), all, force).await,
-        Command::Exec { name, command } => {
-            let sandbox = running_sandbox(&name).await?;
-            run_guest_command(&sandbox, command).await
-        }
-        Command::Enter { name } => {
-            let sandbox = running_sandbox(&name).await?;
-            let code = sandbox
-                .attach_with("/bin/sh", |a| a.args(["-l"]).env("TERM", "xterm-256color"))
-                .await?;
-            std::process::exit(code);
-        }
-        Command::Codex { name, prompt } => {
-            let sandbox = running_sandbox(&name).await?;
-            run_codex(&sandbox, &prompt.join(" ")).await
-        }
-        Command::Hermes { name, args } => {
-            let sandbox = running_sandbox(&name).await?;
-            let mut command = vec!["hermes".to_string()];
-            command.extend(args);
-            run_guest_command(&sandbox, command).await
-        }
-        Command::Doctor { name } => {
-            let sandbox = running_sandbox(&name).await?;
-            doctor(&sandbox).await
-        }
         Command::Workspace { command } => workspace_command(command).await,
         Command::Node { command } => node_command(command).await,
         Command::Fleet { command } => fleet_command(command).await,
@@ -1873,10 +1789,6 @@ fn hermes_soul_md() -> &'static str {
     "You are running inside an isolated Agent Mom microsandbox. Work in /workspace.\n"
 }
 
-fn image_label(config: &microsandbox::sandbox::SandboxConfig) -> String {
-    format!("{:?}", config.image)
-}
-
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
@@ -1906,6 +1818,7 @@ mod tests {
                 secret: Some("test-auth-secret".to_string()),
                 secret_file: None,
             },
+            features: FeatureConfig::default(),
         }
     }
 
