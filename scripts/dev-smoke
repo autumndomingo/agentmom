@@ -20,7 +20,7 @@ curl -fsS "${MOM_API_URL}/health/ready" >/dev/null
 curl -fsS \
   -c "${tmpdir}/cookie" \
   -H 'Content-Type: application/json' \
-  -d "{\"email\":\"admin@example.com\",\"access_code\":\"$(cat dev/secrets/admin-access-code)\"}" \
+  -d '{"email":"admin@example.com"}' \
   "${MOM_API_URL}/api/auth/login" >/dev/null
 curl -fsS -b "${tmpdir}/cookie" "${MOM_API_URL}/api/me" >/dev/null
 curl -fsS -b "${tmpdir}/cookie" "${MOM_API_URL}/api/admin/invites" >/dev/null

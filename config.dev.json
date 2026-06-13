@@ -9,8 +9,6 @@
     "opencode_auth_path": "~/.local/share/opencode/auth.json"
   },
   "auth": {
-    "secret_file": "dev/secrets/auth-secret",
-    "admin_email": "admin@example.com",
-    "admin_access_code_file": "dev/secrets/admin-access-code"
+    "secret_file": "dev/secrets/auth-secret"
   }
 }

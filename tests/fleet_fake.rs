@@ -49,6 +49,92 @@ struct TestFleet {
 }
 
 #[tokio::test]
+async fn first_user_claims_admin_and_existing_users_need_their_own_code() -> Result<()> {
+    let fleet = TestFleet::start().await?;
+    let client = reqwest::Client::new();
+
+    let first_response = client
+        .post(format!("{}/api/auth/login", fleet.api_url))
+        .json(&json!({ "email": "admin@example.com" }))
+        .send()
+        .await?
+        .error_for_status()?;
+    let admin_cookie = session_cookie_from_response(&first_response)?;
+    let first = first_response.json::<Value>().await?;
+    let admin_code = first["user"]["code"]
+        .as_str()
+        .ok_or_else(|| anyhow!("first login did not return user code"))?
+        .to_string();
+    assert_eq!(first["user"]["role"], "admin");
+    assert!(admin_code.starts_with("AM-"));
+
+    let missing_code = client
+        .post(format!("{}/api/auth/login", fleet.api_url))
+        .json(&json!({ "email": "admin@example.com" }))
+        .send()
+        .await?;
+    assert_eq!(missing_code.status(), StatusCode::UNAUTHORIZED);
+
+    client
+        .post(format!("{}/api/auth/login", fleet.api_url))
+        .json(&json!({ "email": "admin@example.com", "access_code": admin_code }))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let invite = client
+        .post(format!("{}/api/admin/invites", fleet.api_url))
+        .header(reqwest::header::COOKIE, admin_cookie)
+        .json(&json!({ "label": "Test invite" }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Value>()
+        .await?;
+    let invite_code = invite["code"]
+        .as_str()
+        .ok_or_else(|| anyhow!("invite response did not return code"))?;
+
+    let participant = client
+        .post(format!("{}/api/auth/login", fleet.api_url))
+        .json(&json!({
+            "email": "participant@example.com",
+            "access_code": invite_code
+        }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Value>()
+        .await?;
+    let participant_code = participant["user"]["code"]
+        .as_str()
+        .ok_or_else(|| anyhow!("participant login did not return user code"))?;
+    assert_ne!(participant_code, invite_code);
+
+    let invite_reuse_as_login = client
+        .post(format!("{}/api/auth/login", fleet.api_url))
+        .json(&json!({
+            "email": "participant@example.com",
+            "access_code": invite_code
+        }))
+        .send()
+        .await?;
+    assert_eq!(invite_reuse_as_login.status(), StatusCode::UNAUTHORIZED);
+
+    client
+        .post(format!("{}/api/auth/login", fleet.api_url))
+        .json(&json!({
+            "email": "participant@example.com",
+            "access_code": participant_code
+        }))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn fake_worker_start_stop_backup_jobs_update_central_state() -> Result<()> {
     let fleet = TestFleet::start().await?;
     let node = spawn_worker("node-a", &fleet.api_url)?;
@@ -918,9 +1004,7 @@ fn spawn_api(state_dir: &Path, bind: &str, envs: &[(&str, &str)]) -> Result<Chil
         serde_json::to_string_pretty(&json!({
             "schema_version": 1,
             "auth": {
-                "secret": "test-auth-secret",
-                "admin_email": "admin@example.com",
-                "admin_access_code": "AM-ADMIN-1234"
+                "secret": "test-auth-secret"
             }
         }))?,
     )
@@ -1341,8 +1425,7 @@ async fn admin_cookie(api_url: &str) -> Result<String> {
     let response = reqwest::Client::new()
         .post(format!("{api_url}/api/auth/login"))
         .json(&json!({
-            "email": "admin@example.com",
-            "access_code": "AM-ADMIN-1234"
+            "email": "admin@example.com"
         }))
         .send()
         .await?;
@@ -1351,12 +1434,16 @@ async fn admin_cookie(api_url: &str) -> Result<String> {
         let body = response.text().await.unwrap_or_default();
         bail!("admin login failed with {status}: {body}");
     }
+    session_cookie_from_response(&response)
+}
+
+fn session_cookie_from_response(response: &reqwest::Response) -> Result<String> {
     let cookie = response
         .headers()
         .get(reqwest::header::SET_COOKIE)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.split(';').next())
-        .ok_or_else(|| anyhow!("admin login response did not set a session cookie"))?;
+        .ok_or_else(|| anyhow!("login response did not set a session cookie"))?;
     Ok(cookie.to_string())
 }
 

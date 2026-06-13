@@ -28,8 +28,6 @@ let
     };
     auth = {
       secret_file = cfg.auth.secretFile;
-      admin_email = cfg.auth.adminEmail;
-      admin_access_code_file = cfg.auth.adminAccessCodeFile;
     };
   };
   effectiveConfigFile =
@@ -266,18 +264,6 @@ in
         type = lib.types.nullOr lib.types.str;
         default = null;
         description = "Runtime file containing the Agent Mom browser-session and invite HMAC secret.";
-      };
-
-      adminEmail = lib.mkOption {
-        type = lib.types.nullOr lib.types.str;
-        default = null;
-        description = "Optional bootstrap admin email. When set, the API seeds this user as admin at startup.";
-      };
-
-      adminAccessCodeFile = lib.mkOption {
-        type = lib.types.nullOr lib.types.str;
-        default = null;
-        description = "Runtime file containing the optional bootstrap admin access code.";
       };
     };
 
@@ -656,10 +642,6 @@ in
       {
         assertion = !cfg.api.enable || cfg.configFile != null || cfg.auth.secretFile != null;
         message = "services.agentmom.auth.secretFile is required when the generated config is used by services.agentmom.api.";
-      }
-      {
-        assertion = cfg.auth.adminEmail == null || cfg.configFile != null || cfg.auth.adminAccessCodeFile != null;
-        message = "services.agentmom.auth.adminAccessCodeFile is required when auth.adminEmail is set in the generated config.";
       }
       {
         assertion = !cfg.credentialProxy.enable || cfg.credentialProxy.package != null;

@@ -153,9 +153,7 @@ typed `services.agentmom.*` options.
     "model": "openai/gpt-5.5"
   },
   "auth": {
-    "secret_file": "/run/secrets/agentmom-auth-secret",
-    "admin_email": "you@example.com",
-    "admin_access_code_file": "/run/secrets/agentmom-admin-access-code"
+    "secret_file": "/run/secrets/agentmom-auth-secret"
   }
 }
 ```
@@ -168,8 +166,8 @@ Required assumptions:
 - `guest.hermes_profile` is the guest profile name to create.
 - `guest.model` is the default model for the selected mode. Use an `openai-codex` model in `vm-auth-json` mode and an OpenRouter model ID in `openrouter-proxy` mode.
 - `runtime.snapshot_name` is the versioned prebuilt microsandbox snapshot to boot new VMs from. It is required for worker/node VM operations and has no Rust default.
-- `auth.secret_file` is required for `mom api`. It signs browser sessions and invite/access-code hashes.
-- `auth.admin_email` and `auth.admin_access_code_file` optionally seed a bootstrap admin at API startup. Remove or rotate the bootstrap code after creating durable admin access.
+- `auth.secret_file` is required for `mom api`. It signs browser sessions.
+- On an empty DB, the first login creates the admin user and auto-generates that user's login code. After that, new users are created with admin-generated invite codes and log in with their own generated user code.
 
 `mom config doctor` validates the configured file and prints a redacted
 effective config.
@@ -261,11 +259,7 @@ its existing NixOS config:
     runtime.snapshotName = "mom-base-${builtins.substring 0 12 inputs.agentmom.rev}";
     credentials.mode = "openrouter-proxy";
     guest.model = "openai/gpt-5.5";
-    auth = {
-      secretFile = "/run/secrets/agentmom-auth-secret";
-      adminEmail = "you@example.com";
-      adminAccessCodeFile = "/run/secrets/agentmom-admin-access-code";
-    };
+    auth.secretFile = "/run/secrets/agentmom-auth-secret";
   };
 }
 ```
@@ -297,11 +291,7 @@ services.agentmom = {
   ui.enable = true;
 
   workerTokenFile = "/run/secrets/agentmom-worker-token";
-  auth = {
-    secretFile = "/run/secrets/agentmom-auth-secret";
-    adminEmail = "you@example.com";
-    adminAccessCodeFile = "/run/secrets/agentmom-admin-access-code";
-  };
+  auth.secretFile = "/run/secrets/agentmom-auth-secret";
 
   capacity = {
     cpus = 32;

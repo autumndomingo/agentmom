@@ -81,12 +81,6 @@ pub(crate) struct AuthConfig {
     pub(crate) secret: Option<String>,
     #[serde(default)]
     pub(crate) secret_file: Option<PathBuf>,
-    #[serde(default)]
-    pub(crate) admin_email: Option<String>,
-    #[serde(default)]
-    pub(crate) admin_access_code: Option<String>,
-    #[serde(default)]
-    pub(crate) admin_access_code_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,14 +190,6 @@ impl MomConfig {
 
     pub(crate) fn validate_for_api(&self) -> Result<()> {
         self.auth_secret()?;
-        if self
-            .auth
-            .admin_email
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-        {
-            self.admin_access_code()?;
-        }
         Ok(())
     }
 
@@ -213,28 +199,6 @@ impl MomConfig {
             self.auth.secret_file.as_ref(),
             "auth.secret",
             "auth.secret_file",
-        )
-    }
-
-    pub(crate) fn admin_bootstrap(&self) -> Result<Option<(String, String)>> {
-        let Some(email) = self
-            .auth
-            .admin_email
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        else {
-            return Ok(None);
-        };
-        Ok(Some((email.to_string(), self.admin_access_code()?)))
-    }
-
-    pub(crate) fn admin_access_code(&self) -> Result<String> {
-        required_config_secret(
-            self.auth.admin_access_code.as_deref(),
-            self.auth.admin_access_code_file.as_ref(),
-            "auth.admin_access_code",
-            "auth.admin_access_code_file",
         )
     }
 
@@ -258,9 +222,6 @@ impl MomConfig {
             "auth": {
                 "secret": self.auth.secret.as_ref().map(|_| "<redacted>"),
                 "secret_file": self.auth.secret_file.as_ref().map(|p| p.display().to_string()),
-                "admin_email": self.auth.admin_email,
-                "admin_access_code": self.auth.admin_access_code.as_ref().map(|_| "<redacted>"),
-                "admin_access_code_file": self.auth.admin_access_code_file.as_ref().map(|p| p.display().to_string()),
             }
         })
     }
@@ -447,9 +408,7 @@ mod tests {
                 "model": "openai/gpt-5.5"
               },
               "auth": {
-                "secret": "dev-secret",
-                "admin_email": "admin@example.com",
-                "admin_access_code": "AM-ADMIN-1234"
+                "secret": "dev-secret"
               }
             }"#,
         );
@@ -461,10 +420,6 @@ mod tests {
         );
         assert_eq!(config.model(), "openai/gpt-5.5");
         assert_eq!(config.auth_secret().unwrap(), "dev-secret");
-        assert_eq!(
-            config.admin_bootstrap().unwrap(),
-            Some(("admin@example.com".to_string(), "AM-ADMIN-1234".to_string()))
-        );
     }
 
     #[test]
@@ -489,6 +444,5 @@ mod tests {
             config.credentials.codex_auth_path,
             PathBuf::from("/tmp/codex-auth.json")
         );
-        assert!(config.admin_bootstrap().unwrap().is_none());
     }
 }

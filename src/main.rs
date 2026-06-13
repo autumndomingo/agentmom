@@ -1895,9 +1895,6 @@ mod tests {
             auth: AuthConfig {
                 secret: Some("test-auth-secret".to_string()),
                 secret_file: None,
-                admin_email: Some("admin@example.com".to_string()),
-                admin_access_code: Some("AM-ADMIN-1234".to_string()),
-                admin_access_code_file: None,
             },
         }
     }

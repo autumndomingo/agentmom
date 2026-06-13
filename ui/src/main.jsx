@@ -94,7 +94,7 @@ function LandingPage({ onSubmit }) {
     event.preventDefault();
     const email = form.email.trim();
     const accessCode = form.accessCode.trim();
-    if (!email || !accessCode) return;
+    if (!email) return;
 
     setBusy(true);
     setError('');
@@ -102,7 +102,10 @@ function LandingPage({ onSubmit }) {
       const response = await fetch(`${API_BASE}/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, access_code: accessCode }),
+        body: JSON.stringify({
+          email,
+          ...(accessCode ? { access_code: accessCode } : {}),
+        }),
       });
       const data = await response.json();
       if (!response.ok) {
@@ -140,10 +143,9 @@ function LandingPage({ onSubmit }) {
             }
             placeholder="Access Code"
             autoComplete="one-time-code"
-            required
           />
           {error && <p className="accessError">{error}</p>}
-          <button disabled={busy || !form.email.trim() || !form.accessCode.trim()}>
+          <button disabled={busy || !form.email.trim()}>
             {busy ? 'Checking...' : 'Continue'}
           </button>
         </form>
@@ -478,6 +480,7 @@ function App({ userSession }) {
           <h2>Session</h2>
           <strong>Local workspace</strong>
           <span>{userSession.email}</span>
+          <code>{userSession.code}</code>
         </div>
       </aside>
 
@@ -700,6 +703,7 @@ function AdminPage({ userSession }) {
           <div className="adminTableHeader">
             <span>Name</span>
             <span>Email</span>
+            <span>Code</span>
             <span>Role</span>
             <span>Status</span>
             <span></span>
@@ -710,6 +714,7 @@ function AdminPage({ userSession }) {
               <article className="adminUserRow" key={user.id}>
                 <strong>{user.full_name || user.email}</strong>
                 <span>{user.email}</span>
+                <span>{user.code}</span>
                 <span>{user.role}</span>
                 <span
                   className={`adminStatusDot ${user.status}`}
@@ -776,6 +781,7 @@ function sessionFromMe(data) {
   return {
     id: user.id,
     email: user.email,
+    code: user.code,
     role: user.role,
     userName: user.full_name ?? '',
     agentName: workspace?.agent_name ?? workspace?.agentName ?? '',

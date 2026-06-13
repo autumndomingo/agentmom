@@ -14,6 +14,7 @@ const SESSION_COOKIE: &str = "agentmom_session";
 pub(crate) struct AuthUser {
     pub(crate) id: i64,
     pub(crate) email: String,
+    pub(crate) code: String,
     pub(crate) full_name: String,
     pub(crate) role: String,
     pub(crate) invite_id: Option<i64>,
@@ -37,7 +38,8 @@ struct InviteRecord {
 #[derive(Debug, Deserialize)]
 struct LoginRequest {
     email: String,
-    access_code: String,
+    #[serde(default)]
+    access_code: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -124,38 +126,6 @@ pub(crate) fn seed_admin_from_config() -> Result<()> {
     ensure_fleet_schema()?;
     let config = load_mom_config()?;
     config.validate_for_api()?;
-    let Some((email, code)) = config.admin_bootstrap()? else {
-        return Ok(());
-    };
-    let email = normalize_email(&email).map_err(|error| anyhow!("{error:?}"))?;
-    let now = now_epoch()?;
-    let db = fleet_db()?;
-    db.execute(
-        r#"
-INSERT INTO users (email, full_name, role, invite_id, created_at, updated_at, last_seen_at)
-VALUES (?1, ?2, 'admin', NULL, ?3, ?3, NULL)
-ON CONFLICT(email) DO UPDATE SET
-    role = 'admin',
-    updated_at = excluded.updated_at
-"#,
-        params![email, "Admin", now],
-    )?;
-    let admin_id: i64 = db.query_row(
-        "SELECT id FROM users WHERE email = ?1",
-        params![email],
-        |row| row.get(0),
-    )?;
-    let code = normalize_access_code(&code);
-    db.execute(
-        r#"
-INSERT INTO invites (
-    label, description, code, role, max_uses, used_count,
-    active, created_by_user_id, created_at
-) VALUES ('Admin bootstrap', 'Configured admin access', ?1, 'admin', NULL, 0, 1, ?2, ?3)
-ON CONFLICT(code) DO NOTHING
-"#,
-        params![code, admin_id, now],
-    )?;
     Ok(())
 }
 
@@ -167,7 +137,7 @@ pub(crate) fn current_user(headers: &HeaderMap) -> Result<AuthUser, AuthError> {
     let user = db
         .query_row(
             r#"
-SELECT users.id, users.email, users.full_name, users.role, users.invite_id, users.last_seen_at
+SELECT users.id, users.email, users.code, users.full_name, users.role, users.invite_id, users.last_seen_at
 FROM sessions
 JOIN users ON users.id = sessions.user_id
 WHERE sessions.token_hash = ?1
@@ -228,8 +198,8 @@ pub(crate) fn visible_workspaces(headers: &HeaderMap) -> Result<Vec<WorkspaceRec
 }
 
 async fn login(Json(request): Json<LoginRequest>) -> Result<Response, AuthError> {
-    let user = redeem_invite(&request.email, &request.access_code)?;
-    let token = create_session(user.id)?;
+    let (user, token) =
+        authenticate_or_create_session(&request.email, request.access_code.as_deref())?;
     let workspace = workspace_for_user(user.id)?;
     let cookie = session_cookie(&token);
     Ok((
@@ -394,49 +364,48 @@ async fn admin_delete_user(
     Ok(Json(OkResponse { ok: true }))
 }
 
-fn redeem_invite(email: &str, access_code: &str) -> Result<AuthUser, AuthError> {
+fn authenticate_or_create_session(
+    email: &str,
+    access_code: Option<&str>,
+) -> Result<(AuthUser, String), AuthError> {
     let email = normalize_email(email)?;
-    let code = normalize_access_code(access_code);
+    let code = access_code
+        .map(normalize_access_code)
+        .filter(|value| !value.is_empty());
     let now = now_epoch()?;
     let mut db = fleet_db()?;
     let tx = db.transaction()?;
-    let invite = tx
-        .query_row(
-            r#"
-SELECT id, label, description, code, role, max_uses, used_count, active, created_by_user_id, created_at
-FROM invites
-WHERE code = ?1 AND active = 1
-"#,
-            params![code],
-            invite_from_row,
-        )
-        .optional()?
-        .ok_or(AuthError::Unauthorized)?;
-    if invite.role == "admin" {
-        let config = load_mom_config().map_err(AuthError::from)?;
-        let admin_email = config
-            .admin_bootstrap()
-            .map_err(AuthError::from)?
-            .map(|(email, _)| email)
-            .and_then(|raw| normalize_email(&raw).ok())
-            .ok_or(AuthError::Unauthorized)?;
-        if email != admin_email {
-            return Err(AuthError::Unauthorized);
-        }
-    }
     let existing_user = tx
         .query_row(
-            "SELECT id, email, full_name, role, invite_id, last_seen_at FROM users WHERE email = ?1",
+            "SELECT id, email, code, full_name, role, invite_id, last_seen_at FROM users WHERE email = ?1",
             params![email],
             user_from_row,
         )
         .optional()?;
     if let Some(user) = existing_user {
+        if code.as_deref() != Some(user.code.as_str()) {
+            return Err(AuthError::Unauthorized);
+        }
         tx.execute(
             "UPDATE users SET last_seen_at = ?2, updated_at = ?2 WHERE id = ?1",
             params![user.id, now],
         )?;
+    } else if user_count(&tx)? == 0 {
+        insert_user_with_generated_code(&tx, &email, "", "admin", None, now)?;
     } else {
+        let code = code.ok_or(AuthError::Unauthorized)?;
+        let invite = tx
+            .query_row(
+                r#"
+SELECT id, label, description, code, role, max_uses, used_count, active, created_by_user_id, created_at
+FROM invites
+WHERE code = ?1 AND active = 1
+"#,
+                params![code],
+                invite_from_row,
+            )
+            .optional()?
+            .ok_or(AuthError::Unauthorized)?;
         if invite.max_uses.is_some_and(|max| invite.used_count >= max) {
             return Err(AuthError::Unauthorized);
         }
@@ -444,33 +413,63 @@ WHERE code = ?1 AND active = 1
             "UPDATE invites SET used_count = used_count + 1 WHERE id = ?1",
             params![invite.id],
         )?;
-        tx.execute(
-            r#"
-INSERT INTO users (email, full_name, role, invite_id, created_at, updated_at, last_seen_at)
-VALUES (?1, '', ?2, ?3, ?4, ?4, ?4)
-"#,
-            params![email, invite.role, invite.id, now],
-        )?;
-        let user_id = tx.last_insert_rowid();
+        let user_id =
+            insert_user_with_generated_code(&tx, &email, "", &invite.role, Some(invite.id), now)?;
         tx.execute(
             "INSERT INTO invite_redemptions (invite_id, user_id, redeemed_at) VALUES (?1, ?2, ?3)",
             params![invite.id, user_id, now],
         )?;
     }
     let user = tx.query_row(
-        "SELECT id, email, full_name, role, invite_id, last_seen_at FROM users WHERE email = ?1",
+        "SELECT id, email, code, full_name, role, invite_id, last_seen_at FROM users WHERE email = ?1",
         params![email],
         user_from_row,
     )?;
+    let token = create_session_in_tx(&tx, user.id)?;
     tx.commit()?;
-    Ok(user)
+    Ok((user, token))
 }
 
-fn create_session(user_id: i64) -> Result<String, AuthError> {
+fn user_count(tx: &rusqlite::Transaction<'_>) -> Result<i64, AuthError> {
+    Ok(tx.query_row("SELECT COUNT(*) FROM users", [], |row| row.get(0))?)
+}
+
+fn insert_user_with_generated_code(
+    tx: &rusqlite::Transaction<'_>,
+    email: &str,
+    full_name: &str,
+    role: &str,
+    invite_id: Option<i64>,
+    now: i64,
+) -> Result<i64, AuthError> {
+    for _ in 0..10 {
+        let code = generate_access_code();
+        let code_exists: bool = tx.query_row(
+            "SELECT COUNT(*) > 0 FROM users WHERE code = ?1",
+            params![code],
+            |row| row.get(0),
+        )?;
+        if code_exists {
+            continue;
+        }
+        tx.execute(
+            r#"
+INSERT INTO users (email, code, full_name, role, invite_id, created_at, updated_at, last_seen_at)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?6)
+"#,
+            params![email, code, full_name, role, invite_id, now],
+        )?;
+        return Ok(tx.last_insert_rowid());
+    }
+    Err(AuthError::Anyhow(anyhow!(
+        "failed to generate unique user code"
+    )))
+}
+
+fn create_session_in_tx(tx: &rusqlite::Transaction<'_>, user_id: i64) -> Result<String, AuthError> {
     let token = generate_session_token();
     let now = now_epoch()?;
-    let db = fleet_db()?;
-    db.execute(
+    tx.execute(
         "INSERT INTO sessions (user_id, token_hash, created_at, last_seen_at) VALUES (?1, ?2, ?3, ?3)",
         params![user_id, session_token_hash(&token)?, now],
     )?;
@@ -589,7 +588,7 @@ WHERE owner_user_id = ?1
 fn user_get(id: i64) -> Result<AuthUser, AuthError> {
     let db = fleet_db()?;
     db.query_row(
-        "SELECT id, email, full_name, role, invite_id, last_seen_at FROM users WHERE id = ?1",
+        "SELECT id, email, code, full_name, role, invite_id, last_seen_at FROM users WHERE id = ?1",
         params![id],
         user_from_row,
     )
@@ -600,7 +599,7 @@ fn user_get(id: i64) -> Result<AuthUser, AuthError> {
 fn user_all() -> Result<Vec<AuthUser>, AuthError> {
     let db = fleet_db()?;
     let mut stmt = db.prepare(
-        "SELECT id, email, full_name, role, invite_id, last_seen_at FROM users ORDER BY role, email",
+        "SELECT id, email, code, full_name, role, invite_id, last_seen_at FROM users ORDER BY role, email",
     )?;
     Ok(stmt
         .query_map([], user_from_row)?
@@ -610,7 +609,7 @@ fn user_all() -> Result<Vec<AuthUser>, AuthError> {
 fn users_for_invite(invite_id: i64) -> Result<Vec<AuthUser>, AuthError> {
     let db = fleet_db()?;
     let mut stmt = db.prepare(
-        "SELECT id, email, full_name, role, invite_id, last_seen_at FROM users WHERE invite_id = ?1 ORDER BY email",
+        "SELECT id, email, code, full_name, role, invite_id, last_seen_at FROM users WHERE invite_id = ?1 ORDER BY email",
     )?;
     Ok(stmt
         .query_map(params![invite_id], user_from_row)?
@@ -668,10 +667,11 @@ fn user_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AuthUser> {
     Ok(AuthUser {
         id: row.get(0)?,
         email: row.get(1)?,
-        full_name: row.get(2)?,
-        role: row.get(3)?,
-        invite_id: row.get(4)?,
-        last_seen_at: row.get(5)?,
+        code: row.get(2)?,
+        full_name: row.get(3)?,
+        role: row.get(4)?,
+        invite_id: row.get(5)?,
+        last_seen_at: row.get(6)?,
     })
 }
 

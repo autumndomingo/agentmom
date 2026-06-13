@@ -149,6 +149,7 @@ fn ensure_auth_schema(db: &Connection) -> Result<()> {
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     email TEXT NOT NULL UNIQUE,
+    code TEXT NOT NULL UNIQUE,
     full_name TEXT NOT NULL DEFAULT '',
     role TEXT NOT NULL CHECK(role IN ('admin', 'user')),
     invite_id INTEGER,

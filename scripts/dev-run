@@ -110,7 +110,7 @@ cat <<EOF
 
 Agent Mom dev is running
   UI:    ${MOM_API_URL}
-  Admin: admin@example.com / $(cat dev/secrets/admin-access-code)
+  Login: first email creates the admin user; use the returned user code after that
   Logs:  ${log_dir}
 
 Press Ctrl-C to stop.
