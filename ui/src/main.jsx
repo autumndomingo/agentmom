@@ -265,13 +265,11 @@ function App({ userSession }) {
       email: userSession.email,
       name: userSession.agentName,
       userName: userSession.userName,
-      status: 'paused',
+      status: 'running',
     },
   ]);
   const [selectedUserId, setSelectedUserId] = useState(currentUserId);
   const [busy, setBusy] = useState(false);
-  const [showCreate, setShowCreate] = useState(false);
-  const [createForm, setCreateForm] = useState({ userName: userSession.userName, botName: '' });
   const [chatInput, setChatInput] = useState('');
   const [chatsByUser, setChatsByUser] = useState(() => loadStoredChats());
   const [activeChatByUser, setActiveChatByUser] = useState({});
@@ -301,35 +299,12 @@ function App({ userSession }) {
 
   async function refresh() {
     setVms((current) =>
-      current.map((vm) => (vm.id === selectedUserId ? { ...vm, status: 'paused' } : vm)),
+      current.map((vm) => (vm.id === selectedUserId ? { ...vm, status: 'running' } : vm)),
     );
   }
 
   function openAdminPage() {
     window.location.href = '/admin';
-  }
-
-  async function createWorkspace(event) {
-    event.preventDefault();
-    const name = createForm.botName.trim();
-    if (!name) return;
-
-    setVms((current) => {
-      const existing = current.find((vm) => vm.id === currentUserId);
-      const updated = {
-        ...(existing ?? {}),
-        id: currentUserId,
-        email: userSession.email,
-        name,
-        userName: createForm.userName.trim() || userSession.userName,
-        status: existing?.status ?? 'paused',
-      };
-      return [updated, ...current.filter((vm) => vm.id !== currentUserId)];
-    });
-    setCreateForm({ userName: userSession.userName, botName: '' });
-    setShowCreate(false);
-    setSelectedUserId(currentUserId);
-    startNewChat(currentUserId);
   }
 
   async function sendMessage(event) {
@@ -419,11 +394,6 @@ function App({ userSession }) {
         </div>
 
         <div className="sidebarQuickActions">
-          <button className="newChatButton" onClick={() => setShowCreate(true)}>
-            <Plus size={24} strokeWidth={2.25} />
-            Create
-          </button>
-
           <button className="launchButton" onClick={() => startNewChat()} disabled={!selectedVm}>
             <Edit3 size={24} strokeWidth={2.25} />
             New chat
@@ -447,7 +417,6 @@ function App({ userSession }) {
               </div>
             </section>
           ))}
-          {!selectedVm && <p className="emptyList">Create a user to start chatting.</p>}
           {selectedVm && !selectedChats.length && <p className="emptyList">New chats will appear here.</p>}
         </div>
 
@@ -517,50 +486,6 @@ function App({ userSession }) {
         </form>
       </section>
 
-      {showCreate && (
-        <div className="modalBackdrop" role="presentation" onMouseDown={() => setShowCreate(false)}>
-          <form
-            className="createModal"
-            onSubmit={createWorkspace}
-            onMouseDown={(event) => event.stopPropagation()}
-          >
-            <div>
-              <h2>Create new user</h2>
-              <p>Name yourself and the agent you want to chat with.</p>
-            </div>
-            <label>
-              <span>Name</span>
-              <input
-                value={createForm.userName}
-                onChange={(event) =>
-                  setCreateForm((current) => ({ ...current, userName: event.target.value }))
-                }
-                placeholder="Name"
-                autoFocus
-              />
-            </label>
-            <label>
-              <span>Agent name</span>
-              <input
-                value={createForm.botName}
-                onChange={(event) =>
-                  setCreateForm((current) => ({ ...current, botName: event.target.value }))
-                }
-                placeholder="Agent name"
-                required
-              />
-            </label>
-            <div className="modalActions">
-              <button type="button" onClick={() => setShowCreate(false)}>
-                Cancel
-              </button>
-              <button className="confirmButton" disabled={busy || !createForm.botName.trim()}>
-                Confirm
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
     </main>
   );
 }
