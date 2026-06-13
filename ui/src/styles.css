@@ -1173,12 +1173,12 @@ body {
 }
 
 .landingPanel {
-  width: min(1080px, 100%);
+  width: min(960px, 100%);
   min-height: min(620px, calc(100vh - 80px));
-  grid-template-columns: minmax(0, 1fr) minmax(340px, 440px);
+  grid-template-columns: minmax(280px, 1fr) minmax(320px, 420px);
   grid-template-rows: 1fr;
   align-items: center;
-  gap: clamp(28px, 5vw, 72px);
+  gap: clamp(24px, 3vw, 44px);
 }
 
 .landingPanel::before,
