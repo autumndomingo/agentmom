@@ -1008,6 +1008,49 @@ async fn service_open_routes_to_assigned_worker_url() -> Result<()> {
 }
 
 #[tokio::test]
+async fn hermes_chat_routes_to_assigned_worker_and_returns_ready_status() -> Result<()> {
+    let _guard = fleet_test_guard().await;
+    let fleet = TestFleet::start().await?;
+    let _node = spawn_worker("node-a", &fleet.api_url)?;
+    wait_for_node(fleet.api_state.path(), "node-a").await?;
+
+    let job_id = create_workspace(&fleet.api_url, "chat", "node-a", 0).await?;
+    wait_for_job_status(&fleet.api_url, &job_id, "succeeded").await?;
+    wait_for_workspace_status(&fleet.api_url, "chat", "running").await?;
+    let cookie = admin_cookie(&fleet.api_url).await?;
+
+    let client = reqwest::Client::new();
+    let start = client
+        .post(format!("{}/api/workspaces/chat/chat/start", fleet.api_url))
+        .header(reqwest::header::COOKIE, &cookie)
+        .json(&json!({ "restart": false }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Value>()
+        .await?;
+    assert_eq!(start["workspace"], "chat");
+    assert_eq!(start["state"], "ready");
+    assert!(start["session_id"].as_str().is_some());
+
+    let events = client
+        .get(format!(
+            "{}/api/workspaces/chat/chat/events?after=0",
+            fleet.api_url
+        ))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Value>()
+        .await?;
+    assert_eq!(events["workspace"], "chat");
+    assert_eq!(events["state"], "ready");
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn tls_ask_allows_only_registered_service_tunnel_hostnames() -> Result<()> {
     let _guard = fleet_test_guard().await;
     let fleet = TestFleet::start().await?;

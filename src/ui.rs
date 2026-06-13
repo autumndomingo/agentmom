@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::{
-    ApiState, JobResponse, WorkspaceRecord, create_job, job_get, node_worker_url,
+    ApiState, JobResponse, WorkspaceRecord, acp, create_job, job_get, node_worker_url,
     service_tunnel_hostname_registered, service_tunnel_upsert, worker_token, workspace_get,
 };
 
@@ -60,6 +60,14 @@ pub(crate) fn api_routes() -> Router<Arc<ApiState>> {
             "/api/workspaces/{name}/hermes-ui",
             post(hermes_ui_workspace),
         )
+        .route("/api/workspaces/{name}/chat/start", post(chat_start))
+        .route("/api/workspaces/{name}/chat/send", post(chat_send))
+        .route("/api/workspaces/{name}/chat/cancel", post(chat_cancel))
+        .route(
+            "/api/workspaces/{name}/chat/permission",
+            post(chat_permission),
+        )
+        .route("/api/workspaces/{name}/chat/events", get(chat_events))
 }
 
 pub(crate) fn serve_assets(app: Router) -> Router {
@@ -183,6 +191,111 @@ async fn hermes_ui_workspace(
 ) -> Result<Json<CommandResult>, UiError> {
     crate::auth::authorize_workspace(&headers, &name)?;
     open_hermes_dashboard(&name).await
+}
+
+async fn chat_start(
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Json(request): Json<acp::AcpStartRequest>,
+) -> Result<Json<Value>, UiError> {
+    crate::auth::authorize_workspace(&headers, &name)?;
+    proxy_worker_acp(
+        &name,
+        "start",
+        serde_json::to_value(request).map_err(anyhow::Error::from)?,
+    )
+    .await
+}
+
+async fn chat_send(
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Json(request): Json<acp::AcpSendRequest>,
+) -> Result<Json<Value>, UiError> {
+    crate::auth::authorize_workspace(&headers, &name)?;
+    proxy_worker_acp(
+        &name,
+        "send",
+        serde_json::to_value(request).map_err(anyhow::Error::from)?,
+    )
+    .await
+}
+
+async fn chat_cancel(
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Json(request): Json<acp::AcpCancelRequest>,
+) -> Result<Json<Value>, UiError> {
+    crate::auth::authorize_workspace(&headers, &name)?;
+    proxy_worker_acp(
+        &name,
+        "cancel",
+        serde_json::to_value(request).map_err(anyhow::Error::from)?,
+    )
+    .await
+}
+
+async fn chat_permission(
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Json(request): Json<acp::AcpPermissionRequest>,
+) -> Result<Json<Value>, UiError> {
+    crate::auth::authorize_workspace(&headers, &name)?;
+    proxy_worker_acp(
+        &name,
+        "permission",
+        serde_json::to_value(request).map_err(anyhow::Error::from)?,
+    )
+    .await
+}
+
+async fn chat_events(
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Query(query): Query<acp::AcpEventsQuery>,
+) -> Result<Json<Value>, UiError> {
+    crate::auth::authorize_workspace(&headers, &name)?;
+    proxy_worker_acp(
+        &name,
+        "events",
+        serde_json::to_value(query).map_err(anyhow::Error::from)?,
+    )
+    .await
+}
+
+async fn proxy_worker_acp(
+    name: &str,
+    action: &str,
+    mut payload: Value,
+) -> Result<Json<Value>, UiError> {
+    let workspace = workspace_get(name)?;
+    let worker_url = workspace_worker_url(&workspace)?;
+    let object = payload
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("Hermes ACP proxy payload must be a JSON object"))?;
+    object.insert(
+        "workspace_name".to_string(),
+        Value::String(workspace.name.clone()),
+    );
+    object.insert(
+        "sandbox_name".to_string(),
+        Value::String(workspace.sandbox_name),
+    );
+    let response = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()?
+        .post(format!(
+            "{}/worker/hermes-acp/{action}",
+            worker_url.trim_end_matches('/')
+        ))
+        .with_worker_token()
+        .json(&payload)
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Value>()
+        .await?;
+    Ok(Json(response))
 }
 
 async fn open_hermes_dashboard(name: &str) -> Result<Json<CommandResult>, UiError> {

@@ -153,20 +153,33 @@ cookie-authenticated `/api/workspaces`; worker/internal listing remains under
 Make Hermes the only visible service. OpenCode and Codex prompt flows are not
 baseline features; add them back from history only with a concrete product need.
 
-Build the first Mom-native chat widget against the Hermes API server. Keep it
-small: session list, message history, composer, streaming response, cancel if
-Hermes exposes it cleanly, and clear errors. The browser talks only to `mom api`;
-the API enforces workspace ownership and proxies to the assigned worker, and the
-worker talks to Hermes inside the workspace.
+Build the first Mom-native chat widget against Hermes ACP, not the dashboard
+TUI. The browser talks only to `mom api`; the API enforces workspace ownership
+and proxies to the assigned worker; the worker supervises `hermes-acp` inside
+the workspace and normalizes ACP events into a small Mom chat API.
+
+First pass is implemented as an idempotent Hermes ACP adapter, not a background
+daemon for every workspace. The UI calls `/chat/start` on workspace selection
+and polls `/chat/events`; the worker treats those calls as `ensure_session`.
+If the process is missing or exited, the next UI poll restarts it. `send` and
+`cancel` also ensure before acting. This keeps ACP always available for an open
+chat without running idle adapters for every assigned workspace.
 
 Keep the full Hermes dashboard as an advanced/debug escape hatch. Do not make
 the terminal-rendered TUI the primary chat experience.
 
-Defer ACP. The chat worktree prototype proves ACP can work, but generic ACP adds
-process supervision, JSON-RPC event translation, permission plumbing, and
-multi-agent complexity. Revisit ACP only after the Hermes API chat hits a real
-missing capability such as permissions, richer tool timeline, or durable
-session control.
+Use the stale `chat-acp` worktree as research, not as a merge target. Its live
+QA proves Hermes ACP can carry the experience we want, including streaming
+assistant text, resource attachments, thinking/tool updates, permissions, and
+session controls. The grug version is Hermes-only: no OpenCode agent enum, no
+generic multi-harness selector, no `/api/vms` noun revival, and no old UI auth
+state. Port the useful pieces: ACP process supervision, JSON-RPC event capture,
+permission response handling, transcript normalization, and chat rendering. Drop
+the generic fallback surface unless a Hermes use case needs it. The actual port
+deliberately skipped assistant-ui for now; the built-in Mom message renderer was
+enough for streamed text, thinking/tool/status cards, raw fallbacks, and
+permissions. Add assistant-ui only when the local renderer becomes real
+complexity.
 
 Replace node-port service URLs with stable workspace routes. The API should
 resolve workspace to assigned node and service internally; tunnel hostnames
@@ -200,3 +213,27 @@ image cannot boot and pass probes.
 
 Keep backup and recovery boring. Restic is the only workspace backup path for
 now, and lost-host recovery remains an explicit operator command.
+
+## Implementation Notes
+
+- Added `src/acp.rs` as a Hermes-only ACP supervisor. It launches
+  `hermes-acp` over a microsandbox SSH stdio bridge, performs preflight,
+  initializes ACP, creates a session, tracks events, permissions, exit state,
+  and bounded event history.
+- Added cookie-authenticated browser routes under
+  `/api/workspaces/<workspace>/chat/{start,send,cancel,permission,events}`.
+  These proxy to bearer-token worker route `/worker/hermes-acp/<action>`.
+- The worker validates workspace/node/sandbox assignment before every ACP
+  action. Fake runtime returns a fake ready status so existing fleet tests do
+  not need real Hermes.
+- Base snapshot provisioning now installs `hermes-agent[all,messaging,acp]`;
+  this is the deployment guardrail that keeps the adapter binary present.
+- Restart behavior: event polling ignores the browser's `after` cursor after
+  ensuring and returns the full capped event buffer. The UI detects event
+  sequence reset and replaces the old transcript after an ACP restart.
+- Verified with `cargo check`, `cargo test`, `npm --prefix ui run build`,
+  `git diff --check`, and a one-off `npx agent-browser` smoke against Vite on
+  `127.0.0.1:5177`.
+- Added fake-fleet coverage for `/api/workspaces/<workspace>/chat/start` and
+  `/chat/events` routing through the assigned worker and returning ready ACP
+  status.

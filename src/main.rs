@@ -40,6 +40,7 @@ const HERMES_GUEST_PORT: u16 = 9119;
 const BASE_BUILDER_NAME: &str = "mom-base-builder";
 const BASE_DOCTOR_NAME: &str = "mom-base-doctor";
 
+mod acp;
 mod api;
 mod auth;
 mod backup;
