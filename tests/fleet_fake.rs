@@ -272,7 +272,7 @@ async fn ui_create_selects_registered_worker_node() -> Result<()> {
     let cookie = admin_cookie(&fleet.api_url).await?;
 
     reqwest::Client::new()
-        .post(format!("{}/api/vms", fleet.api_url))
+        .post(format!("{}/api/workspaces", fleet.api_url))
         .header(reqwest::header::COOKIE, &cookie)
         .json(&json!({ "name": "ui-created" }))
         .send()
@@ -481,7 +481,7 @@ async fn create_selects_fresh_worker_over_stale_node() -> Result<()> {
     let cookie = admin_cookie(&fleet.api_url).await?;
 
     reqwest::Client::new()
-        .post(format!("{}/api/vms", fleet.api_url))
+        .post(format!("{}/api/workspaces", fleet.api_url))
         .header(reqwest::header::COOKIE, &cookie)
         .json(&json!({ "name": "fresh" }))
         .send()
@@ -981,7 +981,10 @@ async fn tls_ask_allows_only_registered_service_tunnel_hostnames() -> Result<()>
     let cookie = admin_cookie(&fleet.api_url).await?;
 
     client
-        .post(format!("{}/api/vms/tls-svc/hermes-ui", fleet.api_url))
+        .post(format!(
+            "{}/api/workspaces/tls-svc/hermes-ui",
+            fleet.api_url
+        ))
         .header(reqwest::header::COOKIE, &cookie)
         .send()
         .await?
