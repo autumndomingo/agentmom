@@ -821,6 +821,58 @@ async fn service_open_routes_to_assigned_worker_url() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn tls_ask_allows_only_registered_service_tunnel_hostnames() -> Result<()> {
+    let fleet = TestFleet::start().await?;
+    let _node = spawn_worker_with_options(
+        "mom-1",
+        &fleet.api_url,
+        "1",
+        Some("https://mom-1-45887.agentmom.xyz"),
+    )?;
+    wait_for_node(fleet.api_state.path(), "mom-1").await?;
+
+    let client = reqwest::Client::new();
+    let before = client
+        .get(format!(
+            "{}/api/tls-ask?domain=mom-1-45887.agentmom.xyz",
+            fleet.api_url
+        ))
+        .send()
+        .await?;
+    assert_eq!(before.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let job_id = create_workspace(&fleet.api_url, "tls-svc", "mom-1", 0).await?;
+    wait_for_job_status(&fleet.api_url, &job_id, "succeeded").await?;
+    wait_for_workspace_status(&fleet.api_url, "tls-svc", "running").await?;
+
+    client
+        .post(format!("{}/api/vms/tls-svc/hermes-ui", fleet.api_url))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let after = client
+        .get(format!(
+            "{}/api/tls-ask?domain=mom-1-45887.agentmom.xyz",
+            fleet.api_url
+        ))
+        .send()
+        .await?;
+    assert_eq!(after.status(), reqwest::StatusCode::OK);
+
+    let unknown = client
+        .get(format!(
+            "{}/api/tls-ask?domain=mom-1-45888.agentmom.xyz",
+            fleet.api_url
+        ))
+        .send()
+        .await?;
+    assert_eq!(unknown.status(), reqwest::StatusCode::FORBIDDEN);
+
+    Ok(())
+}
+
 impl TestFleet {
     async fn start() -> Result<Self> {
         Self::start_with_api_env(&[]).await

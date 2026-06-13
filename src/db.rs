@@ -114,6 +114,18 @@ CREATE TABLE IF NOT EXISTS jobs (
 
 CREATE INDEX IF NOT EXISTS idx_jobs_claim
 ON jobs (status, node_id, created_at);
+
+CREATE TABLE IF NOT EXISTS service_tunnels (
+    hostname TEXT PRIMARY KEY,
+    workspace_name TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    service TEXT NOT NULL,
+    url TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_service_tunnels_workspace
+ON service_tunnels (workspace_name, service);
 "#,
     )?;
     add_column_if_missing(&db, "workspaces", "node_id", "TEXT")?;
@@ -360,6 +372,67 @@ pub(crate) fn workspace_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Wo
         last_used_at: row.get(15)?,
         last_backup_at: row.get(16)?,
     })
+}
+
+pub(crate) fn service_tunnel_upsert(
+    workspace_name: &str,
+    node_id: &str,
+    service: &str,
+    url: &str,
+) -> Result<()> {
+    ensure_fleet_schema()?;
+    let parsed = reqwest::Url::parse(url).with_context(|| format!("parse service URL {url}"))?;
+    let hostname = parsed
+        .host_str()
+        .ok_or_else(|| anyhow!("service URL has no hostname: {url}"))?
+        .to_ascii_lowercase();
+    let db = fleet_db()?;
+    db.execute(
+        r#"
+INSERT INTO service_tunnels (hostname, workspace_name, node_id, service, url, updated_at)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+ON CONFLICT(hostname) DO UPDATE SET
+    workspace_name = excluded.workspace_name,
+    node_id = excluded.node_id,
+    service = excluded.service,
+    url = excluded.url,
+    updated_at = excluded.updated_at
+"#,
+        params![
+            hostname,
+            workspace_name,
+            node_id,
+            service,
+            url,
+            now_epoch()?
+        ],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn service_tunnel_hostname_registered(hostname: &str) -> Result<bool> {
+    ensure_fleet_schema()?;
+    let hostname = hostname
+        .split(':')
+        .next()
+        .unwrap_or(hostname)
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    let db = fleet_db()?;
+    let found = db.query_row(
+        r#"
+SELECT EXISTS (
+    SELECT 1
+    FROM service_tunnels
+    JOIN workspaces ON workspaces.name = service_tunnels.workspace_name
+    WHERE service_tunnels.hostname = ?1
+      AND workspaces.status != 'removed'
+)
+"#,
+        params![hostname],
+        |row| row.get::<_, i64>(0),
+    )? != 0;
+    Ok(found)
 }
 
 pub(crate) fn workspace_set_desired(name: &str, desired_state: &str) -> Result<()> {

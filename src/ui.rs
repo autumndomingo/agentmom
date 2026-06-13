@@ -15,8 +15,9 @@ use tower_http::services::{ServeDir, ServeFile};
 use crate::{
     ApiState, JobResponse, WorkspaceRecord, create_job, default_workspace_backup_interval,
     default_workspace_cpus, default_workspace_idle_timeout, default_workspace_memory,
-    default_workspace_volume_quota, job_get, node_worker_url, select_ready_node, worker_token,
-    workspace_all, workspace_get, workspace_upsert_pending,
+    default_workspace_volume_quota, job_get, node_worker_url, select_ready_node,
+    service_tunnel_hostname_registered, service_tunnel_upsert, worker_token, workspace_all,
+    workspace_get, workspace_upsert_pending,
 };
 
 #[derive(Debug, Deserialize)]
@@ -128,7 +129,7 @@ async fn tls_ask(Query(query): Query<HashMap<String, String>>) -> StatusCode {
     let Some(domain) = query.get("domain") else {
         return StatusCode::BAD_REQUEST;
     };
-    if service_tunnel_domain_allowed(domain) {
+    if service_tunnel_domain_allowed(domain) && service_tunnel_registered(domain).unwrap_or(false) {
         StatusCode::OK
     } else {
         StatusCode::FORBIDDEN
@@ -149,6 +150,10 @@ fn service_tunnel_domain_allowed(domain: &str) -> bool {
             && port.parse::<u16>().is_ok()
             && port.bytes().all(|byte| byte.is_ascii_digit())
     })
+}
+
+fn service_tunnel_registered(domain: &str) -> Result<bool> {
+    service_tunnel_hostname_registered(domain)
 }
 
 async fn list_vms() -> Result<Json<ListResponse>, UiError> {
@@ -288,6 +293,14 @@ async fn hermes_ui_vm(Path(name): Path<String>) -> Result<Json<CommandResult>, U
 async fn open_workspace_service(name: &str, service: &str) -> Result<Json<CommandResult>, UiError> {
     let workspace = workspace_get(name)?;
     let worker_url = workspace_worker_url(&workspace)?;
+    let workspace_name = workspace.name.clone();
+    let sandbox_name = workspace.sandbox_name.clone();
+    let node = workspace.node_id.as_deref().ok_or_else(|| {
+        anyhow!(
+            "workspace {} does not have an assigned node",
+            workspace.name
+        )
+    })?;
     let response = reqwest::Client::builder()
         .timeout(Duration::from_secs(120))
         .build()?
@@ -297,14 +310,15 @@ async fn open_workspace_service(name: &str, service: &str) -> Result<Json<Comman
         ))
         .with_worker_token()
         .json(&OpenWorkerServiceRequest {
-            workspace_name: workspace.name,
-            sandbox_name: workspace.sandbox_name,
+            workspace_name: workspace_name.clone(),
+            sandbox_name,
         })
         .send()
         .await?
         .error_for_status()?
         .json::<OpenWorkerServiceResponse>()
         .await?;
+    service_tunnel_upsert(&workspace_name, node, service, &response.url)?;
     Ok(Json(CommandResult {
         ok: true,
         code: Some(0),
