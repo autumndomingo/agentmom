@@ -1,19 +1,28 @@
 use std::{collections::HashMap, env, path::PathBuf, sync::Arc, time::Duration};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{Path, Query, State, ws::Message},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{
+        Message as WorkerMessage,
+        client::IntoClientRequest,
+        http::{HeaderValue, header::AUTHORIZATION},
+    },
+};
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::{
-    ApiState, JobResponse, WorkspaceRecord, acp, create_job, job_get, node_worker_url,
+    ApiState, JobResponse, WorkspaceRecord, create_job, job_get, node_worker_url,
     service_tunnel_hostname_registered, service_tunnel_upsert, worker_token, workspace_get,
 };
 
@@ -60,14 +69,7 @@ pub(crate) fn api_routes() -> Router<Arc<ApiState>> {
             "/api/workspaces/{name}/hermes-ui",
             post(hermes_ui_workspace),
         )
-        .route("/api/workspaces/{name}/chat/start", post(chat_start))
-        .route("/api/workspaces/{name}/chat/send", post(chat_send))
-        .route("/api/workspaces/{name}/chat/cancel", post(chat_cancel))
-        .route(
-            "/api/workspaces/{name}/chat/permission",
-            post(chat_permission),
-        )
-        .route("/api/workspaces/{name}/chat/events", get(chat_events))
+        .route("/api/workspaces/{name}/chat/ws", get(chat_ws))
 }
 
 pub(crate) fn serve_assets(app: Router) -> Router {
@@ -193,109 +195,107 @@ async fn hermes_ui_workspace(
     open_hermes_dashboard(&name).await
 }
 
-async fn chat_start(
+async fn chat_ws(
     headers: HeaderMap,
     Path(name): Path<String>,
-    Json(request): Json<acp::AcpStartRequest>,
-) -> Result<Json<Value>, UiError> {
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> Result<Response, UiError> {
     crate::auth::authorize_workspace(&headers, &name)?;
-    proxy_worker_acp(
-        &name,
-        "start",
-        serde_json::to_value(request).map_err(anyhow::Error::from)?,
-    )
-    .await
-}
-
-async fn chat_send(
-    headers: HeaderMap,
-    Path(name): Path<String>,
-    Json(request): Json<acp::AcpSendRequest>,
-) -> Result<Json<Value>, UiError> {
-    crate::auth::authorize_workspace(&headers, &name)?;
-    proxy_worker_acp(
-        &name,
-        "send",
-        serde_json::to_value(request).map_err(anyhow::Error::from)?,
-    )
-    .await
-}
-
-async fn chat_cancel(
-    headers: HeaderMap,
-    Path(name): Path<String>,
-    Json(request): Json<acp::AcpCancelRequest>,
-) -> Result<Json<Value>, UiError> {
-    crate::auth::authorize_workspace(&headers, &name)?;
-    proxy_worker_acp(
-        &name,
-        "cancel",
-        serde_json::to_value(request).map_err(anyhow::Error::from)?,
-    )
-    .await
-}
-
-async fn chat_permission(
-    headers: HeaderMap,
-    Path(name): Path<String>,
-    Json(request): Json<acp::AcpPermissionRequest>,
-) -> Result<Json<Value>, UiError> {
-    crate::auth::authorize_workspace(&headers, &name)?;
-    proxy_worker_acp(
-        &name,
-        "permission",
-        serde_json::to_value(request).map_err(anyhow::Error::from)?,
-    )
-    .await
-}
-
-async fn chat_events(
-    headers: HeaderMap,
-    Path(name): Path<String>,
-    Query(query): Query<acp::AcpEventsQuery>,
-) -> Result<Json<Value>, UiError> {
-    crate::auth::authorize_workspace(&headers, &name)?;
-    proxy_worker_acp(
-        &name,
-        "events",
-        serde_json::to_value(query).map_err(anyhow::Error::from)?,
-    )
-    .await
-}
-
-async fn proxy_worker_acp(
-    name: &str,
-    action: &str,
-    mut payload: Value,
-) -> Result<Json<Value>, UiError> {
-    let workspace = workspace_get(name)?;
+    let workspace = workspace_get(&name)?;
     let worker_url = workspace_worker_url(&workspace)?;
-    let object = payload
-        .as_object_mut()
-        .ok_or_else(|| anyhow!("Hermes ACP proxy payload must be a JSON object"))?;
-    object.insert(
-        "workspace_name".to_string(),
-        Value::String(workspace.name.clone()),
+    let worker_ws = worker_acp_ws_url(&worker_url, &workspace)?;
+    Ok(ws
+        .on_upgrade(move |socket| async move {
+            let _ = proxy_acp_websocket(socket, worker_ws).await;
+        })
+        .into_response())
+}
+
+fn worker_acp_ws_url(worker_url: &str, workspace: &WorkspaceRecord) -> Result<String> {
+    let mut url = worker_url.trim_end_matches('/').to_string();
+    if let Some(rest) = url.strip_prefix("http://") {
+        url = format!("ws://{rest}");
+    } else if let Some(rest) = url.strip_prefix("https://") {
+        url = format!("wss://{rest}");
+    } else if !url.starts_with("ws://") && !url.starts_with("wss://") {
+        bail!("worker_url must start with http://, https://, ws://, or wss://");
+    }
+    Ok(format!(
+        "{url}/worker/hermes-acp/ws?workspace_name={}&sandbox_name={}",
+        crate::url_component(&workspace.name),
+        crate::url_component(&workspace.sandbox_name)
+    ))
+}
+
+async fn proxy_acp_websocket(
+    browser_socket: axum::extract::ws::WebSocket,
+    worker_ws_url: String,
+) -> Result<()> {
+    let token = worker_token()?;
+    let mut request = worker_ws_url.into_client_request()?;
+    request.headers_mut().insert(
+        AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {token}"))?,
     );
-    object.insert(
-        "sandbox_name".to_string(),
-        Value::String(workspace.sandbox_name),
-    );
-    let response = reqwest::Client::builder()
-        .timeout(Duration::from_secs(120))
-        .build()?
-        .post(format!(
-            "{}/worker/hermes-acp/{action}",
-            worker_url.trim_end_matches('/')
-        ))
-        .with_worker_token()
-        .json(&payload)
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<Value>()
-        .await?;
-    Ok(Json(response))
+    let (worker_socket, _) = connect_async(request).await?;
+    let (mut browser_tx, mut browser_rx) = browser_socket.split();
+    let (mut worker_tx, mut worker_rx) = worker_socket.split();
+
+    let browser_to_worker = async {
+        while let Some(Ok(message)) = browser_rx.next().await {
+            let message = match message {
+                Message::Text(text) => WorkerMessage::Text(text.to_string().into()),
+                Message::Binary(bytes) => WorkerMessage::Binary(bytes),
+                Message::Ping(bytes) => WorkerMessage::Ping(bytes),
+                Message::Pong(bytes) => WorkerMessage::Pong(bytes),
+                Message::Close(frame) => {
+                    let close =
+                        frame.map(
+                            |frame| tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                                code: frame.code.into(),
+                                reason: frame.reason.to_string().into(),
+                            },
+                        );
+                    let _ = worker_tx.send(WorkerMessage::Close(close)).await;
+                    break;
+                }
+            };
+            if worker_tx.send(message).await.is_err() {
+                break;
+            }
+        }
+        Ok::<(), anyhow::Error>(())
+    };
+
+    let worker_to_browser = async {
+        while let Some(Ok(message)) = worker_rx.next().await {
+            let message = match message {
+                WorkerMessage::Text(text) => Message::Text(text.to_string().into()),
+                WorkerMessage::Binary(bytes) => Message::Binary(bytes),
+                WorkerMessage::Ping(bytes) => Message::Ping(bytes),
+                WorkerMessage::Pong(bytes) => Message::Pong(bytes),
+                WorkerMessage::Close(frame) => {
+                    let close = frame.map(|frame| axum::extract::ws::CloseFrame {
+                        code: frame.code.into(),
+                        reason: frame.reason.to_string().into(),
+                    });
+                    let _ = browser_tx.send(Message::Close(close)).await;
+                    break;
+                }
+                WorkerMessage::Frame(_) => continue,
+            };
+            if browser_tx.send(message).await.is_err() {
+                break;
+            }
+        }
+        Ok::<(), anyhow::Error>(())
+    };
+
+    tokio::select! {
+        result = browser_to_worker => result?,
+        result = worker_to_browser => result?,
+    }
+    Ok(())
 }
 
 async fn open_hermes_dashboard(name: &str) -> Result<Json<CommandResult>, UiError> {

@@ -9,11 +9,20 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
+use futures_util::{SinkExt, StreamExt};
 use reqwest::StatusCode;
 use rusqlite::Connection;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{
+        Message as WsMessage,
+        client::IntoClientRequest,
+        http::{HeaderValue, header::COOKIE},
+    },
+};
 
 const MOM_BIN: &str = env!("CARGO_BIN_EXE_mom");
 const WORKER_TOKEN: &str = "test-worker-token";
@@ -1008,7 +1017,7 @@ async fn service_open_routes_to_assigned_worker_url() -> Result<()> {
 }
 
 #[tokio::test]
-async fn hermes_chat_routes_to_assigned_worker_and_returns_ready_status() -> Result<()> {
+async fn hermes_chat_websocket_routes_to_assigned_worker() -> Result<()> {
     let _guard = fleet_test_guard().await;
     let fleet = TestFleet::start().await?;
     let _node = spawn_worker("node-a", &fleet.api_url)?;
@@ -1019,33 +1028,34 @@ async fn hermes_chat_routes_to_assigned_worker_and_returns_ready_status() -> Res
     wait_for_workspace_status(&fleet.api_url, "chat", "running").await?;
     let cookie = admin_cookie(&fleet.api_url).await?;
 
-    let client = reqwest::Client::new();
-    let start = client
-        .post(format!("{}/api/workspaces/chat/chat/start", fleet.api_url))
-        .header(reqwest::header::COOKIE, &cookie)
-        .json(&json!({ "restart": false }))
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<Value>()
-        .await?;
-    assert_eq!(start["workspace"], "chat");
-    assert_eq!(start["state"], "ready");
-    assert!(start["session_id"].as_str().is_some());
+    let mut request = format!(
+        "{}/api/workspaces/chat/chat/ws",
+        fleet.api_url.replacen("http://", "ws://", 1)
+    )
+    .into_client_request()?;
+    request
+        .headers_mut()
+        .insert(COOKIE, HeaderValue::from_str(&cookie)?);
+    let (mut socket, _) = connect_async(request).await?;
 
-    let events = client
-        .get(format!(
-            "{}/api/workspaces/chat/chat/events?after=0",
-            fleet.api_url
-        ))
-        .header(reqwest::header::COOKIE, &cookie)
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<Value>()
+    let status = socket
+        .next()
+        .await
+        .ok_or_else(|| anyhow!("chat websocket closed before status"))??;
+    let status = ws_text_json(status)?;
+    assert_eq!(status["method"], "mom/status");
+    assert_eq!(status["params"]["state"], "ready");
+    assert_eq!(status["params"]["workspace"], "chat");
+
+    let ping = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} });
+    socket
+        .send(WsMessage::Text(ping.to_string().into()))
         .await?;
-    assert_eq!(events["workspace"], "chat");
-    assert_eq!(events["state"], "ready");
+    let echo = socket
+        .next()
+        .await
+        .ok_or_else(|| anyhow!("chat websocket closed before echo"))??;
+    assert_eq!(ws_text_json(echo)?, ping);
 
     Ok(())
 }
@@ -1619,6 +1629,13 @@ fn session_cookie_from_response(response: &reqwest::Response) -> Result<String> 
         .and_then(|value| value.split(';').next())
         .ok_or_else(|| anyhow!("login response did not set a session cookie"))?;
     Ok(cookie.to_string())
+}
+
+fn ws_text_json(message: WsMessage) -> Result<Value> {
+    match message {
+        WsMessage::Text(text) => serde_json::from_str(&text).context("parse websocket JSON text"),
+        other => bail!("expected websocket text message, got {other:?}"),
+    }
 }
 
 async fn wait_until<F, Fut>(label: &str, mut check: F) -> Result<()>

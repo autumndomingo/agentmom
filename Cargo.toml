@@ -9,9 +9,10 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0"
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 clap = { version = "4.5", features = ["derive", "env"] }
 dirs = "6.0"
+futures-util = "0.3"
 hmac = "0.12"
 microsandbox = { git = "https://github.com/superradcompany/microsandbox", rev = "8059c966c586685271fbf2781b5d6dbb112ace36", features = ["ssh"] }
 rand = "0.9"
@@ -22,6 +23,7 @@ serde_json = "1.0"
 sha2 = "0.10"
 tokio = { version = "1.48", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-tungstenite = "0.27"
 tower-http = { version = "0.6", features = ["cors", "fs"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

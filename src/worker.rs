@@ -119,7 +119,7 @@ fn worker_sse_client() -> Result<reqwest::Client> {
 async fn run_worker_http(listener: tokio::net::TcpListener, state: Arc<WorkerState>) -> Result<()> {
     let app = Router::new()
         .route("/worker/health", get(worker_health))
-        .route("/worker/hermes-acp/{action}", post(worker_hermes_acp))
+        .route("/worker/hermes-acp/ws", get(worker_hermes_acp_ws))
         .route("/worker/services/hermes/open", post(worker_open_hermes))
         .with_state(state);
     let addr = listener
@@ -176,24 +176,16 @@ async fn worker_open_hermes(
     Ok(Json(json!({ "url": url })))
 }
 
-async fn worker_hermes_acp(
+async fn worker_hermes_acp_ws(
     State(state): State<Arc<WorkerState>>,
     headers: HeaderMap,
-    AxumPath(action): AxumPath<String>,
-    Json(request): Json<Value>,
-) -> Result<Json<Value>, ApiError> {
+    Query(query): Query<acp::WorkerAcpWsQuery>,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> Result<Response, ApiError> {
     require_worker_token(&headers).map_err(ApiError::Unauthorized)?;
-    let workspace_name = request
-        .get("workspace_name")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("Hermes ACP request missing workspace_name"))?;
-    let sandbox_name = request
-        .get("sandbox_name")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("Hermes ACP request missing sandbox_name"))?;
     let workspace = state
         .api
-        .workspace(workspace_name)
+        .workspace(&query.workspace_name)
         .await
         .map_err(ApiError::Anyhow)?;
     if workspace.node_id.as_deref() != Some(&state.api.node) {
@@ -203,100 +195,29 @@ async fn worker_hermes_acp(
             state.api.node
         )));
     }
-    if sandbox_name != workspace.sandbox_name {
+    if query.sandbox_name != workspace.sandbox_name {
         return Err(ApiError::Unauthorized(anyhow!(
             "Hermes ACP sandbox does not match workspace assignment"
         )));
     }
     if fake_runtime_enabled() {
-        let after = request.get("after").and_then(Value::as_u64).unwrap_or(0);
-        return serde_json::to_value(acp::fake_status(&workspace.name, after))
-            .map(Json)
-            .map_err(anyhow::Error::from)
-            .map_err(ApiError::Anyhow);
+        let workspace_name = workspace.name.clone();
+        return Ok(ws
+            .on_upgrade(move |socket| acp::fake_worker_socket(workspace_name, socket))
+            .into_response());
     }
 
     let sandbox = workspace_running_sandbox_local(&state.api, &workspace)
         .await
         .map_err(ApiError::Anyhow)?;
-    let response = match action.as_str() {
-        "start" => {
-            let request: acp::AcpStartRequest =
-                serde_json::from_value(request).map_err(anyhow::Error::from)?;
-            acp::ensure_session(
-                &state.acp,
-                &workspace.name,
-                &workspace.sandbox_name,
-                &sandbox,
-                request.restart,
-            )
-            .await?
-        }
-        "send" => {
-            let request: acp::AcpSendRequest =
-                serde_json::from_value(request).map_err(anyhow::Error::from)?;
-            acp::ensure_session(
-                &state.acp,
-                &workspace.name,
-                &workspace.sandbox_name,
-                &sandbox,
-                false,
-            )
-            .await?;
-            acp::send_prompt(
-                &state.acp,
-                &workspace.name,
-                &request.prompt,
-                &request.content,
-            )
-            .await?
-        }
-        "cancel" => {
-            acp::ensure_session(
-                &state.acp,
-                &workspace.name,
-                &workspace.sandbox_name,
-                &sandbox,
-                false,
-            )
-            .await?;
-            acp::cancel(&state.acp, &workspace.name).await?
-        }
-        "permission" => {
-            let request: acp::AcpPermissionRequest =
-                serde_json::from_value(request).map_err(anyhow::Error::from)?;
-            acp::respond_permission(
-                &state.acp,
-                &workspace.name,
-                &request.request_id,
-                &request.option_id,
-            )
-            .await?
-        }
-        "events" => {
-            let request: acp::AcpEventsQuery =
-                serde_json::from_value(request).map_err(anyhow::Error::from)?;
-            acp::ensure_session(
-                &state.acp,
-                &workspace.name,
-                &workspace.sandbox_name,
-                &sandbox,
-                false,
-            )
-            .await?;
-            let _ = request.after;
-            acp::events(&state.acp, &workspace.name, 0).await?
-        }
-        other => {
-            return Err(ApiError::Anyhow(anyhow!(
-                "unknown Hermes ACP action: {other}"
-            )));
-        }
-    };
-    serde_json::to_value(response)
-        .map(Json)
-        .map_err(anyhow::Error::from)
-        .map_err(ApiError::Anyhow)
+    let acp = state.acp.clone();
+    let workspace_name = workspace.name.clone();
+    let sandbox_name = workspace.sandbox_name.clone();
+    Ok(ws
+        .on_upgrade(move |socket| {
+            acp::bridge_worker_socket(acp, workspace_name, sandbox_name, sandbox, socket)
+        })
+        .into_response())
 }
 
 async fn register_worker(

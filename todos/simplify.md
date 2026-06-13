@@ -155,15 +155,18 @@ baseline features; add them back from history only with a concrete product need.
 
 Build the first Mom-native chat widget against Hermes ACP, not the dashboard
 TUI. The browser talks only to `mom api`; the API enforces workspace ownership
-and proxies to the assigned worker; the worker supervises `hermes-acp` inside
-the workspace and normalizes ACP events into a small Mom chat API.
+and proxies a WebSocket to the assigned worker; the worker supervises
+`hermes-acp` inside the workspace and pipes raw JSON-RPC frames between browser
+and ACP stdio.
 
-First pass is implemented as an idempotent Hermes ACP adapter, not a background
-daemon for every workspace. The UI calls `/chat/start` on workspace selection
-and polls `/chat/events`; the worker treats those calls as `ensure_session`.
-If the process is missing or exited, the next UI poll restarts it. `send` and
-`cancel` also ensure before acting. This keeps ACP always available for an open
-chat without running idle adapters for every assigned workspace.
+Correction after review: the first REST-shaped ACP adapter was the wrong mental
+model. Agent Mom should not translate ACP into REST, advertise client-side file
+capabilities, or make Rust understand Hermes chat semantics. Hermes runs inside
+the workspace and owns its tools/filesystem behavior. Mom is the auth/routing
+and process shell. The implemented direction is one dumb durable pipe:
+`/api/workspaces/<workspace>/chat/ws` to `/worker/hermes-acp/ws` to
+`hermes-acp` stdio. The UI sends `initialize`, `session/new`, `session/prompt`,
+cancel notifications, and permission responses as raw JSON-RPC messages.
 
 Keep the full Hermes dashboard as an advanced/debug escape hatch. Do not make
 the terminal-rendered TUI the primary chat experience.
@@ -216,24 +219,22 @@ now, and lost-host recovery remains an explicit operator command.
 
 ## Implementation Notes
 
-- Added `src/acp.rs` as a Hermes-only ACP supervisor. It launches
-  `hermes-acp` over a microsandbox SSH stdio bridge, performs preflight,
-  initializes ACP, creates a session, tracks events, permissions, exit state,
-  and bounded event history.
-- Added cookie-authenticated browser routes under
-  `/api/workspaces/<workspace>/chat/{start,send,cancel,permission,events}`.
-  These proxy to bearer-token worker route `/worker/hermes-acp/<action>`.
-- The worker validates workspace/node/sandbox assignment before every ACP
-  action. Fake runtime returns a fake ready status so existing fleet tests do
-  not need real Hermes.
+- Replaced the initial REST-shaped ACP bridge with a raw WebSocket pipe.
+  `src/acp.rs` now launches `hermes-acp` over a microsandbox SSH stdio bridge
+  and pipes WebSocket text frames to/from line-delimited ACP JSON-RPC.
+- Added cookie-authenticated browser route
+  `/api/workspaces/<workspace>/chat/ws`, which proxies to bearer-token worker
+  route `/worker/hermes-acp/ws`.
+- The worker validates workspace/node/sandbox assignment before upgrading the
+  WebSocket. Fake runtime returns a fake `mom/status` frame and echoes JSON-RPC
+  so tests do not need real Hermes.
 - Base snapshot provisioning now installs `hermes-agent[all,messaging,acp]`;
   this is the deployment guardrail that keeps the adapter binary present.
-- Restart behavior: event polling ignores the browser's `after` cursor after
-  ensuring and returns the full capped event buffer. The UI detects event
-  sequence reset and replaces the old transcript after an ACP restart.
+- Deleted Rust filesystem callbacks and FS capability advertising. If Hermes
+  sends an unadvertised client request later, surface it explicitly and decide
+  whether it belongs in Mom rather than carrying generic ACP baggage.
 - Verified with `cargo check`, `cargo test`, `npm --prefix ui run build`,
   `git diff --check`, and a one-off `npx agent-browser` smoke against Vite on
   `127.0.0.1:5177`.
-- Added fake-fleet coverage for `/api/workspaces/<workspace>/chat/start` and
-  `/chat/events` routing through the assigned worker and returning ready ACP
-  status.
+- Added fake-fleet WebSocket coverage for `/api/workspaces/<workspace>/chat/ws`
+  routing through the assigned worker and carrying raw JSON-RPC frames.

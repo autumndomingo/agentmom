@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   Edit3,
@@ -10,7 +10,7 @@ import {
   Sparkles,
   Users,
 } from 'lucide-react';
-import { buildTranscript } from './acp/transcript.js';
+import { buildPendingPermissions, buildTranscript } from './acp/transcript.js';
 import './styles.css';
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? '/api';
@@ -251,8 +251,12 @@ function App({ userSession }) {
   const [chatBusy, setChatBusy] = useState(false);
   const [chatInput, setChatInput] = useState('');
   const [acpByWorkspace, setAcpByWorkspace] = useState({});
+  const [chatRestartNonce, setChatRestartNonce] = useState(0);
   const [workspaceError, setWorkspaceError] = useState('');
   const [now, setNow] = useState(() => Date.now());
+  const chatSocketsRef = useRef({});
+  const pendingRpcRef = useRef({});
+  const rpcIdRef = useRef(1);
 
   const selectedWorkspace = useMemo(
     () => workspaces.find((workspace) => workspace.name === selectedName) ?? workspaces[0],
@@ -261,6 +265,7 @@ function App({ userSession }) {
   const selectedKey = selectedWorkspace?.name ?? selectedName;
   const acp = selectedKey ? acpByWorkspace[selectedKey] ?? emptyAcpState() : emptyAcpState();
   const transcript = useMemo(() => buildTranscript(acp.events), [acp.events]);
+  const pendingPermissions = useMemo(() => buildPendingPermissions(acp.events), [acp.events]);
   const chatGroups = groupChatsByAge(
     selectedWorkspace
       ? [
@@ -288,58 +293,92 @@ function App({ userSession }) {
     if (!selectedWorkspace?.name) return undefined;
 
     const workspaceName = selectedWorkspace.name;
+    const socket = new WebSocket(chatWsUrl(workspaceName));
     let cancelled = false;
-    let lastSeq = 0;
 
-    async function mergeStatus(data, append = false) {
+    chatSocketsRef.current[workspaceName]?.close();
+    chatSocketsRef.current[workspaceName] = socket;
+    setAcpConnectionState(workspaceName, {
+      state: 'connecting',
+      phase: 'websocket',
+      error: null,
+      events: [],
+      session_id: null,
+    });
+
+    socket.onopen = () => {
       if (cancelled) return;
-      lastSeq = Math.max(lastSeq, ...(data.events ?? []).map((event) => event.seq ?? 0));
-      mergeAcpStatus(workspaceName, data, append);
-    }
+      setAcpConnectionState(workspaceName, { state: 'open', phase: 'initialize', error: null });
+      sendRpc(workspaceName, 'initialize', {
+        protocolVersion: 1,
+        clientCapabilities: {},
+        clientInfo: { name: 'agent-mom', version: '0.1.1' },
+      });
+    };
 
-    async function ensure() {
-      try {
-        const data = await chatRequest(workspaceName, '/chat/start', {
-          method: 'POST',
-          body: JSON.stringify({ restart: false }),
+    socket.onmessage = (event) => {
+      if (cancelled) return;
+      const message = parseJsonMessage(event.data);
+      appendAcpEvent(workspaceName, 'in', message);
+
+      if (message.method === 'mom/status') {
+        const params = message.params ?? {};
+        setAcpConnectionState(workspaceName, {
+          state: params.state === 'error' ? 'failed' : params.state ?? 'open',
+          phase: params.state === 'ready' ? 'initialize' : params.state,
+          error: params.message ?? null,
         });
-        await mergeStatus(data, false);
-      } catch (error) {
-        mergeAcpStatus(workspaceName, {
-          state: 'failed',
-          phase: 'connect',
-          error: formatError(error),
-          events: [],
-          pending_permissions: [],
-        });
+        return;
       }
-    }
 
-    async function poll() {
-      try {
-        const data = await chatRequest(
-          workspaceName,
-          `/chat/events?after=${encodeURIComponent(String(lastSeq))}`,
-        );
-        await mergeStatus(data, true);
-      } catch (error) {
-        mergeAcpStatus(workspaceName, {
-          state: 'failed',
-          phase: 'poll',
-          error: formatError(error),
-          events: [],
-          pending_permissions: [],
-        }, true);
+      if (message.id != null) {
+        const key = rpcKey(workspaceName, message.id);
+        const method = pendingRpcRef.current[key];
+        delete pendingRpcRef.current[key];
+        if (message.error) {
+          setAcpConnectionState(workspaceName, {
+            state: 'failed',
+            phase: method ?? 'rpc',
+            error: JSON.stringify(message.error),
+          });
+          return;
+        }
+        if (method === 'initialize') {
+          setAcpConnectionState(workspaceName, { state: 'open', phase: 'session/new' });
+          sendRpc(workspaceName, 'session/new', { cwd: '/workspace', mcpServers: [] });
+        } else if (method === 'session/new') {
+          const sessionId = message.result?.sessionId ?? message.result?.session_id;
+          setAcpConnectionState(workspaceName, {
+            state: sessionId ? 'ready' : 'open',
+            phase: 'ready',
+            session_id: sessionId ?? null,
+          });
+        }
       }
-    }
+    };
 
-    ensure();
-    const interval = window.setInterval(poll, 2000);
+    socket.onerror = () => {
+      if (cancelled) return;
+      setAcpConnectionState(workspaceName, {
+        state: 'failed',
+        phase: 'websocket',
+        error: 'Hermes ACP websocket failed.',
+      });
+    };
+
+    socket.onclose = () => {
+      if (cancelled) return;
+      setAcpConnectionState(workspaceName, { state: 'exited', phase: 'closed' });
+    };
+
     return () => {
       cancelled = true;
-      window.clearInterval(interval);
+      if (chatSocketsRef.current[workspaceName] === socket) {
+        delete chatSocketsRef.current[workspaceName];
+      }
+      socket.close();
     };
-  }, [selectedWorkspace?.name]);
+  }, [selectedWorkspace?.name, chatRestartNonce]);
 
   async function request(path, options = {}) {
     setBusy(true);
@@ -350,42 +389,52 @@ function App({ userSession }) {
     }
   }
 
-  async function chatRequest(workspaceName, path, options = {}) {
-    return apiRequest(`/workspaces/${encodeURIComponent(workspaceName)}${path}`, options, userSession);
-  }
-
-  function mergeAcpStatus(workspaceName, data, append = false) {
-    const incomingEvents = data.events ?? [];
+  function appendAcpEvent(workspaceName, direction, message) {
     setAcpByWorkspace((current) => {
       const previous = current[workspaceName] ?? emptyAcpState();
-      const previousMaxSeq = Math.max(0, ...previous.events.map((event) => event.seq ?? 0));
-      const incomingSeqs = incomingEvents.map((event) => event.seq ?? 0);
-      const incomingMinSeq = Math.min(...incomingSeqs);
-      const incomingMaxSeq = Math.max(0, ...incomingSeqs);
-      const restarted =
-        append &&
-        incomingEvents.length > 0 &&
-        incomingMinSeq === 1 &&
-        previousMaxSeq > incomingMaxSeq;
-      const eventMap = new Map();
-      const events = append && !restarted ? [...previous.events, ...incomingEvents] : incomingEvents;
-      events.forEach((event) => eventMap.set(event.seq, event));
+      const seq = (previous.events.at(-1)?.seq ?? 0) + 1;
       return {
         ...current,
         [workspaceName]: {
           ...previous,
-          session_id: data.session_id ?? previous.session_id,
-          state: data.state ?? previous.state,
-          phase: data.phase ?? previous.phase,
-          error: data.error ?? null,
-          capabilities: data.capabilities ?? previous.capabilities,
-          pending_permissions: data.pending_permissions ?? previous.pending_permissions ?? [],
-          events: [...eventMap.values()].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0)),
+          events: [...previous.events, { seq, at: Date.now(), direction, message }],
           startedAt: previous.startedAt ?? Date.now(),
           updatedAt: Date.now(),
         },
       };
     });
+  }
+
+  function setAcpConnectionState(workspaceName, patch) {
+    setAcpByWorkspace((current) => {
+      const previous = current[workspaceName] ?? emptyAcpState();
+      return {
+        ...current,
+        [workspaceName]: {
+          ...previous,
+          ...patch,
+          startedAt: previous.startedAt ?? Date.now(),
+          updatedAt: Date.now(),
+        },
+      };
+    });
+  }
+
+  function sendRpc(workspaceName, method, params = {}) {
+    const id = rpcIdRef.current++;
+    const message = { jsonrpc: '2.0', id, method, params };
+    pendingRpcRef.current[rpcKey(workspaceName, id)] = method;
+    sendAcpMessage(workspaceName, message);
+    return id;
+  }
+
+  function sendAcpMessage(workspaceName, message) {
+    const socket = chatSocketsRef.current[workspaceName];
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      throw new Error('Hermes ACP websocket is not connected.');
+    }
+    socket.send(JSON.stringify(message));
+    appendAcpEvent(workspaceName, 'out', message);
   }
 
   async function refresh() {
@@ -429,27 +478,18 @@ function App({ userSession }) {
     setChatInput('');
     setChatBusy(true);
     try {
-      const data = await chatRequest(selectedWorkspace.name, '/chat/send', {
-        method: 'POST',
-        body: JSON.stringify({ prompt }),
+      sendRpc(selectedWorkspace.name, 'session/prompt', {
+        sessionId: acp.session_id,
+        messageId: `agent-mom-${Date.now()}`,
+        prompt: [{ type: 'text', text: prompt }],
       });
-      mergeAcpStatus(selectedWorkspace.name, data, true);
       await refresh();
     } catch (error) {
-      mergeAcpStatus(selectedWorkspace.name, {
-        state: acp.state,
+      setAcpConnectionState(selectedWorkspace.name, {
+        state: 'failed',
         phase: 'send',
         error: formatError(error),
-        events: [
-          {
-            seq: Date.now(),
-            direction: 'system',
-            kind: 'ui.acp_send_error',
-            payload: { error: formatError(error) },
-          },
-        ],
-        pending_permissions: acp.pending_permissions,
-      }, true);
+      });
     } finally {
       setChatBusy(false);
     }
@@ -459,11 +499,8 @@ function App({ userSession }) {
     if (!selectedWorkspace) return;
     setChatBusy(true);
     try {
-      const data = await chatRequest(selectedWorkspace.name, '/chat/start', {
-        method: 'POST',
-        body: JSON.stringify({ restart: true }),
-      });
-      mergeAcpStatus(selectedWorkspace.name, data, false);
+      chatSocketsRef.current[selectedWorkspace.name]?.close();
+      setChatRestartNonce((value) => value + 1);
     } catch (error) {
       setWorkspaceError(formatError(error));
     } finally {
@@ -475,11 +512,11 @@ function App({ userSession }) {
     if (!selectedWorkspace) return;
     setChatBusy(true);
     try {
-      const data = await chatRequest(selectedWorkspace.name, '/chat/cancel', {
-        method: 'POST',
-        body: JSON.stringify({}),
+      sendAcpMessage(selectedWorkspace.name, {
+        jsonrpc: '2.0',
+        method: 'session/cancel',
+        params: { sessionId: acp.session_id },
       });
-      mergeAcpStatus(selectedWorkspace.name, data, true);
     } catch (error) {
       setWorkspaceError(formatError(error));
     } finally {
@@ -491,11 +528,11 @@ function App({ userSession }) {
     if (!selectedWorkspace) return;
     setChatBusy(true);
     try {
-      const data = await chatRequest(selectedWorkspace.name, '/chat/permission', {
-        method: 'POST',
-        body: JSON.stringify({ request_id: permission.id, option_id: optionId }),
+      sendAcpMessage(selectedWorkspace.name, {
+        jsonrpc: '2.0',
+        id: parseJsonRpcId(permission.id),
+        result: permissionResult(optionId),
       });
-      mergeAcpStatus(selectedWorkspace.name, data, true);
     } catch (error) {
       setWorkspaceError(formatError(error));
     } finally {
@@ -525,13 +562,11 @@ function App({ userSession }) {
       setWorkspaceError(content);
       return;
     }
-    mergeAcpStatus(selectedWorkspace.name, {
+    setAcpConnectionState(selectedWorkspace.name, {
       state: acp.state,
       phase: acp.phase,
       error: content,
-      events: [],
-      pending_permissions: acp.pending_permissions,
-    }, true);
+    });
   }
 
   return (
@@ -568,7 +603,7 @@ function App({ userSession }) {
               </div>
             </section>
           ))}
-          {selectedWorkspace && !selectedChats.length && <p className="emptyList">New chats will appear here.</p>}
+          {selectedWorkspace && !chatGroups.length && <p className="emptyList">New chats will appear here.</p>}
         </div>
 
         <div className="sessionBox">
@@ -621,14 +656,14 @@ function App({ userSession }) {
               <p>Workspace error</p>
               <h2>{workspaceError}</h2>
             </div>
-          ) : transcript.items.length === 0 && !acp.pending_permissions?.length ? (
+          ) : transcript.items.length === 0 && !pendingPermissions.length ? (
             <div className="emptyChat">
               <p>{acp.state === 'ready' ? 'Ready when you are.' : 'Starting Hermes ACP.'}</p>
               <h2>{acp.error || 'Message Hermes through Agent Mom.'}</h2>
             </div>
           ) : (
             <div className="messageList">
-              {acp.pending_permissions?.map((permission) => (
+              {pendingPermissions.map((permission) => (
                 <PermissionCard
                   key={permission.id}
                   permission={permission}
@@ -657,9 +692,9 @@ function App({ userSession }) {
             placeholder={
               selectedWorkspace ? 'Message Hermes in this workspace' : 'Create a workspace first'
             }
-            disabled={!selectedWorkspace || chatBusy || acp.state === 'failed'}
+            disabled={!selectedWorkspace || chatBusy || acp.state !== 'ready'}
           />
-          <button className="sendButton" disabled={!selectedWorkspace || chatBusy || !chatInput.trim() || acp.state === 'failed'}>
+          <button className="sendButton" disabled={!selectedWorkspace || chatBusy || !chatInput.trim() || acp.state !== 'ready'}>
             {chatBusy ? <Sparkles size={20} /> : <Send size={20} />}
           </button>
         </form>
@@ -851,12 +886,50 @@ function friendlyStatus(status) {
 function emptyAcpState() {
   return {
     events: [],
-    pending_permissions: [],
     session_id: null,
     state: 'starting',
     phase: 'idle',
     error: null,
-    capabilities: null,
+  };
+}
+
+function chatWsUrl(workspaceName) {
+  const base = new URL(API_BASE, window.location.href);
+  const protocol = base.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${protocol}//${base.host}${base.pathname.replace(/\/$/, '')}/workspaces/${encodeURIComponent(workspaceName)}/chat/ws`;
+}
+
+function parseJsonMessage(data) {
+  if (typeof data !== 'string') {
+    return { jsonrpc: '2.0', method: 'mom/binary', params: { bytes: data?.byteLength ?? 0 } };
+  }
+  try {
+    return JSON.parse(data);
+  } catch {
+    return { jsonrpc: '2.0', method: 'mom/text', params: { text: data } };
+  }
+}
+
+function rpcKey(workspaceName, id) {
+  return `${workspaceName}:${String(id)}`;
+}
+
+function parseJsonRpcId(id) {
+  const text = String(id);
+  return /^\d+$/.test(text) ? Number(text) : text;
+}
+
+function permissionResult(optionId) {
+  const denied = ['deny', 'deny_always', 'reject', 'cancel', 'cancelled', 'canceled'].includes(optionId);
+  if (denied) {
+    return { outcome: { outcome: 'cancelled' } };
+  }
+  return {
+    outcome: {
+      outcome: 'selected',
+      optionId,
+      option_id: optionId,
+    },
   };
 }
 
