@@ -52,7 +52,7 @@ struct PromptRequest {
 }
 
 #[derive(Debug, Serialize)]
-struct Vm {
+struct LegacyWorkspace {
     workspace_id: String,
     name: String,
     slug: String,
@@ -71,7 +71,7 @@ struct CommandResult {
 
 #[derive(Debug, Serialize)]
 struct ListResponse {
-    vms: Vec<Vm>,
+    vms: Vec<LegacyWorkspace>,
     raw: CommandResult,
 }
 
@@ -95,25 +95,31 @@ pub(crate) fn api_routes() -> Router<Arc<ApiState>> {
     Router::new()
         .route("/api/ui/health", get(health))
         .route("/api/tls-ask", get(tls_ask))
-        .route("/api/vms", get(list_vms).post(create_vm))
-        .route("/api/vms/{name}/start", post(start_vm))
-        .route("/api/vms/{name}/stop", post(stop_vm))
-        .route("/api/vms/{name}/remove", post(remove_vm))
-        .route("/api/vms/{name}/doctor", post(doctor_vm))
-        .route("/api/vms/{name}/exec", post(exec_vm))
-        .route("/api/vms/{name}/codex", post(codex_vm))
-        .route("/api/vms/{name}/hermes", post(hermes_vm))
-        .route("/api/vms/{name}/hermes-ui", post(hermes_ui_vm))
-        .route("/api/vms/{name}/opencode", post(opencode_vm))
-        .route("/api/workspaces/{name}/start", post(start_vm))
-        .route("/api/workspaces/{name}/stop", post(stop_vm))
-        .route("/api/workspaces/{name}/remove", post(remove_vm))
-        .route("/api/workspaces/{name}/doctor", post(doctor_vm))
-        .route("/api/workspaces/{name}/exec", post(exec_vm))
-        .route("/api/workspaces/{name}/codex", post(codex_vm))
-        .route("/api/workspaces/{name}/hermes", post(hermes_vm))
-        .route("/api/workspaces/{name}/hermes-ui", post(hermes_ui_vm))
-        .route("/api/workspaces/{name}/opencode", post(opencode_vm))
+        .route(
+            "/api/vms",
+            get(list_legacy_workspaces).post(create_workspace),
+        )
+        .route("/api/vms/{name}/start", post(start_workspace))
+        .route("/api/vms/{name}/stop", post(stop_workspace))
+        .route("/api/vms/{name}/remove", post(remove_workspace))
+        .route("/api/vms/{name}/doctor", post(doctor_workspace))
+        .route("/api/vms/{name}/exec", post(exec_workspace))
+        .route("/api/vms/{name}/codex", post(codex_workspace))
+        .route("/api/vms/{name}/hermes", post(hermes_workspace))
+        .route("/api/vms/{name}/hermes-ui", post(hermes_ui_workspace))
+        .route("/api/vms/{name}/opencode", post(opencode_workspace))
+        .route("/api/workspaces/{name}/start", post(start_workspace))
+        .route("/api/workspaces/{name}/stop", post(stop_workspace))
+        .route("/api/workspaces/{name}/remove", post(remove_workspace))
+        .route("/api/workspaces/{name}/doctor", post(doctor_workspace))
+        .route("/api/workspaces/{name}/exec", post(exec_workspace))
+        .route("/api/workspaces/{name}/codex", post(codex_workspace))
+        .route("/api/workspaces/{name}/hermes", post(hermes_workspace))
+        .route(
+            "/api/workspaces/{name}/hermes-ui",
+            post(hermes_ui_workspace),
+        )
+        .route("/api/workspaces/{name}/opencode", post(opencode_workspace))
 }
 
 pub(crate) fn serve_assets(app: Router) -> Router {
@@ -165,10 +171,10 @@ fn service_tunnel_registered(domain: &str) -> Result<bool> {
     service_tunnel_hostname_registered(domain)
 }
 
-async fn list_vms(headers: HeaderMap) -> Result<Json<ListResponse>, UiError> {
+async fn list_legacy_workspaces(headers: HeaderMap) -> Result<Json<ListResponse>, UiError> {
     let vms = crate::auth::visible_workspaces(&headers)?
         .into_iter()
-        .map(|workspace| Vm {
+        .map(|workspace| LegacyWorkspace {
             workspace_id: workspace.workspace_id,
             name: workspace.name,
             slug: workspace.slug,
@@ -188,7 +194,7 @@ async fn list_vms(headers: HeaderMap) -> Result<Json<ListResponse>, UiError> {
     }))
 }
 
-async fn create_vm(
+async fn create_workspace(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
     Json(request): Json<CreateRequest>,
@@ -237,7 +243,7 @@ async fn create_vm(
     wait_for_job(&job.id).await
 }
 
-async fn start_vm(
+async fn start_workspace(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
     Path(name): Path<String>,
@@ -246,7 +252,7 @@ async fn start_vm(
     create_and_wait_for_job(&state, &name, "start", json!({})).await
 }
 
-async fn stop_vm(
+async fn stop_workspace(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
     Path(name): Path<String>,
@@ -255,7 +261,7 @@ async fn stop_vm(
     create_and_wait_for_job(&state, &name, "stop", json!({})).await
 }
 
-async fn remove_vm(
+async fn remove_workspace(
     headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Result<Json<CommandResult>, UiError> {
@@ -266,7 +272,7 @@ async fn remove_vm(
     )))
 }
 
-async fn doctor_vm(
+async fn doctor_workspace(
     headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Result<Json<CommandResult>, UiError> {
@@ -277,7 +283,7 @@ async fn doctor_vm(
     )))
 }
 
-async fn exec_vm(
+async fn exec_workspace(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
     Path(name): Path<String>,
@@ -293,7 +299,7 @@ async fn exec_vm(
     .await
 }
 
-async fn codex_vm(
+async fn codex_workspace(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
     Path(name): Path<String>,
@@ -303,7 +309,7 @@ async fn codex_vm(
     create_and_wait_for_job(&state, &name, "codex", json!({ "prompt": request.prompt })).await
 }
 
-async fn hermes_vm(
+async fn hermes_workspace(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
     Path(name): Path<String>,
@@ -313,7 +319,7 @@ async fn hermes_vm(
     create_and_wait_for_job(&state, &name, "hermes", json!({ "args": request.command })).await
 }
 
-async fn opencode_vm(
+async fn opencode_workspace(
     headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Result<Json<CommandResult>, UiError> {
@@ -326,7 +332,7 @@ async fn opencode_vm(
     open_workspace_service(&name, "opencode").await
 }
 
-async fn hermes_ui_vm(
+async fn hermes_ui_workspace(
     headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Result<Json<CommandResult>, UiError> {
