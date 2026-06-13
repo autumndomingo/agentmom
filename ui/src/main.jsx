@@ -326,7 +326,7 @@ function App({ userSession }) {
     appendMessage(selectedVm.name, chatId, { role: 'user', content: prompt });
 
     try {
-      const result = await request(`/vms/${encodeURIComponent(selectedVm.name)}/codex`, {
+      const result = await request(`/workspaces/${encodeURIComponent(selectedVm.name)}/codex`, {
         method: 'POST',
         body: JSON.stringify({ prompt }),
       });
@@ -400,7 +400,7 @@ function App({ userSession }) {
     if (!selectedVm) return;
 
     try {
-      const result = await request(`/vms/${encodeURIComponent(selectedVm.name)}/opencode`, {
+      const result = await request(`/workspaces/${encodeURIComponent(selectedVm.name)}/opencode`, {
         method: 'POST',
       });
       const url = launchUrlFromResult(result);
@@ -417,7 +417,7 @@ function App({ userSession }) {
     if (!selectedVm) return;
 
     try {
-      const result = await request(`/vms/${encodeURIComponent(selectedVm.name)}/hermes-ui`, {
+      const result = await request(`/workspaces/${encodeURIComponent(selectedVm.name)}/hermes-ui`, {
         method: 'POST',
       });
       const url = launchUrlFromResult(result);
