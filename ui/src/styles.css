@@ -162,14 +162,12 @@ input:disabled {
 
 .typedPrompt {
   display: inline-block;
-  width: 30ch;
+  width: auto;
   max-width: 100%;
-  border-right: 0.12em solid #f3eedf;
-  overflow: hidden;
+  border-right: 0;
+  overflow: visible;
   white-space: nowrap;
-  animation:
-    typePrompt 2.7s steps(30, end) both,
-    blinkCursor 900ms step-end infinite;
+  animation: none;
 }
 
 .landingHeader h1 strong {
@@ -703,9 +701,8 @@ input:disabled {
   inset: -28%;
   content: "";
   background:
-    radial-gradient(circle at 16% 74%, rgb(220 121 55 / 22%), transparent 25%),
     radial-gradient(circle at 78% 18%, rgb(70 128 148 / 20%), transparent 28%),
-    radial-gradient(circle at 44% 42%, rgb(225 148 78 / 10%), transparent 30%);
+    radial-gradient(circle at 44% 42%, rgb(255 255 255 / 6%), transparent 30%);
   filter: blur(2px);
   pointer-events: none;
 }
@@ -716,48 +713,23 @@ input:disabled {
   width: min(1080px, 100%);
   min-height: min(640px, calc(100vh - 72px));
   padding: clamp(24px, 3vw, 36px);
-  border: 1px solid rgb(225 148 78 / 28%);
+  border: 1px solid rgb(255 255 255 / 12%);
   border-radius: 12px;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   gap: 24px;
   background:
-    radial-gradient(circle at 100% 0%, rgb(225 148 78 / 12%), transparent 34%),
     radial-gradient(circle at 0% 100%, rgb(70 128 148 / 12%), transparent 34%),
     linear-gradient(rgb(255 255 255 / 3%) 1px, transparent 1px),
     linear-gradient(90deg, rgb(255 255 255 / 3%) 1px, transparent 1px),
     rgb(7 8 9 / 88%);
   background-size:
     auto,
-    auto,
     42px 42px,
     42px 42px,
     auto;
   box-shadow: 0 24px 90px rgb(0 0 0 / 45%);
   overflow: hidden;
-}
-
-.adminPanel::before,
-.adminPanel::after {
-  position: absolute;
-  width: 44px;
-  height: 44px;
-  content: "";
-  pointer-events: none;
-}
-
-.adminPanel::before {
-  top: 22px;
-  left: 22px;
-  border-top: 3px solid #e1944e;
-  border-left: 3px solid #e1944e;
-}
-
-.adminPanel::after {
-  right: 22px;
-  bottom: 22px;
-  border-right: 3px solid #e1944e;
-  border-bottom: 3px solid #e1944e;
 }
 
 .adminTopBar {
@@ -1078,6 +1050,465 @@ input:disabled {
 
   .adminTableHeader,
   .adminUserRow {
-    min-width: 820px;
+    min-width: 0;
+  }
+
+  .adminTableShell {
+    overflow-x: hidden;
+  }
+
+  .adminTableHeader {
+    display: none;
+  }
+
+  .adminUserList {
+    padding: 0;
+    display: grid;
+    gap: 12px;
+  }
+
+  .adminUserRow {
+    min-height: 0;
+    padding: 14px;
+    border: 1px solid rgb(247 243 234 / 11%);
+    border-radius: 14px;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px 12px;
+    background: rgb(255 255 255 / 3%);
+  }
+
+  .adminUserRow strong {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .adminUserRow span:not(.adminStatusDot) {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+
+  .adminUserRow select {
+    grid-column: 1;
+    grid-row: 3;
+    justify-self: start;
+  }
+
+  .adminUserRow .adminStatusDot {
+    grid-column: 2;
+    grid-row: 1;
+    justify-self: end;
+  }
+
+  .adminUserRow button {
+    grid-column: 2;
+    grid-row: 3;
+    width: 108px;
+  }
+}
+
+/* Visual polish layer */
+:root {
+  --bg: #090a0b;
+  --sidebar: #0d0d0f;
+  --panel: #1d1d20;
+  --panel-hover: #29292e;
+  --line: #303039;
+  --text: #f7f3ea;
+  --muted: #b8b2aa;
+  --dim: #817b76;
+  --accent: #e39a4d;
+  --accent-strong: #f0ad61;
+  --mint: #a9d8cf;
+  --surface: rgb(16 17 18 / 82%);
+  --surface-strong: rgb(25 25 28 / 88%);
+  --shadow: 0 28px 90px rgb(0 0 0 / 46%);
+}
+
+body {
+  background:
+    linear-gradient(rgb(255 255 255 / 2.6%) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(255 255 255 / 2.6%) 1px, transparent 1px),
+    linear-gradient(135deg, #090a0b 0%, #101211 44%, #080808 100%);
+  background-size:
+    48px 48px,
+    48px 48px,
+    auto;
+}
+
+.landingPage,
+.adminPage {
+  background:
+    linear-gradient(rgb(255 255 255 / 2.8%) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(255 255 255 / 2.8%) 1px, transparent 1px),
+    linear-gradient(120deg, rgb(227 154 77 / 10%) 0%, transparent 30%),
+    linear-gradient(300deg, rgb(169 216 207 / 10%) 0%, transparent 32%),
+    #090a0b;
+  background-size:
+    52px 52px,
+    52px 52px,
+    auto,
+    auto,
+    auto;
+}
+
+.landingPage::before,
+.adminPage::before {
+  inset: 0;
+  background:
+    linear-gradient(90deg, transparent 0 68%, rgb(227 154 77 / 8%) 68% 69%, transparent 69%),
+    linear-gradient(180deg, transparent 0 78%, rgb(169 216 207 / 7%) 78% 78.5%, transparent 78.5%);
+  filter: none;
+}
+
+.landingPanel,
+.adminPanel {
+  border: 1px solid rgb(247 243 234 / 13%);
+  border-radius: 18px;
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 7%), transparent 42%),
+    linear-gradient(135deg, rgb(227 154 77 / 7%), transparent 34%),
+    rgb(8 9 10 / 86%);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(18px);
+}
+
+.landingPanel {
+  width: min(1080px, 100%);
+  min-height: min(620px, calc(100vh - 80px));
+  grid-template-columns: minmax(0, 1fr) minmax(340px, 440px);
+  grid-template-rows: 1fr;
+  align-items: center;
+  gap: clamp(28px, 5vw, 72px);
+}
+
+.landingPanel::before,
+.landingPanel::after,
+.adminPanel::before,
+.adminPanel::after {
+  width: 58px;
+  height: 58px;
+  opacity: 0.92;
+}
+
+.landingPanel::before,
+.adminPanel::before {
+  border-color: var(--accent);
+}
+
+.landingPanel::after,
+.adminPanel::after {
+  border-color: var(--mint);
+}
+
+.landingHeader h1 {
+  color: var(--text);
+  font-size: clamp(42px, 6vw, 82px);
+  line-height: 0.93;
+}
+
+.landingHeader h1 .terminalPrompt {
+  margin-bottom: 18px;
+  color: var(--mint);
+  font-size: clamp(14px, 1.25vw, 18px);
+}
+
+.landingHeader h1 strong {
+  color: var(--text);
+  text-shadow: 0 1px 0 rgb(255 255 255 / 12%);
+}
+
+.landingForm {
+  max-width: none;
+  justify-self: stretch;
+  padding: 24px;
+  border: 1px solid rgb(247 243 234 / 13%);
+  border-radius: 16px;
+  gap: 18px;
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 6%), transparent),
+    rgb(8 8 10 / 72%);
+  box-shadow: 0 20px 70px rgb(0 0 0 / 32%);
+}
+
+.landingForm input {
+  height: 58px;
+  border: 1px solid rgb(247 243 234 / 17%);
+  border-radius: 12px;
+  padding: 0 18px;
+  background: rgb(4 5 6 / 72%);
+  font-size: 18px;
+  font-weight: 720;
+}
+
+.landingForm input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgb(227 154 77 / 14%);
+}
+
+.landingForm button {
+  height: 52px;
+  border-radius: 12px;
+  background: var(--accent);
+  font-size: 15px;
+  letter-spacing: 0;
+  box-shadow: 0 10px 34px rgb(227 154 77 / 22%);
+}
+
+.landingForm button:hover:not(:disabled) {
+  background: var(--accent-strong);
+}
+
+.appShell {
+  grid-template-columns: 312px minmax(0, 1fr);
+  background:
+    linear-gradient(rgb(255 255 255 / 2.4%) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(255 255 255 / 2.4%) 1px, transparent 1px),
+    linear-gradient(140deg, #090a0b, #111211 52%, #070808);
+  background-size:
+    56px 56px,
+    56px 56px,
+    auto;
+}
+
+.sidebar {
+  padding: 22px 18px;
+  gap: 20px;
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 4%), transparent 32%),
+    rgb(8 8 10 / 91%);
+  border-right: 1px solid rgb(247 243 234 / 12%);
+  box-shadow: 18px 0 50px rgb(0 0 0 / 22%);
+}
+
+.brandRow {
+  gap: 14px;
+}
+
+.brandMark {
+  width: 42px;
+  height: 42px;
+  border-color: rgb(247 243 234 / 18%);
+  border-radius: 12px;
+  background: linear-gradient(145deg, rgb(255 255 255 / 9%), rgb(255 255 255 / 2%));
+  color: var(--text);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 12%);
+}
+
+.brandButton {
+  font-size: 20px;
+  font-weight: 850;
+}
+
+.launchButton,
+.refreshButton,
+.squareButton,
+.adminNavButton,
+.accessCodeControl,
+.adminTableHeader button,
+.adminUserRow button,
+.adminUserRow select {
+  border-color: rgb(247 243 234 / 13%);
+  background: var(--surface-strong);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 7%);
+}
+
+.launchButton {
+  min-height: 54px;
+  border: 1px solid rgb(247 243 234 / 10%);
+  border-radius: 12px;
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 5%), transparent),
+    rgb(24 24 27 / 78%);
+}
+
+.launchButton:hover {
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 8%), transparent),
+    rgb(31 31 35 / 86%);
+}
+
+.chatHistory {
+  padding-top: 4px;
+}
+
+.chatHistory h2,
+.sessionBox h2 {
+  color: rgb(169 216 207 / 74%);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+}
+
+.chatHistoryItem {
+  min-height: 38px;
+  padding: 0 10px;
+  border-radius: 10px;
+}
+
+.chatHistoryItem:hover,
+.chatHistoryItem.active {
+  background: rgb(255 255 255 / 5%);
+}
+
+.sessionBox {
+  padding: 16px;
+  border: 1px solid rgb(247 243 234 / 10%);
+  border-radius: 14px;
+  background: rgb(255 255 255 / 3.5%);
+}
+
+.chatHeader {
+  height: 74px;
+  padding: 0 30px;
+  border-bottom: 1px solid rgb(247 243 234 / 8%);
+  background: rgb(9 10 11 / 42%);
+  backdrop-filter: blur(14px);
+}
+
+.chatHeader h1 {
+  color: var(--text);
+  font-size: 20px;
+  font-weight: 850;
+}
+
+.chatHeader p {
+  color: var(--muted);
+}
+
+.chatBody {
+  background:
+    linear-gradient(180deg, transparent, rgb(227 154 77 / 3%)),
+    transparent;
+}
+
+.emptyChat {
+  width: min(680px, calc(100% - 48px));
+}
+
+.emptyChat p {
+  color: var(--mint);
+  font-size: 18px;
+}
+
+.emptyChat h2 {
+  color: var(--text);
+  font-size: clamp(42px, 5vw, 68px);
+  line-height: 1.02;
+}
+
+.message p {
+  border: 1px solid rgb(247 243 234 / 9%);
+  background: rgb(24 24 27 / 82%);
+  box-shadow: 0 14px 40px rgb(0 0 0 / 22%);
+}
+
+.message.user p {
+  background: rgb(227 154 77 / 16%);
+  border-color: rgb(227 154 77 / 23%);
+}
+
+.composer {
+  min-height: 64px;
+  margin-bottom: 32px;
+  border-color: rgb(247 243 234 / 15%);
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 8%), transparent),
+    rgb(28 28 31 / 88%);
+  box-shadow: 0 22px 70px rgb(0 0 0 / 42%);
+}
+
+.composer .sendButton {
+  background: var(--accent);
+}
+
+.composer .sendButton:hover:not(:disabled) {
+  background: var(--accent-strong);
+}
+
+.adminPanel {
+  width: min(1180px, 100%);
+}
+
+.adminTopBar {
+  justify-content: flex-end;
+}
+
+.adminTopActions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.accessCodeControl,
+.adminNavButton {
+  border-radius: 12px;
+}
+
+.accessCodeControl code {
+  color: var(--text);
+}
+
+.staticAccessCode {
+  background: rgb(169 216 207 / 10%);
+}
+
+.adminTableShell {
+  border-color: rgb(247 243 234 / 12%);
+  border-radius: 16px;
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 5%), transparent),
+    rgb(7 8 9 / 72%);
+}
+
+.adminTableHeader {
+  border: 0;
+  background: rgb(255 255 255 / 5%);
+  color: var(--text);
+}
+
+.adminUserRow {
+  border-bottom-color: rgb(247 243 234 / 10%);
+}
+
+.adminStatusDot.active {
+  background: #66d88a;
+  box-shadow: 0 0 0 4px rgb(102 216 138 / 12%);
+}
+
+.adminStatusDot.inactive {
+  background: #e45f65;
+  box-shadow: 0 0 0 4px rgb(228 95 101 / 12%);
+}
+
+.adminStatusDot.idle,
+.adminStatusDot.stagnant {
+  background: #e3c268;
+  box-shadow: 0 0 0 4px rgb(227 194 104 / 12%);
+}
+
+@media (max-width: 860px) {
+  .landingPanel {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto;
+  }
+}
+
+@media (max-width: 560px) {
+  .landingPanel {
+    padding: 24px;
+  }
+
+  .landingHeader h1 {
+    font-size: clamp(36px, 15vw, 56px);
+  }
+
+  .landingForm {
+    padding: 16px;
+  }
+
+  .appShell {
+    grid-template-columns: 1fr;
+  }
+
+  .chatHeader {
+    padding: 14px;
   }
 }
