@@ -14,6 +14,8 @@ path = "src/bin/mom-ui.rs"
 [dependencies]
 anyhow = "1.0"
 axum = "0.8"
+chrono = "0.4"
+chrono-tz = "0.10"
 clap = { version = "4.5", features = ["derive", "env"] }
 dirs = "6.0"
 microsandbox = { git = "https://github.com/superradcompany/microsandbox", rev = "8059c966c586685271fbf2781b5d6dbb112ace36", features = ["ssh"] }
