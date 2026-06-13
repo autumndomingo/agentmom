@@ -247,7 +247,7 @@ struct LegacyMomConfig {
     hermes_model: String,
     #[serde(default)]
     snapshot_name: Option<String>,
-    #[serde(default = "default_credential_mode")]
+    #[serde(default = "default_legacy_credential_mode")]
     credential_mode: String,
     #[serde(default)]
     credential_proxy_url: Option<String>,
@@ -353,6 +353,10 @@ fn default_schema_version() -> u32 {
 }
 
 fn default_credential_mode() -> String {
+    "openrouter-proxy".to_string()
+}
+
+fn default_legacy_credential_mode() -> String {
     "vm-auth-json".to_string()
 }
 
@@ -420,6 +424,36 @@ mod tests {
         );
         assert_eq!(config.model(), "openai/gpt-5.5");
         assert_eq!(config.auth_secret().unwrap(), "dev-secret");
+    }
+
+    #[test]
+    fn structured_config_defaults_to_openrouter_proxy() {
+        let config = parse_config(
+            r#"{
+              "schema_version": 1,
+              "runtime": { "snapshot_name": "mom-base-default" }
+            }"#,
+        );
+
+        assert_eq!(
+            config.credential_mode().unwrap(),
+            CredentialMode::OpenRouterProxy
+        );
+    }
+
+    #[test]
+    fn legacy_flat_config_defaults_to_vm_auth_json() {
+        let config = parse_config(
+            r#"{
+              "snapshot_name": "mom-base-legacy-default",
+              "codex_auth_path": "/tmp/codex-auth.json"
+            }"#,
+        );
+
+        assert_eq!(
+            config.credential_mode().unwrap(),
+            CredentialMode::VmAuthJson
+        );
     }
 
     #[test]

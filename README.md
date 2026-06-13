@@ -161,6 +161,7 @@ typed `services.agentmom.*` options.
 Required assumptions:
 
 - `credentials.mode` is either `vm-auth-json` or `openrouter-proxy`.
+- New structured configs default to `openrouter-proxy` when the mode is omitted; legacy flat configs keep their old `vm-auth-json` default.
 - `vm-auth-json` requires `credentials.codex_auth_path` to exist and contain Codex CLI OAuth tokens. This copies credentials into the VM.
 - `openrouter-proxy` requires `credentials.proxy_url` and `credentials.proxy_ca_path`. It writes proxy env into the VM and expects iron-proxy to inject the OpenRouter API key on the host.
 - `guest.hermes_profile` is the guest profile name to create.
