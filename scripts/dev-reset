@@ -9,26 +9,44 @@ local_state_dir="${repo_root}/.state"
 
 utm_instance="${MOM_DEV_UTM_INSTANCE:-dev}"
 case "${utm_instance}" in
-  ""|*[!A-Za-z0-9._-]*)
-    echo "MOM_DEV_UTM_INSTANCE must use only letters, numbers, dot, underscore, or dash" >&2
+  ""|*[!a-z0-9-]*|-*|*-)
+    echo "MOM_DEV_UTM_INSTANCE must use lowercase letters, numbers, and internal dashes only" >&2
     exit 1
     ;;
 esac
 
 if [ "${utm_instance}" = "dev" ]; then
   default_utm_name="AgentMom-Dev"
+  default_utm_guest_hostname="agentmom-dev-utm"
   default_utm_guest_dir="/home/mom/agentmom"
   default_utm_microvm_state_dir="/home/mom/.local/state/agentmom/microvms"
   default_utm_state_dir="${repo_root}/.state/dev-utm"
 else
   default_utm_name="AgentMom-${utm_instance}"
+  default_utm_guest_hostname="agentmom-${utm_instance}"
   default_utm_guest_dir="/home/mom/agentmom-${utm_instance}"
   default_utm_microvm_state_dir="/home/mom/.local/state/agentmom-${utm_instance}/microvms"
   default_utm_state_dir="${repo_root}/.state/dev-utm-${utm_instance}"
 fi
 
+if [ "${#default_utm_guest_hostname}" -gt 63 ]; then
+  echo "MOM_DEV_UTM_INSTANCE is too long for a guest hostname" >&2
+  exit 1
+fi
+
 utm_name="${MOM_DEV_UTM_NAME:-${default_utm_name}}"
-utm_guest_host="${MOM_DEV_UTM_HOST:-agentmom-dev-utm.local}"
+utm_guest_hostname="${MOM_DEV_UTM_GUEST_HOSTNAME:-${default_utm_guest_hostname}}"
+case "${utm_guest_hostname}" in
+  ""|*[!a-z0-9-]*|-*|*-)
+    echo "MOM_DEV_UTM_GUEST_HOSTNAME must use lowercase letters, numbers, and internal dashes only" >&2
+    exit 1
+    ;;
+esac
+if [ "${#utm_guest_hostname}" -gt 63 ]; then
+  echo "MOM_DEV_UTM_GUEST_HOSTNAME is too long" >&2
+  exit 1
+fi
+utm_guest_host="${MOM_DEV_UTM_HOST:-${utm_guest_hostname}.local}"
 utm_guest_user="${MOM_DEV_UTM_USER:-mom}"
 utm_guest_dir="${MOM_DEV_UTM_GUEST_DIR:-${default_utm_guest_dir}}"
 utm_microvm_state_dir="${MOM_DEV_UTM_MICROVM_STATE_DIR:-${default_utm_microvm_state_dir}}"

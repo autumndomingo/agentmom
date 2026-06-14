@@ -61,6 +61,39 @@
             1080
           ];
 
+          systemd.services.agentmom-dev-utm-hostname = {
+            description = "Apply Agent Mom dev UTM hostname";
+            before = [
+              "avahi-daemon.service"
+              "sshd.service"
+            ];
+            wantedBy = [ "multi-user.target" ];
+            serviceConfig.Type = "oneshot";
+            script = ''
+              hostname_arg=""
+              for param in $(cat /proc/cmdline); do
+                case "$param" in
+                  agentmom_dev_utm_hostname=*)
+                    hostname_arg="''${param#agentmom_dev_utm_hostname=}"
+                    ;;
+                esac
+              done
+
+              [ -n "$hostname_arg" ] || exit 0
+              case "$hostname_arg" in
+                *[!a-z0-9-]* | -* | *-)
+                  echo "Invalid Agent Mom dev UTM hostname: $hostname_arg" >&2
+                  exit 1
+                  ;;
+              esac
+              if [ "''${#hostname_arg}" -gt 63 ]; then
+                echo "Agent Mom dev UTM hostname is too long: $hostname_arg" >&2
+                exit 1
+              fi
+              printf '%s\n' "$hostname_arg" >/proc/sys/kernel/hostname
+            '';
+          };
+
           services.openssh = {
             enable = true;
             settings = {
@@ -72,6 +105,7 @@
 
           services.avahi = {
             enable = true;
+            hostName = "";
             nssmdns4 = true;
             publish = {
               enable = true;

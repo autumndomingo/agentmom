@@ -6,28 +6,46 @@ cd "${repo_root}"
 
 instance="${MOM_DEV_UTM_INSTANCE:-dev}"
 case "${instance}" in
-  ""|*[!A-Za-z0-9._-]*)
-    echo "MOM_DEV_UTM_INSTANCE must use only letters, numbers, dot, underscore, or dash" >&2
+  ""|*[!a-z0-9-]*|-*|*-)
+    echo "MOM_DEV_UTM_INSTANCE must use lowercase letters, numbers, and internal dashes only" >&2
     exit 1
     ;;
 esac
 
 if [ "${instance}" = "dev" ]; then
   default_name="AgentMom-Dev"
+  default_guest_hostname="agentmom-dev-utm"
   default_state_dir="${repo_root}/.state/dev-utm"
   default_log_dir="${repo_root}/.state/logs"
   default_guest_dir="/home/mom/agentmom"
   default_guest_microvm_state_dir="/home/mom/.local/state/agentmom/microvms"
 else
   default_name="AgentMom-${instance}"
+  default_guest_hostname="agentmom-${instance}"
   default_state_dir="${repo_root}/.state/dev-utm-${instance}"
   default_log_dir="${repo_root}/.state/logs/dev-utm-${instance}"
   default_guest_dir="/home/mom/agentmom-${instance}"
   default_guest_microvm_state_dir="/home/mom/.local/state/agentmom-${instance}/microvms"
 fi
 
+if [ "${#default_guest_hostname}" -gt 63 ]; then
+  echo "MOM_DEV_UTM_INSTANCE is too long for a guest hostname" >&2
+  exit 1
+fi
+
 name="${MOM_DEV_UTM_NAME:-${default_name}}"
-guest_host="${MOM_DEV_UTM_HOST:-agentmom-dev-utm.local}"
+guest_hostname="${MOM_DEV_UTM_GUEST_HOSTNAME:-${default_guest_hostname}}"
+case "${guest_hostname}" in
+  ""|*[!a-z0-9-]*|-*|*-)
+    echo "MOM_DEV_UTM_GUEST_HOSTNAME must use lowercase letters, numbers, and internal dashes only" >&2
+    exit 1
+    ;;
+esac
+if [ "${#guest_hostname}" -gt 63 ]; then
+  echo "MOM_DEV_UTM_GUEST_HOSTNAME is too long" >&2
+  exit 1
+fi
+guest_host="${MOM_DEV_UTM_HOST:-${guest_hostname}.local}"
 guest_user="${MOM_DEV_UTM_USER:-mom}"
 guest_dir="${MOM_DEV_UTM_GUEST_DIR:-${default_guest_dir}}"
 guest_microvm_state_dir="${MOM_DEV_UTM_MICROVM_STATE_DIR:-${default_guest_microvm_state_dir}}"
@@ -49,6 +67,7 @@ if [ "${MOM_DEV_UTM_SHOW_CONFIG:-0}" = "1" ]; then
   cat <<EOF_CONFIG
 instance=${instance}
 name=${name}
+guest_hostname=${guest_hostname}
 guest_host=${guest_host}
 guest_dir=${guest_dir}
 guest_microvm_state_dir=${guest_microvm_state_dir}
@@ -173,6 +192,11 @@ build_image() {
   printf '%s\n' "${toplevel}"
 }
 
+bundle_has_expected_hostname() {
+  [ -f "${bundle}/config.plist" ] || return 1
+  grep -q "agentmom_dev_utm_hostname=${guest_hostname}" "${bundle}/config.plist"
+}
+
 write_bundle() {
   local image="$1"
   local toplevel="$2"
@@ -192,6 +216,7 @@ write_bundle() {
   drive_id="$(uuidgen)"
   mac="$(printf '16:%02X:%02X:%02X:%02X:%02X\n' $((RANDOM % 256)) $((RANDOM % 256)) $((RANDOM % 256)) $((RANDOM % 256)) $((RANDOM % 256)))"
   boot_params="$(cat "${toplevel}/kernel-params")"
+  boot_params="${boot_params} agentmom_dev_utm_hostname=${guest_hostname}"
   mkdir -p "${data_dir}"
   copy_image "${image}" "${disk}"
   cp "${toplevel}/kernel" "${kernel_image}"
@@ -335,7 +360,7 @@ start_vm() {
 }
 
 wait_for_ssh() {
-  local ip ssh_log
+  local actual_hostname ip ssh_log
   ssh_log="${state_dir}/ssh-wait.log"
   printf '  %-24s' "waiting for SSH..."
   for _ in $(seq 1 180); do
@@ -343,9 +368,39 @@ wait_for_ssh() {
     if [ -n "${ip}" ]; then
       guest_host="${ip}"
     fi
-    if ssh_guest true >"${ssh_log}" 2>&1; then
+    if actual_hostname="$(ssh_guest hostname 2>"${ssh_log}")"; then
+      if [ "${actual_hostname}" != "${guest_hostname}" ]; then
+        printf 'failed\n\n'
+        cat >&2 <<EOF_HOSTNAME
+${name} answered SSH as hostname '${actual_hostname}', expected '${guest_hostname}'.
+
+This usually means mDNS resolved ${guest_host} to the wrong UTM VM, or the VM
+was created before instance-specific hostnames were supported. Stop the other
+Agent Mom UTM VMs, or rebuild this one once:
+
+  MOM_DEV_UTM_INSTANCE=${instance} MOM_DEV_UTM_RESET=1 just dev-utm
+
+EOF_HOSTNAME
+        exit 1
+      fi
       printf 'ok\n'
       return 0
+    fi
+    if grep -q "REMOTE HOST IDENTIFICATION HAS CHANGED" "${ssh_log}"; then
+      printf 'failed\n\n'
+      cat >&2 <<EOF_KNOWN_HOST
+${name} reached a different SSH host key at ${guest_host}.
+
+This usually means mDNS resolved to another Agent Mom UTM VM. Stop the other
+Agent Mom UTM VMs and retry. If this VM was deliberately rebuilt, remove the
+instance known_hosts file and retry:
+
+  rm -f '${state_dir}/known_hosts'
+  MOM_DEV_UTM_INSTANCE=${instance} just dev-utm
+
+EOF_KNOWN_HOST
+      cat "${ssh_log}" >&2 || true
+      exit 1
     fi
     if grep -q "Permission denied" "${ssh_log}"; then
       printf 'failed\n\n'
@@ -394,7 +449,10 @@ main() {
   local image toplevel api_port worker_port
 
   select_ssh_key
-  if [ ! -e "${disk}" ] || [ "${MOM_DEV_UTM_REBUILD:-0}" = "1" ] || [ "${MOM_DEV_UTM_RESET:-0}" = "1" ]; then
+  if [ ! -e "${disk}" ] ||
+    [ "${MOM_DEV_UTM_REBUILD:-0}" = "1" ] ||
+    [ "${MOM_DEV_UTM_RESET:-0}" = "1" ] ||
+    { [ "${instance}" != "dev" ] && ! bundle_has_expected_hostname; }; then
     rm -f "${state_dir}/known_hosts"
     run_step "building guest image" "${log_dir}/dev-utm-build.log" build_image
     image="$(tail -n 2 "${log_dir}/dev-utm-build.log" | head -n 1)"

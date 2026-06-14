@@ -17,5 +17,6 @@ MOM_DEV_UTM_INSTANCE=<name> just dev-utm
 ```
 
 The default `just dev-utm` uses `AgentMom-Dev`. Named instances use separate UTM
-VMs, host state/log dirs, guest checkout dirs, and guest microVM state. List them
-with `just dev-utm-list`.
+VMs, hostnames, host state/log dirs, guest checkout dirs, and guest microVM
+state. Instance names must use lowercase letters, numbers, and internal dashes.
+List them with `just dev-utm-list`.
