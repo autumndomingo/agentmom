@@ -147,7 +147,7 @@ The flake exports `nixosModules.agentmom`.
     nodeId = "mom-1";
     logFormat = "json";
     stateDir = "/var/lib/agentmom";
-    cutoverWipeMarker = "microvm-cutover-v2";
+    cutoverWipeMarker = "microvm-fast-start-cutover-v1";
 
     microvm = {
       enable = true;
@@ -249,3 +249,20 @@ just real-fleet-test-prod-mutating
 Use the intended production admin email for `AGENTMOM_REAL_ADMIN_EMAIL`. On a
 freshly wiped catalog, that login will consume the first-admin bootstrap path;
 do not leave it at a test address.
+
+## Production Cutovers
+
+`cutoverWipeMarker` is intentionally destructive and one-shot. Bump it to a new
+marker name for each planned wipe; reusing a marker that already exists in
+`stateDir` is a no-op. The service archives `fleet.db`, legacy microsandbox
+state, and microVM machine/workspace directories before the API or worker starts.
+
+Rolling back after this branch has started workspaces is not just a NixOS
+generation switch. Generated machine directories are durable and may still
+contain fast-start definitions that use the read-only host `/nix/store` virtiofs
+share. If that path is the rollback reason, stop workspace VMs and archive or
+regenerate those machine directories as part of the rollback.
+
+Fast-start guests can read the host Nix store through a read-only virtiofs
+mount. Keep secrets in runtime secret files such as agenix outputs, never baked
+into derivations or other Nix store paths that workspace guests should not see.

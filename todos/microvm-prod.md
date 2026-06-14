@@ -44,7 +44,7 @@ Keep the first production runtime narrow: Cloud Hypervisor, `/24` guest network,
 - Remote backup/restore now routes by assigned node before looking at local workspace directories.
 - Empty catalogs require the configured bootstrap admin code for first-admin creation.
 - Multi-worker API deployments use `workerNodeTokenFiles` so worker bearer tokens are node-scoped.
-- Prod hosts use `cutoverWipeMarker = "microvm-cutover-v2"` to move old catalog/runtime state aside once under systemd before startup.
+- Prod hosts use a fresh `cutoverWipeMarker` for each destructive cutover; reusing a marker that already exists in `stateDir` is a no-op.
 
 ## Second Review Before Deploy
 
@@ -77,6 +77,7 @@ Keep the first production runtime narrow: Cloud Hypervisor, `/24` guest network,
 - [x] Validate locally and on prod-like hosts without landing to `master`.
 - [x] Run another focused subagent review before any deploy decision.
 - [x] Apply third-review deploy fixes and rerun coherent all-role validation after rolling a new pin.
+- [x] Apply fourth-review predeploy fixes: fresh cutover marker, rollback/read-boundary docs, and workspace-source guard tests.
 
 ## Fast Start Notes
 
@@ -97,3 +98,4 @@ Keep the first production runtime narrow: Cloud Hypervisor, `/24` guest network,
 - Botched `storecheck-*` attempts briefly tripped the monitor's recent-failed-job threshold; after the 900s window aged out, `agentmom-monitor-check` returned to `monitor ok` with no failed units.
 - Third focused review found one deploy blocker: generated VM refresh rewrote `spec.json` in place. The branch now uses atomic same-directory writes for generated inputs, preflights workspace source paths before refresh, and adds systemd/journal diagnostics for start failures.
 - Fixed commit `1d5dd0d` was pinned by configs test commit `c5737a6` and switched on `mom-ctrl`, `mom-1`, and `mom-2`. Local validation passed, all three NixOS toplevels built, read-only real-fleet passed on both workers, mutating real-fleet passed on `mom-1` in 95.39s and `mom-2` in 100.92s, and final sweeps showed ready API, monitor OK, active worker services, no failed units, and no leftover microVM units.
+- Fourth focused review found no Rust or Nix packaging blockers. Ops review caught that prod still used the already-consumed `microvm-cutover-v2` marker, so the next destructive deploy would not wipe state. Configs now use `microvm-fast-start-cutover-v1`, and README documents the one-shot marker behavior, rollback cleanup for durable generated machine definitions, and the guest-readable host Nix store boundary.

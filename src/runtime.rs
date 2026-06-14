@@ -1218,6 +1218,33 @@ async fn command_exists(name: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn test_spec(workspace_dir_name: String, workspace_dir: &Path) -> MicrovmSpec {
+        MicrovmSpec {
+            name: "mom-test".to_string(),
+            workspace_name: "test".to_string(),
+            workspace_dir_name,
+            cpus: 1,
+            memory_mib: 512,
+            workspace_quota_mib: 1024,
+            machine_index: MIN_MACHINE_INDEX,
+            guest_ip: "192.168.83.10".to_string(),
+            host_ip: "192.168.83.1".to_string(),
+            host_bridge: "agentmom0".to_string(),
+            tap: "amvm10".to_string(),
+            mac: "02:00:00:83:00:0a".to_string(),
+            workspace_dir: workspace_dir.display().to_string(),
+            hermes_profile: "main".to_string(),
+            hermes_model: "gpt-5.5".to_string(),
+            credential_mode: "openrouter-proxy".to_string(),
+            credential_proxy_url: Some("http://192.168.83.1:1080".to_string()),
+            credential_proxy_ca_file: Some("agentmom-proxy.crt".to_string()),
+            nixpkgs_url: "path:/nix/store/nixpkgs-source".to_string(),
+            microvm_input_url: "path:/nix/store/microvm-source".to_string(),
+            ssh_public_key: "ssh-ed25519 test".to_string(),
+            labels: HashMap::new(),
+        }
+    }
+
     #[test]
     fn generated_file_write_replaces_content_atomically() -> Result<()> {
         let dir = tempfile::tempdir()?;
@@ -1250,6 +1277,58 @@ mod tests {
         remove_file_if_exists(&path)?;
 
         assert!(!path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_source_validation_refuses_changed_source_path() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let current = dir.path().join("current");
+        let stored = dir.path().join("stored");
+        fs::create_dir_all(&current)?;
+        fs::create_dir_all(&stored)?;
+        let spec = test_spec(current.display().to_string(), &stored);
+
+        let error = validate_workspace_source("mom-test", &spec).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("refusing to rewrite workspace source for VM mom-test")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_source_validation_refuses_missing_source() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let missing = dir.path().join("missing");
+        let spec = test_spec(missing.display().to_string(), &missing);
+
+        let error = validate_workspace_source("mom-test", &spec).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("workspace source for VM mom-test is missing")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_source_validation_refuses_file_source() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let file = dir.path().join("workspace-file");
+        fs::write(&file, b"not a directory")?;
+        let spec = test_spec(file.display().to_string(), &file);
+
+        let error = validate_workspace_source("mom-test", &spec).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("workspace source for VM mom-test is not a directory")
+        );
         Ok(())
     }
 }
