@@ -92,44 +92,6 @@ impl GuestVm {
         run_ssh_shell(&self.name, &spec, script, None).await
     }
 
-    pub(crate) async fn write_file(&self, path: &str, bytes: &[u8], mode: u32) -> Result<()> {
-        let spec = load_microvm_spec(&self.name)?;
-        wait_for_ssh(self, &spec, Duration::from_secs(90)).await?;
-        let parent = guest_parent_dir(path)?;
-        let script = format!(
-            "set -eu\ninstall -d -m 0755 {parent}\ncat > {path}\nchmod {mode:o} {path}\n",
-            parent = shell_quote(&parent),
-            path = shell_quote(path),
-            mode = mode
-        );
-        let output = run_ssh_shell(&self.name, &spec, &script, Some(bytes)).await?;
-        if !output.ok {
-            bail!(
-                "write {} in VM {} exited with {}\n{}",
-                path,
-                self.name,
-                output.code,
-                output.stderr
-            );
-        }
-        Ok(())
-    }
-
-    pub(crate) async fn mkdir(&self, path: &str, mode: u32) -> Result<()> {
-        let script = format!("install -d -m {mode:o} {}", shell_quote(path), mode = mode);
-        let output = self.shell(&script).await?;
-        if !output.ok {
-            bail!(
-                "mkdir {} in VM {} exited with {}\n{}",
-                path,
-                self.name,
-                output.code,
-                output.stderr
-            );
-        }
-        Ok(())
-    }
-
     pub(crate) async fn spawn_shell(&self, script: &str) -> Result<tokio::process::Child> {
         let spec = load_microvm_spec(&self.name)?;
         wait_for_ssh(self, &spec, Duration::from_secs(90)).await?;
@@ -152,6 +114,17 @@ impl GuestVm {
         host_port: u16,
         guest_port: u16,
     ) -> Result<tokio::process::Child> {
+        self.forward_tcp_to(bind_host, host_port, "127.0.0.1", guest_port)
+            .await
+    }
+
+    pub(crate) async fn forward_tcp_to(
+        &self,
+        bind_host: &str,
+        host_port: u16,
+        target_host: &str,
+        target_port: u16,
+    ) -> Result<tokio::process::Child> {
         let spec = load_microvm_spec(&self.name)?;
         wait_for_ssh(self, &spec, Duration::from_secs(90)).await?;
         let mut command = TokioCommand::new("ssh");
@@ -162,7 +135,7 @@ impl GuestVm {
                 "-o",
                 "ExitOnForwardFailure=yes",
                 "-L",
-                &format!("{bind_host}:{host_port}:127.0.0.1:{guest_port}"),
+                &format!("{bind_host}:{host_port}:{target_host}:{target_port}"),
             ])
             .arg(ssh_destination(&spec))
             .stdin(Stdio::null())
@@ -199,7 +172,6 @@ struct MicrovmSpec {
     workspace_dir: String,
     hermes_profile: String,
     hermes_model: String,
-    credential_mode: String,
     credential_proxy_url: Option<String>,
     credential_proxy_ca_file: Option<String>,
     nixpkgs_url: String,
@@ -374,64 +346,6 @@ pub(crate) async fn vm_status(name: &str) -> Result<VmStatus> {
     })
 }
 
-pub(crate) async fn apply_guest_auth_config(vm: &GuestVm, config: &MomConfig) -> Result<()> {
-    println!("writing VM auth/config from host config");
-    config.validate_for_guest_config()?;
-    let hermes_home = format!("{GUEST_HERMES_HOME}/{}", config.hermes_profile());
-
-    vm.mkdir("/workspace", 0o755).await?;
-    vm.mkdir(GUEST_HERMES_HOME, 0o700).await?;
-    vm.mkdir(&hermes_home, 0o700).await?;
-    vm.mkdir(&format!("{hermes_home}/home"), 0o700).await?;
-    vm.write_file(
-        &format!("{hermes_home}/config.yaml"),
-        hermes_config_yaml(config).as_bytes(),
-        0o600,
-    )
-    .await?;
-    vm.write_file(
-        &format!("{hermes_home}/SOUL.md"),
-        hermes_soul_md().as_bytes(),
-        0o600,
-    )
-    .await?;
-    if let Some(proxy_url) = config.credential_proxy_url() {
-        vm.write_file(
-            "/etc/profile.d/agentmom-proxy.sh",
-            proxy_env_sh(proxy_url).as_bytes(),
-            0o644,
-        )
-        .await?;
-    }
-    if let Some(ca_path) = &config.credentials.proxy_ca_path {
-        let ca_path = resolve_required_file(ca_path, "credentials.proxy_ca_path")?;
-        let ca = fs::read(&ca_path).with_context(|| format!("read {}", ca_path.display()))?;
-        vm.write_file(
-            "/usr/local/share/ca-certificates/agentmom-proxy.crt",
-            &ca,
-            0o644,
-        )
-        .await?;
-    }
-
-    let hermes_home_q = shell_quote(&hermes_home);
-    checked_shell(
-        vm,
-        &format!(
-            r#"
-set -eu
-rm -f /root/.hermes/auth.json /root/.hermes-agent/*/auth.json
-chmod 700 /root/.hermes-agent {hermes_home_q}
-chmod 600 {hermes_home_q}/config.yaml {hermes_home_q}/SOUL.md
-if [ -f /usr/local/share/ca-certificates/agentmom-proxy.crt ]; then update-ca-certificates || true; fi
-ln -sfn {hermes_home_q} /root/.hermes
-sync
-"#
-        ),
-    )
-    .await
-}
-
 pub(crate) async fn ensure_runtime(config: &MomConfig) -> Result<()> {
     ensure_microvm_host_ready(config).await
 }
@@ -487,18 +401,68 @@ pub(crate) async fn run_guest_command(vm: &GuestVm, command: Vec<String>) -> Res
 }
 
 pub(crate) async fn capture_guest_command(vm: &GuestVm, command: Vec<String>) -> Result<Value> {
-    let command = command
-        .iter()
-        .map(|part| shell_quote(part))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let output = vm.shell(&format!("exec {command}")).await?;
+    let script = guest_command_script(&command)?;
+    let output = vm.shell(&script).await?;
     Ok(json!({
         "ok": output.ok,
         "code": output.code,
         "stdout": output.stdout,
         "stderr": output.stderr
     }))
+}
+
+fn guest_command_script(command: &[String]) -> Result<String> {
+    if command.is_empty() {
+        bail!("guest command cannot be empty");
+    }
+    let command_text = quoted_command(command);
+    let fallback_command = hermes_wrapper_fallback_command(command);
+    let runner = shell_quote(GUEST_AGENTMOM_RUN);
+    let hermes = shell_quote(GUEST_AGENTMOM_HERMES);
+    let wrapper_fallback = match fallback_command.as_deref() {
+        Some(fallback) => format!(
+            "\
+  if [ -x {hermes} ]; then
+    exec {runner} -- {command_text}
+  fi
+  exec {runner} -- {fallback}
+",
+        ),
+        None => format!("  exec {runner} -- {command_text}\n"),
+    };
+    let fallback_exec = fallback_command.as_deref().unwrap_or(&command_text);
+    Ok(format!(
+        "\
+set -e
+if [ -x {runner} ]; then
+{wrapper_fallback}fi
+if [ -x {hermes} ]; then
+  exec {command_text}
+fi
+if [ -f /etc/profile.d/mom.sh ]; then . /etc/profile.d/mom.sh; fi
+if [ -f /etc/profile.d/agentmom-proxy.sh ]; then . /etc/profile.d/agentmom-proxy.sh; fi
+export HOME=/root
+cd /workspace
+exec {fallback_exec}
+"
+    ))
+}
+
+fn quoted_command(command: &[String]) -> String {
+    command
+        .iter()
+        .map(|part| shell_quote(part))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn hermes_wrapper_fallback_command(command: &[String]) -> Option<String> {
+    if command.first().map(String::as_str) != Some(GUEST_AGENTMOM_HERMES) {
+        return None;
+    }
+    let mut fallback = vec!["hermes".to_string()];
+    fallback.extend(command.iter().skip(1).cloned());
+    Some(quoted_command(&fallback))
 }
 
 pub(crate) fn workspace_dir_path(workspace_dir_name: &str) -> Result<PathBuf> {
@@ -723,7 +687,6 @@ fn microvm_spec(
         workspace_dir: workspace_dir.display().to_string(),
         hermes_profile: String::new(),
         hermes_model: String::new(),
-        credential_mode: String::new(),
         credential_proxy_url: None,
         credential_proxy_ca_file: None,
         nixpkgs_url: String::new(),
@@ -757,11 +720,6 @@ fn apply_current_microvm_config(spec: &mut MicrovmSpec, config: &MomConfig) -> R
         .to_string();
     spec.hermes_profile = config.hermes_profile().to_string();
     spec.hermes_model = config.model().to_string();
-    spec.credential_mode = if config.credential_proxy_url().is_some() {
-        "openrouter-proxy".to_string()
-    } else {
-        "openai-codex".to_string()
-    };
     spec.credential_proxy_url = config.credential_proxy_url().map(ToString::to_string);
     spec.credential_proxy_ca_file = config
         .credentials
@@ -1336,13 +1294,6 @@ fn ssh_destination(spec: &MicrovmSpec) -> String {
     format!("root@{}", spec.guest_ip)
 }
 
-fn guest_parent_dir(path: &str) -> Result<String> {
-    path.rsplit_once('/')
-        .map(|(parent, _)| if parent.is_empty() { "/" } else { parent })
-        .map(ToString::to_string)
-        .ok_or_else(|| anyhow!("guest path has no parent: {path}"))
-}
-
 async fn systemctl(args: &[&str]) -> Result<()> {
     if !command_exists("systemctl").await {
         bail!("systemctl is required for the microvm.nix runtime");
@@ -1413,7 +1364,6 @@ mod tests {
             workspace_dir: workspace_dir.display().to_string(),
             hermes_profile: "main".to_string(),
             hermes_model: "gpt-5.5".to_string(),
-            credential_mode: "openrouter-proxy".to_string(),
             credential_proxy_url: Some("http://192.168.83.1:1080".to_string()),
             credential_proxy_ca_file: Some("agentmom-proxy.crt".to_string()),
             nixpkgs_url: "path:/nix/store/nixpkgs-source".to_string(),
@@ -1524,29 +1474,66 @@ mod tests {
     }
 
     #[test]
-    fn microvm_template_sets_top_level_hermes_model() {
-        let template = microvm_workspace_nix();
+    fn guest_command_script_prefers_launcher_and_has_profile_fallback() -> Result<()> {
+        let script = guest_command_script(&["printf".to_string(), "hello world".to_string()])?;
 
-        assert!(template.contains("default_provider: openrouter\n    model: ${spec.hermes_model}"));
+        assert!(script.contains("/run/current-system/sw/bin/agentmom-run"));
+        assert!(script.contains("set -e"));
+        assert!(script.contains(" -- "));
+        assert!(script.contains("printf"));
+        assert!(script.contains("'hello world'"));
+        assert!(script.contains(". /etc/profile.d/mom.sh"));
+        assert!(script.contains(". /etc/profile.d/agentmom-proxy.sh"));
+        assert!(script.contains("cd /workspace"));
+        assert!(guest_command_script(&[]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn guest_command_script_falls_back_when_hermes_wrapper_is_missing() -> Result<()> {
+        let script =
+            guest_command_script(&[GUEST_AGENTMOM_HERMES.to_string(), "--help".to_string()])?;
+
+        assert!(script.contains(GUEST_AGENTMOM_HERMES));
         assert!(
-            template.contains("default_provider: openai-codex\n    model: ${spec.hermes_model}")
+            script.contains("exec '/run/current-system/sw/bin/agentmom-run' -- 'hermes' '--help'")
         );
+        assert!(script.contains("exec 'hermes' '--help'"));
+        Ok(())
     }
 
     #[test]
-    fn microvm_template_disables_guest_ssh_source_penalties() {
+    fn microvm_template_installs_agentmom_run_and_uses_hermes_model_schema() {
         let template = microvm_workspace_nix();
 
+        assert!(template.contains("writeShellScriptBin \"agentmom-run\""));
+        assert!(template.contains("writeShellScriptBin \"agentmom-hermes\""));
+        assert!(template.contains("writeShellScriptBin \"agentmom-hermes-acp\""));
+        assert!(template.contains("writeShellScriptBin \"agentmom-hermes-dashboard\""));
+        assert!(template.contains("writeShellScriptBin \"agentmom-hermes-dashboard-start\""));
+        assert!(template.contains("systemd.services.agentmom-hermes-dashboard"));
+        assert!(
+            template.contains(
+                "ExecStart = \"${agentmomHermesDashboard}/bin/agentmom-hermes-dashboard\""
+            )
+        );
+        assert!(template.contains("Restart = \"on-failure\""));
+        assert!(template.contains("Hermes web_dist is missing"));
+        assert!(template.contains(". /etc/profile.d/mom.sh"));
+        assert!(template.contains(". /etc/profile.d/agentmom-proxy.sh"));
+        assert!(!template.contains("setsid hermes dashboard"));
+        assert!(
+            template.contains(
+                "model:\n      provider: openrouter\n      default: ${spec.hermes_model}"
+            )
+        );
+        assert!(!template.contains("openai-codex"));
+        assert!(!template.contains("default_provider:"));
+        assert!(template.contains("systemd.services.sshd-keygen.enable = lib.mkForce false;"));
         assert!(template.contains("PerSourcePenalties = \"no\";"));
-    }
-
-    #[test]
-    fn microvm_template_installs_pinned_ssh_host_key_after_keygen() {
-        let template = microvm_workspace_nix();
-
-        assert!(template.contains("after = [ \"sshd-keygen.service\" ];"));
         assert!(template.contains("before = [ \"sshd.service\" ];"));
-        assert!(template.contains("requires = [ \"sshd-keygen.service\" ];"));
+        assert!(!template.contains("after = [ \"sshd-keygen.service\" ];"));
+        assert!(!template.contains("requires = [ \"sshd-keygen.service\" ];"));
     }
 
     #[test]

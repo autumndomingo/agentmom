@@ -4,13 +4,17 @@ import {
   Edit3,
   ExternalLink,
   GitBranch,
+  MessageSquare,
+  Monitor,
   PanelLeft,
   Plus,
   RefreshCcw,
   Send,
   Sparkles,
+  Terminal,
   Trash2,
   Users,
+  X,
 } from 'lucide-react';
 import { buildPendingPermissions, buildTranscript } from './acp/transcript.js';
 import './styles.css';
@@ -80,6 +84,10 @@ function Root() {
     } else {
       return <AdminPage userSession={userSession} />;
     }
+  }
+
+  if (window.location.pathname === '/tui') {
+    return <TuiPage userSession={userSession} />;
   }
 
   if (!userSession.userName || !userSession.agentName || !userSession.workspaceName) {
@@ -258,6 +266,11 @@ function App({ userSession }) {
   const [activeChatId, setActiveChatId] = useState('');
   const [chatStates, setChatStates] = useState({});
   const [workspaceError, setWorkspaceError] = useState('');
+  const [previewsByWorkspace, setPreviewsByWorkspace] = useState({});
+  const [activePreviewName, setActivePreviewName] = useState('');
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewError, setPreviewError] = useState('');
+  const [previewReloadKey, setPreviewReloadKey] = useState(0);
   const [wakingWorkspaces, setWakingWorkspaces] = useState({});
   const [now, setNow] = useState(() => Date.now());
   const chatSocketsRef = useRef({});
@@ -298,6 +311,11 @@ function App({ userSession }) {
     workspaceChats,
     now,
   );
+  const workspacePreviews = selectedWorkspaceName ? previewsByWorkspace[selectedWorkspaceName] ?? [] : [];
+  const activePreview =
+    workspacePreviews.find((preview) => preview.name === activePreviewName) ??
+    workspacePreviews[0] ??
+    null;
 
   useEffect(() => {
     chatStatesRef.current = chatStates;
@@ -346,6 +364,36 @@ function App({ userSession }) {
     if (acp.state !== 'ready' && acp.state !== 'open') return;
     ensureChatSession(selectedWorkspace.name, activeChatId);
   }, [selectedWorkspace?.name, activeChatId, acp.state]);
+
+  useEffect(() => {
+    if (!selectedWorkspaceName || !previewOpen) return undefined;
+    let cancelled = false;
+    const pollPreviews = async () => {
+      try {
+        await loadPreviews(selectedWorkspaceName);
+      } catch (error) {
+        if (!cancelled) {
+          setPreviewError(formatError(error));
+        }
+      }
+    };
+    pollPreviews();
+    const interval = window.setInterval(pollPreviews, 4_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [selectedWorkspaceName, previewOpen]);
+
+  useEffect(() => {
+    if (!workspacePreviews.length) {
+      setActivePreviewName('');
+      return;
+    }
+    if (!workspacePreviews.some((preview) => preview.name === activePreviewName)) {
+      setActivePreviewName(workspacePreviews[0].name);
+    }
+  }, [selectedWorkspaceName, workspacePreviews.length, activePreviewName]);
 
   useEffect(() => {
     if (!selectedWorkspace?.name || !workspaceReady) return undefined;
@@ -885,6 +933,47 @@ function App({ userSession }) {
     return nextWorkspaces;
   }
 
+  async function loadPreviews(workspaceName) {
+    if (!workspaceName) return [];
+    const previews = await request(`/workspaces/${encodeURIComponent(workspaceName)}/previews`);
+    setPreviewsByWorkspace((current) => ({
+      ...current,
+      [workspaceName]: previews,
+    }));
+    setPreviewError('');
+    return previews;
+  }
+
+  async function togglePreviewPane() {
+    const nextOpen = !previewOpen;
+    setPreviewOpen(nextOpen);
+    if (nextOpen && selectedWorkspaceName) {
+      try {
+        await loadPreviews(selectedWorkspaceName);
+      } catch (error) {
+        setPreviewError(formatError(error));
+      }
+    }
+  }
+
+  function reloadPreview() {
+    setPreviewReloadKey((current) => current + 1);
+  }
+
+  async function removeActivePreview() {
+    if (!selectedWorkspaceName || !activePreview) return;
+    setPreviewError('');
+    try {
+      await request(
+        `/workspaces/${encodeURIComponent(selectedWorkspaceName)}/previews/${encodeURIComponent(activePreview.name)}`,
+        { method: 'DELETE' },
+      );
+      await loadPreviews(selectedWorkspaceName);
+    } catch (error) {
+      setPreviewError(formatError(error));
+    }
+  }
+
   async function wakeWorkspace(workspaceName) {
     setWakingWorkspaces((current) => ({ ...current, [workspaceName]: true }));
     setWorkspaceError('');
@@ -904,6 +993,10 @@ function App({ userSession }) {
 
   function openAdminPage() {
     window.location.href = '/admin';
+  }
+
+  function openTuiPage() {
+    window.location.href = '/tui';
   }
 
   async function sendMessage(event) {
@@ -1139,7 +1232,7 @@ function App({ userSession }) {
   }
 
   return (
-    <main className="appShell">
+    <main className={`appShell ${previewOpen ? 'withPreview' : ''}`}>
       <aside className="sidebar">
         <div className="userDropdown">
           <div className="brandRow">
@@ -1284,9 +1377,17 @@ function App({ userSession }) {
               <RefreshCcw size={17} />
               Refresh
             </button>
+            <button className="refreshButton" onClick={togglePreviewPane} disabled={!selectedWorkspace || busy}>
+              <Monitor size={17} />
+              Preview
+            </button>
             <button className="refreshButton" onClick={launchHermes} disabled={!selectedWorkspace || !workspaceReady || busy}>
               <ExternalLink size={17} />
               Hermes
+            </button>
+            <button className="refreshButton" type="button" onClick={openTuiPage} disabled={!selectedWorkspace || !workspaceReady}>
+              <Terminal size={17} />
+              TUI
             </button>
             <button className="refreshButton" onClick={forkChat} disabled={!selectedWorkspace || !workspaceReady || !activeChatState.session_id || chatBusy || !chatReady || !capabilityEnabled(sessionCapabilities, 'fork')}>
               <GitBranch size={17} />
@@ -1378,8 +1479,352 @@ function App({ userSession }) {
         </form>
       </section>
 
+      {previewOpen && (
+        <PreviewPane
+          previews={workspacePreviews}
+          activePreview={activePreview}
+          error={previewError}
+          reloadKey={previewReloadKey}
+          onSelect={setActivePreviewName}
+          onReload={reloadPreview}
+          onRemove={removeActivePreview}
+          onClose={() => setPreviewOpen(false)}
+        />
+      )}
+
     </main>
   );
+}
+
+function PreviewPane({
+  previews,
+  activePreview,
+  error,
+  reloadKey,
+  onSelect,
+  onReload,
+  onRemove,
+  onClose,
+}) {
+  return (
+    <section className="previewPane" aria-label="App preview">
+      <header className="previewHeader">
+        <div className="previewTabs" role="tablist" aria-label="Registered previews">
+          {previews.map((preview) => (
+            <button
+              key={preview.name}
+              type="button"
+              className={preview.name === activePreview?.name ? 'active' : ''}
+              onClick={() => onSelect(preview.name)}
+            >
+              {preview.name}
+            </button>
+          ))}
+          {!previews.length && <span>No previews</span>}
+        </div>
+        <div className="previewActions">
+          <button type="button" title="Reload preview" onClick={onReload} disabled={!activePreview}>
+            <RefreshCcw size={16} />
+          </button>
+          <button
+            type="button"
+            title="Open preview"
+            onClick={() => activePreview && window.open(activePreview.url, '_blank', 'noopener,noreferrer')}
+            disabled={!activePreview}
+          >
+            <ExternalLink size={16} />
+          </button>
+          <button type="button" title="Remove preview" onClick={onRemove} disabled={!activePreview}>
+            <Trash2 size={16} />
+          </button>
+          <button type="button" title="Close preview" onClick={onClose}>
+            <X size={17} />
+          </button>
+        </div>
+      </header>
+
+      <div className="previewAddress">
+        <code>{activePreview?.url ?? 'No preview URL'}</code>
+      </div>
+
+      <div className="previewFrameShell">
+        {error ? (
+          <div className="previewEmpty">
+            <strong>Preview error</strong>
+            <span>{error}</span>
+          </div>
+        ) : activePreview ? (
+          <iframe
+            key={`${activePreview.name}-${activePreview.url}-${reloadKey}`}
+            title={`${activePreview.name} preview`}
+            src={activePreview.url}
+            sandbox="allow-downloads allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-same-origin allow-scripts"
+          />
+        ) : (
+          <div className="previewEmpty">
+            <strong>No registered app</strong>
+            <span>Waiting for a workspace preview.</span>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function TuiPage({ userSession }) {
+  const [workspaces, setWorkspaces] = useState([]);
+  const [selectedName, setSelectedName] = useState(userSession.workspaceName ?? '');
+  const [sessions, setSessions] = useState([]);
+  const [activeSessionId, setActiveSessionId] = useState('');
+  const [terminalKey, setTerminalKey] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const selectedWorkspace = useMemo(
+    () => workspaces.find((workspace) => workspace.name === selectedName) ?? workspaces[0] ?? null,
+    [selectedName, workspaces],
+  );
+
+  useEffect(() => {
+    refreshWorkspaces().catch((loadError) => setError(formatError(loadError)));
+  }, []);
+
+  useEffect(() => {
+    if (!selectedWorkspace?.name) return;
+    refreshSessions(selectedWorkspace.name).catch((loadError) => setError(formatError(loadError)));
+  }, [selectedWorkspace?.name]);
+
+  async function refreshWorkspaces() {
+    setBusy(true);
+    setError('');
+    try {
+      const allWorkspaces = normalizeWorkspaceList(await apiRequest('/workspaces'));
+      const userWorkspace = selectUserWorkspace(allWorkspaces, userSession);
+      const nextWorkspaces = userSession.workspaceName
+        ? userWorkspace
+          ? [userWorkspace]
+          : []
+        : allWorkspaces;
+      setWorkspaces(nextWorkspaces);
+      if (userWorkspace) {
+        setSelectedName(userWorkspace.name);
+      } else if (nextWorkspaces.length && !nextWorkspaces.some((workspace) => workspace.name === selectedName)) {
+        setSelectedName(nextWorkspaces[0].name);
+      }
+      return nextWorkspaces;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function refreshSessions(workspaceName = selectedWorkspace?.name) {
+    if (!workspaceName) return [];
+    setBusy(true);
+    setError('');
+    try {
+      const data = await apiRequest(`/workspaces/${encodeURIComponent(workspaceName)}/tui/sessions`);
+      const nextSessions = Array.isArray(data.sessions) ? data.sessions : [];
+      setSessions(nextSessions);
+      if (!activeSessionId && nextSessions[0]?.id) {
+        setActiveSessionId(nextSessions[0].id);
+      }
+      return nextSessions;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function openSession(sessionId) {
+    setActiveSessionId(sessionId);
+    setTerminalKey((current) => current + 1);
+  }
+
+  function startSession() {
+    setActiveSessionId('');
+    setTerminalKey((current) => current + 1);
+  }
+
+  function backToChat() {
+    window.location.href = '/';
+  }
+
+  return (
+    <main className="tuiPage">
+      <aside className="tuiSidebar">
+        <button className="brandButton" type="button" onClick={backToChat}>
+          <BuildersTableBrand />
+        </button>
+        <div className="tuiWorkspacePicker">
+          <label htmlFor="tui-workspace">Workspace</label>
+          <select
+            id="tui-workspace"
+            value={selectedWorkspace?.name ?? ''}
+            onChange={(event) => {
+              setSelectedName(event.target.value);
+              setActiveSessionId('');
+              setTerminalKey((current) => current + 1);
+            }}
+            disabled={busy || workspaces.length <= 1}
+          >
+            {workspaces.map((workspace) => (
+              <option key={workspace.name} value={workspace.name}>
+                {workspaceDisplayName(workspace)}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <button className="launchButton" type="button" onClick={startSession} disabled={!selectedWorkspace}>
+          <Terminal size={18} />
+          New TUI
+        </button>
+
+        <div className="tuiSessionList">
+          <div className="tuiSessionHeader">
+            <h2>Sessions</h2>
+            <button type="button" onClick={() => refreshSessions()} disabled={!selectedWorkspace || busy}>
+              <RefreshCcw size={15} />
+            </button>
+          </div>
+          {sessions.map((session) => (
+            <button
+              key={session.id}
+              type="button"
+              className={session.id === activeSessionId ? 'active' : ''}
+              onClick={() => openSession(session.id)}
+            >
+              <MessageSquare size={15} />
+              <span>{session.title || session.id}</span>
+            </button>
+          ))}
+          {!sessions.length && <p>No saved TUI sessions.</p>}
+        </div>
+      </aside>
+
+      <section className="tuiMain">
+        <header className="tuiHeader">
+          <div>
+            <h1>{selectedWorkspace ? workspaceDisplayName(selectedWorkspace) : 'Hermes TUI'}</h1>
+            <p>{selectedWorkspace ? friendlyStatus(selectedWorkspace.status) : 'No workspace selected'}</p>
+          </div>
+          <button className="refreshButton" type="button" onClick={backToChat}>
+            <MessageSquare size={17} />
+            Chat
+          </button>
+        </header>
+        {error ? <div className="tuiError">{error}</div> : null}
+        {selectedWorkspace ? (
+          <TerminalPane
+            key={`${selectedWorkspace.name}-${activeSessionId || 'new'}-${terminalKey}`}
+            workspaceName={selectedWorkspace.name}
+            sessionId={activeSessionId}
+          />
+        ) : (
+          <div className="previewEmpty">
+            <strong>No workspace</strong>
+            <span>Create or select a workspace first.</span>
+          </div>
+        )}
+      </section>
+    </main>
+  );
+}
+
+function TerminalPane({ workspaceName, sessionId }) {
+  const containerRef = useRef(null);
+
+  useEffect(() => {
+    if (!containerRef.current) return undefined;
+    let cancelled = false;
+    let terminal = null;
+    let socket = null;
+    let dataDisposable = null;
+    let resizeDisposable = null;
+    let fit = null;
+
+    async function startTerminal() {
+      const [{ Terminal: LazyXTerm }, { FitAddon }] = await Promise.all([
+        import('@xterm/xterm'),
+        import('@xterm/addon-fit'),
+        import('@xterm/xterm/css/xterm.css'),
+      ]);
+      if (cancelled || !containerRef.current) return;
+
+      terminal = new LazyXTerm({
+        cursorBlink: true,
+        fontFamily: 'SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+        fontSize: 13,
+        theme: {
+          background: '#070809',
+          foreground: '#f7f3ea',
+          cursor: '#e39a4d',
+        },
+      });
+      fit = new FitAddon();
+      terminal.loadAddon(fit);
+      terminal.open(containerRef.current);
+      fit.fit();
+      terminal.focus();
+      terminal.writeln('Connecting to Hermes TUI...');
+
+      socket = new WebSocket(tuiWsUrl(workspaceName, sessionId));
+      dataDisposable = terminal.onData((data) => {
+        if (socket?.readyState === WebSocket.OPEN) {
+          socket.send(data);
+        }
+      });
+      resizeDisposable = terminal.onResize(({ cols, rows }) => {
+        if (socket?.readyState === WebSocket.OPEN) {
+          socket.send(`\x1b[RESIZE:${cols}x${rows}]`);
+        }
+      });
+
+      socket.onopen = () => {
+        terminal?.write('\r\n');
+        fit?.fit();
+      };
+      socket.onmessage = (event) => {
+        if (typeof event.data === 'string') {
+          terminal?.write(event.data);
+        }
+      };
+      socket.onerror = () => {
+        terminal?.writeln('\r\nHermes TUI websocket failed.');
+      };
+      socket.onclose = () => {
+        terminal?.writeln('\r\nHermes TUI disconnected.');
+      };
+    }
+
+    startTerminal().catch((error) => {
+      if (containerRef.current) {
+        containerRef.current.textContent = `Hermes TUI failed to load: ${formatError(error)}`;
+      }
+    });
+
+    const onResize = () => fit?.fit();
+    window.addEventListener('resize', onResize);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('resize', onResize);
+      dataDisposable?.dispose();
+      resizeDisposable?.dispose();
+      socket?.close();
+      terminal?.dispose();
+    };
+  }, [workspaceName, sessionId]);
+
+  return <div className="tuiTerminal" ref={containerRef} />;
+}
+
+function tuiWsUrl(workspaceName, sessionId) {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const params = new URLSearchParams();
+  if (sessionId) {
+    params.set('resume', sessionId);
+  }
+  const query = params.toString();
+  return `${protocol}//${window.location.host}${API_BASE}/workspaces/${encodeURIComponent(workspaceName)}/tui/pty${query ? `?${query}` : ''}`;
 }
 
 function MessageContent({ message }) {

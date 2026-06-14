@@ -65,6 +65,7 @@
             enable = true;
             settings = {
               PasswordAuthentication = false;
+              PerSourcePenalties = "no";
               PermitRootLogin = "prohibit-password";
             };
           };

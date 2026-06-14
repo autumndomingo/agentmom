@@ -6,7 +6,7 @@ use axum::{
     extract::{Path, Query, State, ws::Message},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -22,9 +22,11 @@ use tokio_tungstenite::{
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::{
-    ApiState, JobResponse, WorkspaceRecord, create_job, job_get, node_worker_url,
-    service_tunnel_hostname_registered, service_tunnel_upsert, worker_token_for_node,
-    workspace_get,
+    ApiState, JobResponse, PreviewOpenRequest, PreviewRecord, WorkspaceRecord, create_job, job_get,
+    node_worker_url, normalize_preview_name, preview_from_tunnel, preview_service_id, preview_spec,
+    record_workspace_event_for_node, service_tunnel_delete, service_tunnel_get,
+    service_tunnel_hostname_registered, service_tunnel_upsert, service_tunnels_for_workspace,
+    worker_token_for_node, workspace_get,
 };
 
 const UI_JOB_WAIT_TIMEOUT: Duration = Duration::from_secs(360);
@@ -33,6 +35,17 @@ const UI_WORKER_SERVICE_TIMEOUT: Duration = Duration::from_secs(240);
 #[derive(Debug, Deserialize)]
 struct CommandRequest {
     command: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TuiSessionsQuery {
+    limit: Option<u16>,
+    offset: Option<u16>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TuiPtyQuery {
+    resume: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -52,6 +65,21 @@ struct ErrorBody {
 struct OpenWorkerServiceRequest {
     workspace_name: String,
     vm_name: String,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenPreviewWorkerServiceRequest {
+    workspace_name: String,
+    vm_name: String,
+    #[serde(flatten)]
+    preview: PreviewOpenRequest,
+}
+
+#[derive(Debug, Serialize)]
+struct ClosePreviewWorkerServiceRequest {
+    workspace_name: String,
+    vm_name: String,
+    name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -78,6 +106,19 @@ pub(crate) fn api_routes() -> Router<Arc<ApiState>> {
             "/api/workspaces/{name}/hermes-ui",
             post(hermes_ui_workspace),
         )
+        .route(
+            "/api/workspaces/{name}/previews",
+            get(list_workspace_previews).post(open_workspace_preview),
+        )
+        .route(
+            "/api/workspaces/{name}/previews/{preview}",
+            delete(remove_workspace_preview),
+        )
+        .route(
+            "/api/workspaces/{name}/tui/sessions",
+            get(tui_sessions_workspace),
+        )
+        .route("/api/workspaces/{name}/tui/pty", get(tui_pty_ws))
         .route("/api/workspaces/{name}/chat/ws", get(chat_ws))
 }
 
@@ -204,6 +245,91 @@ async fn hermes_ui_workspace(
     open_hermes_dashboard(&name).await
 }
 
+async fn list_workspace_previews(
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<Json<Vec<PreviewRecord>>, UiError> {
+    crate::auth::authorize_workspace(&headers, &name)?;
+    Ok(Json(preview_records_for_workspace(&name)?))
+}
+
+async fn open_workspace_preview(
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Json(request): Json<PreviewOpenRequest>,
+) -> Result<Json<PreviewRecord>, UiError> {
+    crate::auth::authorize_workspace(&headers, &name)?;
+    Ok(Json(open_preview_for_workspace(&name, request).await?))
+}
+
+async fn remove_workspace_preview(
+    headers: HeaderMap,
+    Path((name, preview)): Path<(String, String)>,
+) -> Result<Json<Value>, UiError> {
+    crate::auth::authorize_workspace(&headers, &name)?;
+    let removed = remove_preview_for_workspace(&name, &preview).await?;
+    Ok(Json(json!({ "removed": removed })))
+}
+
+async fn tui_sessions_workspace(
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Query(query): Query<TuiSessionsQuery>,
+) -> Result<Json<Value>, UiError> {
+    crate::auth::authorize_workspace(&headers, &name)?;
+    let workspace = workspace_get(&name)?;
+    let worker_url = workspace_worker_url(&workspace)?;
+    let node = workspace.node_id.as_deref().ok_or_else(|| {
+        anyhow!(
+            "workspace {} does not have an assigned node",
+            workspace.name
+        )
+    })?;
+    let limit = query.limit.unwrap_or(30).clamp(1, 100);
+    let offset = query.offset.unwrap_or(0);
+    let url = format!(
+        "{}/worker/hermes/sessions?workspace_name={}&vm_name={}&limit={limit}&offset={offset}",
+        worker_url.trim_end_matches('/'),
+        crate::url_component(&workspace.name),
+        crate::url_component(&workspace.vm_name),
+    );
+    let value = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()?
+        .get(url)
+        .bearer_auth(worker_token_for_node(node)?)
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Value>()
+        .await?;
+    Ok(Json(value))
+}
+
+async fn tui_pty_ws(
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Query(query): Query<TuiPtyQuery>,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> Result<Response, UiError> {
+    crate::auth::authorize_workspace(&headers, &name)?;
+    let workspace = workspace_get(&name)?;
+    let worker_url = workspace_worker_url(&workspace)?;
+    let node = workspace.node_id.as_deref().ok_or_else(|| {
+        anyhow!(
+            "workspace {} does not have an assigned node",
+            workspace.name
+        )
+    })?;
+    let worker_token = worker_token_for_node(node)?;
+    let worker_ws = worker_tui_pty_ws_url(&worker_url, &workspace, query.resume.as_deref())?;
+    Ok(ws
+        .on_upgrade(move |socket| async move {
+            let _ = proxy_tui_websocket(socket, worker_ws, worker_token).await;
+        })
+        .into_response())
+}
+
 async fn chat_ws(
     headers: HeaderMap,
     Path(name): Path<String>,
@@ -242,6 +368,31 @@ fn worker_acp_ws_url(worker_url: &str, workspace: &WorkspaceRecord) -> Result<St
     ))
 }
 
+fn worker_tui_pty_ws_url(
+    worker_url: &str,
+    workspace: &WorkspaceRecord,
+    resume: Option<&str>,
+) -> Result<String> {
+    let mut url = worker_url.trim_end_matches('/').to_string();
+    if let Some(rest) = url.strip_prefix("http://") {
+        url = format!("ws://{rest}");
+    } else if let Some(rest) = url.strip_prefix("https://") {
+        url = format!("wss://{rest}");
+    } else if !url.starts_with("ws://") && !url.starts_with("wss://") {
+        bail!("worker_url must start with http://, https://, ws://, or wss://");
+    }
+    let mut url = format!(
+        "{url}/worker/hermes/tui/pty?workspace_name={}&vm_name={}",
+        crate::url_component(&workspace.name),
+        crate::url_component(&workspace.vm_name)
+    );
+    if let Some(resume) = resume.map(str::trim).filter(|value| !value.is_empty()) {
+        url.push_str("&resume=");
+        url.push_str(&crate::url_component(resume));
+    }
+    Ok(url)
+}
+
 async fn proxy_acp_websocket(
     mut browser_socket: axum::extract::ws::WebSocket,
     worker_ws_url: String,
@@ -261,6 +412,87 @@ async fn proxy_acp_websocket(
                 &format!("Hermes ACP worker websocket failed: {error}"),
             )
             .await;
+            return Err(error.into());
+        }
+    };
+    let (mut browser_tx, mut browser_rx) = browser_socket.split();
+    let (mut worker_tx, mut worker_rx) = worker_socket.split();
+
+    let browser_to_worker = async {
+        while let Some(Ok(message)) = browser_rx.next().await {
+            let message = match message {
+                Message::Text(text) => WorkerMessage::Text(text.to_string().into()),
+                Message::Binary(bytes) => WorkerMessage::Binary(bytes),
+                Message::Ping(bytes) => WorkerMessage::Ping(bytes),
+                Message::Pong(bytes) => WorkerMessage::Pong(bytes),
+                Message::Close(frame) => {
+                    let close =
+                        frame.map(
+                            |frame| tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                                code: frame.code.into(),
+                                reason: frame.reason.to_string().into(),
+                            },
+                        );
+                    let _ = worker_tx.send(WorkerMessage::Close(close)).await;
+                    break;
+                }
+            };
+            if worker_tx.send(message).await.is_err() {
+                break;
+            }
+        }
+        Ok::<(), anyhow::Error>(())
+    };
+
+    let worker_to_browser = async {
+        while let Some(Ok(message)) = worker_rx.next().await {
+            let message = match message {
+                WorkerMessage::Text(text) => Message::Text(text.to_string().into()),
+                WorkerMessage::Binary(bytes) => Message::Binary(bytes),
+                WorkerMessage::Ping(bytes) => Message::Ping(bytes),
+                WorkerMessage::Pong(bytes) => Message::Pong(bytes),
+                WorkerMessage::Close(frame) => {
+                    let close = frame.map(|frame| axum::extract::ws::CloseFrame {
+                        code: frame.code.into(),
+                        reason: frame.reason.to_string().into(),
+                    });
+                    let _ = browser_tx.send(Message::Close(close)).await;
+                    break;
+                }
+                WorkerMessage::Frame(_) => continue,
+            };
+            if browser_tx.send(message).await.is_err() {
+                break;
+            }
+        }
+        Ok::<(), anyhow::Error>(())
+    };
+
+    tokio::select! {
+        result = browser_to_worker => result?,
+        result = worker_to_browser => result?,
+    }
+    Ok(())
+}
+
+async fn proxy_tui_websocket(
+    mut browser_socket: axum::extract::ws::WebSocket,
+    worker_ws_url: String,
+    worker_token: String,
+) -> Result<()> {
+    let mut request = worker_ws_url.into_client_request()?;
+    request.headers_mut().insert(
+        AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {worker_token}"))?,
+    );
+    let worker_socket = match connect_async(request).await {
+        Ok((socket, _)) => socket,
+        Err(error) => {
+            let _ = browser_socket
+                .send(Message::Text(
+                    format!("\r\nHermes TUI worker websocket failed: {error}\r\n").into(),
+                ))
+                .await;
             return Err(error.into());
         }
     };
@@ -401,6 +633,116 @@ fn worker_error_text(body: &str) -> String {
     serde_json::from_str::<WorkerErrorResponse>(trimmed)
         .map(|response| response.error)
         .unwrap_or_else(|_| trimmed.to_string())
+}
+
+pub(crate) async fn open_preview_for_workspace(
+    name: &str,
+    request: PreviewOpenRequest,
+) -> Result<PreviewRecord> {
+    let workspace = workspace_get(name)?;
+    let worker_url = workspace_worker_url(&workspace)?;
+    let spec = preview_spec(&request)?;
+    let workspace_name = workspace.name.clone();
+    let vm_name = workspace.vm_name.clone();
+    let node = workspace.node_id.as_deref().ok_or_else(|| {
+        anyhow!(
+            "workspace {} does not have an assigned node",
+            workspace.name
+        )
+    })?;
+    let token = worker_token_for_node(node)?;
+    let response = reqwest::Client::builder()
+        .timeout(UI_WORKER_SERVICE_TIMEOUT)
+        .build()?
+        .post(format!(
+            "{}/worker/services/preview/open",
+            worker_url.trim_end_matches('/')
+        ))
+        .bearer_auth(token)
+        .json(&OpenPreviewWorkerServiceRequest {
+            workspace_name: workspace_name.clone(),
+            vm_name,
+            preview: PreviewOpenRequest {
+                name: spec.name.clone(),
+                host: spec.host.clone(),
+                port: spec.port,
+                path: spec.path.clone(),
+            },
+        })
+        .send()
+        .await?;
+    let status = response.status();
+    let body = response.text().await?;
+    if !status.is_success() {
+        bail!("{}", worker_error_text(&body));
+    }
+    let response = serde_json::from_str::<OpenWorkerServiceResponse>(&body)
+        .map_err(|error| anyhow!("parse worker preview service-open response: {error}: {body}"))?;
+    service_tunnel_upsert(&workspace_name, node, &spec.service, &response.url)?;
+    record_workspace_event_for_node(
+        &workspace_name,
+        node,
+        "preview_registered",
+        "succeeded",
+        "preview app registered",
+        json!({
+            "name": spec.name.clone(),
+            "host": spec.host.clone(),
+            "port": spec.port,
+            "path": spec.path.clone(),
+            "url": response.url.clone()
+        }),
+    )?;
+    service_tunnel_get(&workspace_name, &spec.service)?
+        .and_then(preview_from_tunnel)
+        .ok_or_else(|| anyhow!("preview registration did not persist"))
+}
+
+pub(crate) fn preview_records_for_workspace(name: &str) -> Result<Vec<PreviewRecord>> {
+    workspace_get(name)?;
+    Ok(service_tunnels_for_workspace(name, "preview:")?
+        .into_iter()
+        .filter_map(preview_from_tunnel)
+        .collect())
+}
+
+pub(crate) async fn remove_preview_for_workspace(name: &str, preview: &str) -> Result<bool> {
+    let workspace = workspace_get(name)?;
+    let preview = normalize_preview_name(preview)?;
+    let service = preview_service_id(&preview);
+    if let Ok(worker_url) = workspace_worker_url(&workspace)
+        && let Some(node) = workspace.node_id.as_deref()
+    {
+        let token = worker_token_for_node(node)?;
+        let _ = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()?
+            .post(format!(
+                "{}/worker/services/preview/close",
+                worker_url.trim_end_matches('/')
+            ))
+            .bearer_auth(token)
+            .json(&ClosePreviewWorkerServiceRequest {
+                workspace_name: workspace.name.clone(),
+                vm_name: workspace.vm_name.clone(),
+                name: preview.clone(),
+            })
+            .send()
+            .await;
+        let removed = service_tunnel_delete(&workspace.name, &service)?;
+        if removed {
+            record_workspace_event_for_node(
+                &workspace.name,
+                node,
+                "preview_removed",
+                "succeeded",
+                "preview app removed",
+                json!({ "name": preview }),
+            )?;
+        }
+        return Ok(removed);
+    }
+    service_tunnel_delete(&workspace.name, &service)
 }
 
 fn workspace_worker_url(workspace: &WorkspaceRecord) -> Result<String> {

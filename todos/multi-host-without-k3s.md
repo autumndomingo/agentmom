@@ -164,7 +164,7 @@ Out of scope for this phase:
 - Worker hosts run `agentmom-credential-proxy.service` using iron-proxy. The service has a generated CA under `/var/lib/agentmom/iron-proxy`, listens on `:1080`, and writes `openrouter-proxy` guest config via Agent Mom.
 - `openrouter-proxy` workspaces no longer receive raw Codex/Hermes auth files. Worker hosts get the OpenRouter key from agenix-managed NixOS secrets.
 - Base snapshots are now credential/proxy agnostic. Normal workspace creates clone the existing tool snapshot and then apply current auth/proxy config, so proxy/config iteration no longer rebuilds Alpine/Codex/Hermes. The measured no-rebuild create on `pika-build` was 9 seconds.
-- `mom workspace refresh-config <workspace>` re-applies Codex/Hermes/proxy config to an existing workspace without rebuilding the base snapshot.
+- Guest Hermes/proxy config is owned by the Nix guest definition. Rebuild or recreate the workspace VM instead of SSHing in to patch config.
 - Current API smoke tests cover `/health/live`, `/health/ready`, `/metrics`, workspace job creation, worker registration, transactional claim, and SSE `job_available` notification.
 - Worker endpoints support shared bearer-token auth through `MOM_WORKER_TOKEN` or `MOM_WORKER_TOKEN_FILE`; local smoke tests cover 401 without the token and success with the token.
 - SSH deployment to `mom-1` uses the Tailscale address `100.81.250.67`. `mom-2` deploys through `mom-1` as a Tailscale ProxyJump to `100.92.189.28`.

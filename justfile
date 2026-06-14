@@ -14,6 +14,10 @@ dev-utm:
     @if ! command -v lsof >/dev/null 2>&1 || ! command -v rsync >/dev/null 2>&1 || ! command -v ssh >/dev/null 2>&1 || ! command -v utmctl >/dev/null 2>&1; then exec nix develop --command just dev-utm; fi
     @./scripts/dev-utm
 
+dev-utm-e2e:
+    @if ! command -v cargo >/dev/null 2>&1; then exec nix develop --command just dev-utm-e2e; fi
+    @AGENTMOM_UTM_E2E=1 AGENTMOM_UTM_API_URL="${AGENTMOM_UTM_API_URL:-http://127.0.0.1:${MOM_API_PORT:-8787}}" cargo test --test utm_e2e -- --ignored --test-threads=1
+
 dev-reset:
     @./scripts/dev-reset
 

@@ -8,16 +8,97 @@ let
       hermesAgentPackage pkgs
     else
       pkgs.hermes-agent or (throw "Agent Mom guests require a hermes-agent package");
+  agentmomRun = pkgs.writeShellScriptBin "agentmom-run" ''
+    set -eu
+    if [ "''${1:-}" = "--" ]; then
+      shift
+    fi
+    if [ "$#" -eq 0 ]; then
+      echo "usage: agentmom-run -- command [args...]" >&2
+      exit 64
+    fi
+    if [ -f /etc/profile.d/mom.sh ]; then
+      . /etc/profile.d/mom.sh
+    fi
+    if [ -f /etc/profile.d/agentmom-proxy.sh ]; then
+      . /etc/profile.d/agentmom-proxy.sh
+    fi
+    export HOME=/root
+    cd /workspace
+    exec "$@"
+  '';
+  agentmomHermes = pkgs.writeShellScriptBin "agentmom-hermes" ''
+    exec ${agentmomRun}/bin/agentmom-run -- hermes "$@"
+  '';
+  agentmomHermesAcp = pkgs.writeShellScriptBin "agentmom-hermes-acp" ''
+    exec ${agentmomRun}/bin/agentmom-run -- ${pkgs.runtimeShell} -c '
+      if command -v hermes-acp >/dev/null 2>&1; then
+        exec hermes-acp "$@"
+      fi
+      if command -v hermes >/dev/null 2>&1; then
+        exec hermes acp "$@"
+      fi
+      echo "hermes-acp/hermes acp is not installed" >&2
+      exit 127
+    ' agentmom-hermes-acp "$@"
+  '';
+  agentmomHermesDashboard = pkgs.writeShellScriptBin "agentmom-hermes-dashboard" ''
+    set -eu
+    port=9119
+    cd /workspace
+    hermes_bin="$(readlink -f "$(command -v hermes)")"
+    hermes_prefix="$(dirname "$(dirname "$hermes_bin")")"
+    hermes_web_dist="$hermes_prefix/share/hermes-agent/web_dist"
+    if [ ! -d "$hermes_web_dist" ]; then
+      echo "Hermes web_dist is missing at $hermes_web_dist; rebuild the Nix guest package" >&2
+      exit 1
+    fi
+    export HERMES_WEB_DIST="$hermes_web_dist"
+    exec hermes dashboard --host 0.0.0.0 --port "$port" --no-open --insecure --skip-build
+  '';
+  agentmomHermesDashboardStart = pkgs.writeShellScriptBin "agentmom-hermes-dashboard-start" ''
+    set -eu
+    port=9119
+    health_path=/api/status
+    probe_hermes_dashboard() {
+      timeout 2s wget -q -O /dev/null --timeout=1 "http://127.0.0.1:$port$health_path" >/dev/null 2>&1
+    }
+    if probe_hermes_dashboard; then
+      exit 0
+    fi
+    systemctl start agentmom-hermes-dashboard.service
+    for _ in $(seq 1 90); do
+      if probe_hermes_dashboard; then
+        exit 0
+      fi
+      sleep 1
+    done
+    systemctl status --no-pager agentmom-hermes-dashboard.service >&2 || true
+    journalctl -u agentmom-hermes-dashboard.service -n 120 --no-pager >&2 || true
+    exit 1
+  '';
   proxyScript = lib.optionalString (spec.credential_proxy_url != null) ''
     export HTTP_PROXY=${spec.credential_proxy_url}
     export HTTPS_PROXY=${spec.credential_proxy_url}
     export ALL_PROXY=${spec.credential_proxy_url}
-    export OPENAI_API_KEY=agentmom-proxy
     export OPENROUTER_API_KEY=agentmom-proxy
     export NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/agentmom-proxy.crt
     export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
     export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
   '';
+  guestEnv = {
+    HOME = "/root";
+    HERMES_HOME = hermesHome;
+    CODEX_HOME = "/root/.codex";
+  } // lib.optionalAttrs (spec.credential_proxy_url != null) {
+    HTTP_PROXY = spec.credential_proxy_url;
+    HTTPS_PROXY = spec.credential_proxy_url;
+    ALL_PROXY = spec.credential_proxy_url;
+    OPENROUTER_API_KEY = "agentmom-proxy";
+    NODE_EXTRA_CA_CERTS = "/usr/local/share/ca-certificates/agentmom-proxy.crt";
+    REQUESTS_CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt";
+    SSL_CERT_FILE = "/etc/ssl/certs/ca-certificates.crt";
+  };
   codexConfig = ''
     approval_policy = "never"
     sandbox_mode = "danger-full-access"
@@ -27,30 +108,27 @@ let
       "${builtins.substring 0 62 spec.name}x"
     else
       spec.name;
-  hermesConfig = if spec.credential_mode == "openrouter-proxy" then ''
-    default_provider: openrouter
-    model: ${spec.hermes_model}
-    providers:
-      openrouter:
-        provider: openrouter
-        model: ${spec.hermes_model}
-        api_key_env: OPENROUTER_API_KEY
+  hermesConfig = ''
+    model:
+      provider: openrouter
+      default: ${spec.hermes_model}
+    terminal:
+      backend: local
+      cwd: /workspace
+      persistent_shell: true
+      timeout: 600
+    approvals:
+      mode: off
+    toolsets:
+      - all
     env:
       HTTP_PROXY: ${spec.credential_proxy_url}
       HTTPS_PROXY: ${spec.credential_proxy_url}
       ALL_PROXY: ${spec.credential_proxy_url}
-      OPENAI_API_KEY: agentmom-proxy
       OPENROUTER_API_KEY: agentmom-proxy
       NODE_EXTRA_CA_CERTS: /usr/local/share/ca-certificates/agentmom-proxy.crt
       REQUESTS_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
       SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
-  '' else ''
-    default_provider: openai-codex
-    model: ${spec.hermes_model}
-    providers:
-      openai-codex:
-        provider: openai-codex
-        model: ${spec.hermes_model}
   '';
   optionalPackage = name:
     lib.optional (builtins.hasAttr name pkgs) (builtins.getAttr name pkgs);
@@ -136,6 +214,7 @@ in
   security.sudo.enable = false;
   systemd.oomd.enable = false;
   systemd.services.systemd-random-seed.enable = lib.mkForce false;
+  systemd.services.sshd-keygen.enable = lib.mkForce false;
   systemd.services."systemd-update-utmp".enable = lib.mkForce false;
   systemd.timers.fstrim.enable = lib.mkForce false;
   systemd.timers."systemd-tmpfiles-clean".enable = lib.mkForce false;
@@ -164,7 +243,7 @@ in
   ]
   ++ optionalPackage "codex"
   ++ optionalPackage "opencode"
-  ++ [ hermesPackage ];
+  ++ [ hermesPackage agentmomRun agentmomHermes agentmomHermesAcp agentmomHermesDashboard agentmomHermesDashboardStart ];
 
   environment.etc."profile.d/agentmom-proxy.sh".text = proxyScript;
   environment.etc."profile.d/mom.sh".text = ''
@@ -184,6 +263,21 @@ in
     "d /root/.config 0700 root root - -"
     "d /root/.config/opencode 0700 root root - -"
   ];
+
+  systemd.services.agentmom-hermes-dashboard = {
+    description = "Agent Mom Hermes dashboard";
+    after = [ "network-online.target" ];
+    wants = [ "network-online.target" ];
+    path = [ hermesPackage pkgs.coreutils ];
+    environment = guestEnv;
+    serviceConfig = {
+      Type = "simple";
+      WorkingDirectory = "/workspace";
+      ExecStart = "${agentmomHermesDashboard}/bin/agentmom-hermes-dashboard";
+      Restart = "on-failure";
+      RestartSec = "2s";
+    };
+  };
 
   system.activationScripts.agentmomGuestConfig.text = ''
     install -d -m 0700 /root/.codex ${hermesHome} ${hermesHome}/home /root/.local/share/opencode /root/.config/opencode
@@ -232,9 +326,7 @@ EOF
   };
   systemd.services.agentmom-ssh-host-key = {
     description = "Install Agent Mom pinned SSH host key";
-    after = [ "sshd-keygen.service" ];
     before = [ "sshd.service" ];
-    requires = [ "sshd-keygen.service" ];
     requiredBy = [ "sshd.service" ];
     serviceConfig = {
       Type = "oneshot";

@@ -116,7 +116,7 @@ fn acp_shell_command(config: &crate::config::MomConfig) -> String {
     let hermes_home = format!("{}/{}", crate::GUEST_HERMES_HOME, config.hermes_profile());
     let hermes_home = crate::shell_quote(&hermes_home);
     format!(
-        "stty -echo 2>/dev/null || true; if [ -f /etc/profile.d/agentmom-proxy.sh ]; then . /etc/profile.d/agentmom-proxy.sh; fi; export HERMES_HOME={hermes_home}; cd /workspace && if command -v hermes-acp >/dev/null 2>&1; then exec hermes-acp; elif command -v hermes >/dev/null 2>&1; then exec hermes acp; else echo 'hermes-acp/hermes acp is not installed' >&2; exit 127; fi"
+        "stty -echo 2>/dev/null || true; if command -v agentmom-hermes-acp >/dev/null 2>&1; then exec agentmom-hermes-acp; fi; if [ -f /etc/profile.d/agentmom-proxy.sh ]; then . /etc/profile.d/agentmom-proxy.sh; fi; export HERMES_HOME={hermes_home}; cd /workspace && if command -v hermes-acp >/dev/null 2>&1; then exec hermes-acp; elif command -v hermes >/dev/null 2>&1; then exec hermes acp; else echo 'hermes-acp/hermes acp is not installed' >&2; exit 127; fi"
     )
 }
 
@@ -225,9 +225,27 @@ async fn cleanup_workspace(state: &HermesAcpState, workspace_name: &str) {
 
 async fn preflight_hermes(vm: &GuestVm) -> Result<()> {
     let output = vm
-        .shell(
-            r#"
+        .shell(preflight_hermes_script())
+        .await
+        .context("run Hermes ACP preflight")?;
+    if !output.ok {
+        bail!("{}", output.stderr.trim());
+    }
+    Ok(())
+}
+
+fn preflight_hermes_script() -> &'static str {
+    r#"
 set -eu
+if command -v agentmom-hermes-acp >/dev/null 2>&1; then
+  agentmom-hermes-acp --check >/tmp/mom-acp-preflight-hermes.out 2>/tmp/mom-acp-preflight-hermes.err || {
+    cat /tmp/mom-acp-preflight-hermes.err >&2
+    exit 1
+  }
+  exit 0
+fi
+if [ -f /etc/profile.d/mom.sh ]; then . /etc/profile.d/mom.sh; fi
+if [ -f /etc/profile.d/agentmom-proxy.sh ]; then . /etc/profile.d/agentmom-proxy.sh; fi
 if command -v hermes-acp >/dev/null 2>&1; then
   hermes-acp --check >/tmp/mom-acp-preflight-hermes.out 2>/tmp/mom-acp-preflight-hermes.err || {
     cat /tmp/mom-acp-preflight-hermes.err >&2
@@ -242,12 +260,23 @@ else
   echo 'hermes-acp/hermes is not installed or not on PATH' >&2
   exit 127
 fi
-"#,
-        )
-        .await
-        .context("run Hermes ACP preflight")?;
-    if !output.ok {
-        bail!("{}", output.stderr.trim());
+"#
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn acp_preflight_prefers_guest_wrapper_with_profile_fallback() {
+        let script = preflight_hermes_script();
+
+        assert!(script.contains("command -v agentmom-hermes-acp"));
+        assert!(script.contains("agentmom-hermes-acp --check"));
+        assert!(script.contains(". /etc/profile.d/mom.sh"));
+        assert!(script.contains(". /etc/profile.d/agentmom-proxy.sh"));
+        let wrapper_check = script.find("agentmom-hermes-acp --check").unwrap();
+        let raw_check = script.find("\n  hermes-acp --check").unwrap();
+        assert!(wrapper_check < raw_check);
     }
-    Ok(())
 }

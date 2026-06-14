@@ -32,6 +32,8 @@ use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 const LABEL_MANAGED: &str = "mom.managed";
 const LABEL_VERSION: &str = "mom.version";
 const GUEST_HERMES_HOME: &str = "/root/.hermes-agent";
+const GUEST_AGENTMOM_RUN: &str = "/run/current-system/sw/bin/agentmom-run";
+const GUEST_AGENTMOM_HERMES: &str = "/run/current-system/sw/bin/agentmom-hermes";
 const HERMES_GUEST_PORT: u16 = 9119;
 
 mod acp;
@@ -129,10 +131,13 @@ enum WorkspaceCommand {
         #[arg(last = true)]
         args: Vec<String>,
     },
-    /// Re-apply Hermes/proxy configuration to an existing workspace VM.
-    RefreshConfig { name: String },
     /// Verify proxy-mode credentials and egress in a workspace VM.
     ProxySmoke { name: String },
+    /// Register web app previews for a workspace.
+    Preview {
+        #[command(subcommand)]
+        command: WorkspacePreviewCommand,
+    },
     /// Back up a workspace directory now.
     Backup {
         name: String,
@@ -159,6 +164,33 @@ enum WorkspaceCommand {
         #[arg(short, long)]
         force: bool,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum WorkspacePreviewCommand {
+    /// Open a tunnel to a web app running inside a workspace VM.
+    Register(PreviewRegisterArgs),
+    /// List registered previews for a workspace.
+    List { name: String },
+    /// Remove a registered preview from a workspace.
+    Remove { name: String, preview: String },
+}
+
+#[derive(Debug, Args)]
+struct PreviewRegisterArgs {
+    name: String,
+    /// Preview name shown in the browser UI.
+    #[arg(long, default_value = "app")]
+    preview: String,
+    /// Web app port inside the workspace VM.
+    #[arg(long)]
+    port: u16,
+    /// Hostname inside the workspace VM.
+    #[arg(long, default_value = "127.0.0.1")]
+    host: String,
+    /// Path to open in the preview browser.
+    #[arg(long, default_value = "/")]
+    path: String,
 }
 
 #[derive(Debug, Subcommand)]
@@ -413,6 +445,25 @@ struct JobRecord {
     updated_at: i64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct ServiceTunnelRecord {
+    hostname: String,
+    workspace_name: String,
+    node_id: String,
+    service: String,
+    url: String,
+    updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PreviewRecord {
+    name: String,
+    workspace_name: String,
+    node_id: String,
+    url: String,
+    updated_at: i64,
+}
+
 #[derive(Debug, Deserialize)]
 struct CreateJobRequest {
     workspace_name: String,
@@ -545,6 +596,26 @@ struct WorkerBackupArtifactRequest {
     size_bytes: Option<i64>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct PreviewOpenRequest {
+    #[serde(default = "default_preview_name")]
+    name: String,
+    #[serde(default = "default_preview_host")]
+    host: String,
+    port: u16,
+    #[serde(default = "default_preview_path")]
+    path: String,
+}
+
+#[derive(Debug, Clone)]
+struct PreviewSpec {
+    name: String,
+    service: String,
+    host: String,
+    port: u16,
+    path: String,
+}
+
 trait WorkerTokenExt {
     fn with_worker_token(self) -> Self;
 }
@@ -604,18 +675,9 @@ async fn workspace_command(command: WorkspaceCommand) -> Result<()> {
             require_workspace_local(&workspace, "hermes")?;
             workspace_touch(&workspace.name)?;
             let vm = workspace_running_vm(&workspace).await?;
-            let mut command = vec!["hermes".to_string()];
+            let mut command = vec![GUEST_AGENTMOM_HERMES.to_string()];
             command.extend(args);
             run_guest_command(&vm, command).await
-        }
-        WorkspaceCommand::RefreshConfig { name } => {
-            let workspace = workspace_get(&name)?;
-            require_workspace_local(&workspace, "refresh config")?;
-            let config = load_mom_config()?;
-            let vm = workspace_running_vm(&workspace).await?;
-            apply_guest_auth_config(&vm, &config).await?;
-            println!("refreshed workspace {name} config");
-            Ok(())
         }
         WorkspaceCommand::ProxySmoke { name } => {
             let workspace = workspace_get(&name)?;
@@ -624,6 +686,7 @@ async fn workspace_command(command: WorkspaceCommand) -> Result<()> {
             let vm = workspace_running_vm(&workspace).await?;
             proxy_smoke(&vm).await
         }
+        WorkspaceCommand::Preview { command } => workspace_preview_command(command).await,
         WorkspaceCommand::Backup {
             name,
             leave_stopped,
@@ -640,6 +703,49 @@ async fn workspace_command(command: WorkspaceCommand) -> Result<()> {
             workspace_dir,
             force,
         } => workspace_remove(&name, workspace_dir, force).await,
+    }
+}
+
+async fn workspace_preview_command(command: WorkspacePreviewCommand) -> Result<()> {
+    match command {
+        WorkspacePreviewCommand::Register(args) => {
+            let preview = ui::open_preview_for_workspace(
+                &args.name,
+                PreviewOpenRequest {
+                    name: args.preview,
+                    host: args.host,
+                    port: args.port,
+                    path: args.path,
+                },
+            )
+            .await?;
+            println!("{}", preview.url);
+            Ok(())
+        }
+        WorkspacePreviewCommand::List { name } => {
+            let previews = ui::preview_records_for_workspace(&name)?;
+            if previews.is_empty() {
+                println!("no previews registered for {name}");
+                return Ok(());
+            }
+            println!("{:<20} {:<16} UPDATED_AT URL", "PREVIEW", "NODE");
+            for preview in previews {
+                println!(
+                    "{:<20} {:<16} {:<10} {}",
+                    preview.name, preview.node_id, preview.updated_at, preview.url
+                );
+            }
+            Ok(())
+        }
+        WorkspacePreviewCommand::Remove { name, preview } => {
+            let removed = ui::remove_preview_for_workspace(&name, &preview).await?;
+            if removed {
+                println!("removed preview {preview} from {name}");
+            } else {
+                println!("preview {preview} was not registered for {name}");
+            }
+            Ok(())
+        }
     }
 }
 
@@ -1606,65 +1712,112 @@ fn default_workspace_backup_interval() -> u64 {
     0
 }
 
-fn hermes_config_yaml(config: &MomConfig) -> String {
-    let model = config_string(config.model());
-    let proxy = config
-        .credential_proxy_url()
-        .map(|url| {
-            format!(
-                r#"
-env:
-  HTTP_PROXY: {}
-  HTTPS_PROXY: {}
-  ALL_PROXY: {}
-  OPENAI_API_KEY: agentmom-proxy
-  OPENROUTER_API_KEY: agentmom-proxy
-"#,
-                config_string(url),
-                config_string(url),
-                config_string(url)
-            )
-        })
-        .unwrap_or_default();
-    format!(
-        r#"model:
-  provider: openrouter
-  default: {model}
-terminal:
-  backend: local
-  cwd: /workspace
-  persistent_shell: true
-  timeout: 600
-approvals:
-  mode: off
-toolsets:
-  - all
-{proxy}
-"#
-    )
+fn default_preview_name() -> String {
+    "app".to_string()
 }
 
-fn proxy_env_sh(proxy_url: &str) -> String {
-    let proxy_url = shell_quote(proxy_url);
-    format!(
-        r#"export HTTP_PROXY={proxy_url}
-export HTTPS_PROXY={proxy_url}
-export ALL_PROXY={proxy_url}
-export OPENAI_API_KEY=agentmom-proxy
-export OPENROUTER_API_KEY=agentmom-proxy
-export NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/agentmom-proxy.crt
-export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
-export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
-"#
-    )
+fn default_preview_host() -> String {
+    "127.0.0.1".to_string()
 }
 
-fn config_string(value: &str) -> String {
-    serde_json::to_string(value).expect("serializing a string cannot fail")
+fn default_preview_path() -> String {
+    "/".to_string()
 }
 
-fn hermes_soul_md() -> &'static str {
-    "You are running inside an isolated Agent Mom microvm.nix VM. Work in /workspace.\n"
+fn preview_spec(request: &PreviewOpenRequest) -> Result<PreviewSpec> {
+    if request.port == 0 {
+        bail!("preview port must be between 1 and 65535");
+    }
+    let name = normalize_preview_name(&request.name)?;
+    let service = preview_service_id(&name);
+    let host = normalize_preview_host(&request.host)?;
+    let path = normalize_preview_path(&request.path);
+    Ok(PreviewSpec {
+        name,
+        service,
+        host,
+        port: request.port,
+        path,
+    })
+}
+
+fn preview_service_id(name: &str) -> String {
+    format!("preview:{name}")
+}
+
+fn preview_name_from_service(service: &str) -> Option<String> {
+    service.strip_prefix("preview:").map(ToString::to_string)
+}
+
+fn normalize_preview_name(value: &str) -> Result<String> {
+    let mut output = String::new();
+    let mut last_dash = false;
+    for ch in value.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            output.push(ch.to_ascii_lowercase());
+            last_dash = false;
+        } else if matches!(ch, '-' | '_') {
+            output.push(ch);
+            last_dash = ch == '-';
+        } else if ch.is_ascii_whitespace() || ch == '.' {
+            if !last_dash && !output.is_empty() {
+                output.push('-');
+                last_dash = true;
+            }
+        } else {
+            bail!(
+                "preview name may only contain letters, digits, dashes, underscores, spaces, or dots"
+            );
+        }
+    }
+    let output = output.trim_matches('-').to_string();
+    if output.is_empty() {
+        bail!("preview name must not be empty");
+    }
+    if output.len() > 48 {
+        bail!("preview name must be at most 48 bytes");
+    }
+    Ok(output)
+}
+
+fn normalize_preview_host(value: &str) -> Result<String> {
+    let host = value.trim();
+    if host.is_empty() {
+        bail!("preview host must not be empty");
+    }
+    if host == "0.0.0.0" || host == "::" {
+        return Ok("127.0.0.1".to_string());
+    }
+    if host
+        .chars()
+        .any(|ch| ch.is_ascii_whitespace() || matches!(ch, '/' | '\\' | ':'))
+    {
+        bail!("preview host must be a hostname or IP without a port");
+    }
+    Ok(host.to_string())
+}
+
+fn normalize_preview_path(value: &str) -> String {
+    let path = value.trim();
+    if path.is_empty() {
+        return "/".to_string();
+    }
+    if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    }
+}
+
+fn preview_from_tunnel(record: ServiceTunnelRecord) -> Option<PreviewRecord> {
+    let name = preview_name_from_service(&record.service)?;
+    Some(PreviewRecord {
+        name,
+        workspace_name: record.workspace_name,
+        node_id: record.node_id,
+        url: record.url,
+        updated_at: record.updated_at,
+    })
 }
 
 fn shell_quote(value: &str) -> String {
@@ -1691,17 +1844,6 @@ mod tests {
                 secret_file: None,
             },
         }
-    }
-
-    #[test]
-    fn openrouter_proxy_generates_hermes_config() {
-        let config = test_config();
-
-        config.validate_for_guest_config().unwrap();
-        let hermes = hermes_config_yaml(&config);
-        assert!(hermes.contains("provider: openrouter"));
-        assert!(!hermes.contains("api_mode: codex_responses"));
-        assert!(hermes.contains("OPENROUTER_API_KEY: agentmom-proxy"));
     }
 
     #[test]
@@ -1746,5 +1888,43 @@ mod tests {
             workspace_id_from_slug("justin2")
         );
         assert!(workspace_id_from_slug("justin2").starts_with("ws_"));
+    }
+
+    #[test]
+    fn preview_spec_normalizes_agent_friendly_input() {
+        let spec = preview_spec(&PreviewOpenRequest {
+            name: "Vite Dev".to_string(),
+            host: "0.0.0.0".to_string(),
+            port: 5173,
+            path: "dashboard".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(spec.name, "vite-dev");
+        assert_eq!(spec.service, "preview:vite-dev");
+        assert_eq!(spec.host, "127.0.0.1");
+        assert_eq!(spec.path, "/dashboard");
+    }
+
+    #[test]
+    fn preview_spec_rejects_unsafe_host_and_empty_port() {
+        assert!(
+            preview_spec(&PreviewOpenRequest {
+                name: "app".to_string(),
+                host: "127.0.0.1:3000".to_string(),
+                port: 3000,
+                path: "/".to_string(),
+            })
+            .is_err()
+        );
+        assert!(
+            preview_spec(&PreviewOpenRequest {
+                name: "app".to_string(),
+                host: "127.0.0.1".to_string(),
+                port: 0,
+                path: "/".to_string(),
+            })
+            .is_err()
+        );
     }
 }
