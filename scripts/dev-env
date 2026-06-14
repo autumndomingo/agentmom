@@ -17,8 +17,23 @@ find_port() {
   printf '%s\n' "${port}"
 }
 
-api_port="$(find_port "${MOM_API_PORT:-8787}")"
-worker_port="$(find_port "${MOM_WORKER_PORT:-9090}")"
+require_free_port() {
+  local port="$1"
+  if lsof -nP -iTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "Port ${port} is already in use" >&2
+    return 1
+  fi
+}
+
+api_port="${MOM_API_PORT:-8787}"
+worker_port="${MOM_WORKER_PORT:-9090}"
+if [ "${MOM_DEV_FIXED_PORTS:-0}" = "1" ]; then
+  require_free_port "${api_port}"
+  require_free_port "${worker_port}"
+else
+  api_port="$(find_port "${api_port}")"
+  worker_port="$(find_port "${worker_port}")"
+fi
 microvm_state="${MOM_MICROVM_STATE_DIR:-${repo_root}/.state/microvms}"
 microvm_workspaces="${MOM_MICROVM_WORKSPACE_DIR:-${microvm_state}/workspaces}"
 

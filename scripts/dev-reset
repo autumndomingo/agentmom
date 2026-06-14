@@ -6,12 +6,33 @@ cd "${repo_root}"
 
 pid_file="${repo_root}/.state/dev.pid"
 local_state_dir="${repo_root}/.state"
-utm_name="${MOM_DEV_UTM_NAME:-AgentMom-Dev}"
+
+utm_instance="${MOM_DEV_UTM_INSTANCE:-dev}"
+case "${utm_instance}" in
+  ""|*[!A-Za-z0-9._-]*)
+    echo "MOM_DEV_UTM_INSTANCE must use only letters, numbers, dot, underscore, or dash" >&2
+    exit 1
+    ;;
+esac
+
+if [ "${utm_instance}" = "dev" ]; then
+  default_utm_name="AgentMom-Dev"
+  default_utm_guest_dir="/home/mom/agentmom"
+  default_utm_microvm_state_dir="/home/mom/.local/state/agentmom/microvms"
+  default_utm_state_dir="${repo_root}/.state/dev-utm"
+else
+  default_utm_name="AgentMom-${utm_instance}"
+  default_utm_guest_dir="/home/mom/agentmom-${utm_instance}"
+  default_utm_microvm_state_dir="/home/mom/.local/state/agentmom-${utm_instance}/microvms"
+  default_utm_state_dir="${repo_root}/.state/dev-utm-${utm_instance}"
+fi
+
+utm_name="${MOM_DEV_UTM_NAME:-${default_utm_name}}"
 utm_guest_host="${MOM_DEV_UTM_HOST:-agentmom-dev-utm.local}"
 utm_guest_user="${MOM_DEV_UTM_USER:-mom}"
-utm_guest_dir="${MOM_DEV_UTM_GUEST_DIR:-/home/mom/agentmom}"
-utm_microvm_state_dir="${MOM_DEV_UTM_MICROVM_STATE_DIR:-/home/mom/.local/state/agentmom/microvms}"
-utm_state_dir="${repo_root}/.state/dev-utm"
+utm_guest_dir="${MOM_DEV_UTM_GUEST_DIR:-${default_utm_guest_dir}}"
+utm_microvm_state_dir="${MOM_DEV_UTM_MICROVM_STATE_DIR:-${default_utm_microvm_state_dir}}"
+utm_state_dir="${MOM_DEV_UTM_STATE_DIR:-${default_utm_state_dir}}"
 utm_fallback_key="${utm_state_dir}/id_ed25519"
 utm_bundle="${HOME}/Library/Containers/com.utmapp.UTM/Data/Documents/${utm_name}.utm"
 utm_ssh_args=()
@@ -73,6 +94,8 @@ select_utm_ssh_args() {
 }
 
 reset_utm_guest_state() {
+  local ip
+
   [ "${MOM_DEV_RESET_SKIP_UTM:-0}" != "1" ] || return 0
   [ "${MOM_DEV_RESET_UTM:-1}" != "0" ] || return 0
   [ -e "${utm_bundle}" ] || return 0
@@ -80,6 +103,10 @@ reset_utm_guest_state() {
 
   mkdir -p "${utm_state_dir}"
   select_utm_ssh_args
+  ip="$(utmctl ip-address "${utm_name}" 2>/dev/null | awk '/^[0-9]+\./ { print; exit }' || true)"
+  if [ -n "${ip}" ]; then
+    utm_guest_host="${ip}"
+  fi
   if ! ssh "${utm_ssh_args[@]}" "${utm_guest_user}@${utm_guest_host}" true >/dev/null 2>&1; then
     printf 'UTM guest not reachable; skipped UTM guest state reset\n'
     return 0
@@ -166,14 +193,14 @@ if [ -f "${pid_file}" ]; then
 fi
 
 stop_microvm_units
-if [ -d "${utm_state_dir}" ]; then
+if compgen -G "${local_state_dir}/dev-utm*" >/dev/null; then
   preserved_utm_state="$(mktemp -d "${TMPDIR:-/tmp}/agentmom-dev-utm-state.XXXXXX")"
-  cp -pR "${utm_state_dir}" "${preserved_utm_state}/dev-utm"
+  find "${local_state_dir}" -maxdepth 1 -type d -name 'dev-utm*' -exec cp -pR {} "${preserved_utm_state}/" \;
 fi
 rm -rf "${local_state_dir}" "${repo_root}/dev/iron-proxy"
-if [ -n "${preserved_utm_state}" ] && [ -d "${preserved_utm_state}/dev-utm" ]; then
+if [ -n "${preserved_utm_state}" ]; then
   mkdir -p "${local_state_dir}"
-  cp -pR "${preserved_utm_state}/dev-utm" "${utm_state_dir}"
+  find "${preserved_utm_state}" -maxdepth 1 -type d -name 'dev-utm*' -exec cp -pR {} "${local_state_dir}/" \;
   rm -rf "${preserved_utm_state}"
 fi
 

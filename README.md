@@ -125,6 +125,27 @@ just dev
 ports, starts iron-proxy on host port `1080`, starts `mom api`, and starts
 `mom worker`. Runtime state stays under `.state/microvms`.
 
+For UTM-backed dev, one instance maps to one UTM VM. The default instance keeps
+the historical `AgentMom-Dev` VM and paths:
+
+```sh
+just dev-utm
+```
+
+Run another isolated VM by naming the instance:
+
+```sh
+MOM_DEV_UTM_INSTANCE=signup just dev-utm
+```
+
+Non-default instances use `AgentMom-$instance`, `.state/dev-utm-$instance`,
+`.state/logs/dev-utm-$instance`, `/home/mom/agentmom-$instance`, and isolated
+guest microVM state. List known Agent Mom UTM VMs with:
+
+```sh
+just dev-utm-list
+```
+
 ### Web App Previews
 
 A host-side agent or operator can register a web app running inside a workspace

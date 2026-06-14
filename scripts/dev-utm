@@ -4,14 +4,36 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_root}"
 
-name="${MOM_DEV_UTM_NAME:-AgentMom-Dev}"
+instance="${MOM_DEV_UTM_INSTANCE:-dev}"
+case "${instance}" in
+  ""|*[!A-Za-z0-9._-]*)
+    echo "MOM_DEV_UTM_INSTANCE must use only letters, numbers, dot, underscore, or dash" >&2
+    exit 1
+    ;;
+esac
+
+if [ "${instance}" = "dev" ]; then
+  default_name="AgentMom-Dev"
+  default_state_dir="${repo_root}/.state/dev-utm"
+  default_log_dir="${repo_root}/.state/logs"
+  default_guest_dir="/home/mom/agentmom"
+  default_guest_microvm_state_dir="/home/mom/.local/state/agentmom/microvms"
+else
+  default_name="AgentMom-${instance}"
+  default_state_dir="${repo_root}/.state/dev-utm-${instance}"
+  default_log_dir="${repo_root}/.state/logs/dev-utm-${instance}"
+  default_guest_dir="/home/mom/agentmom-${instance}"
+  default_guest_microvm_state_dir="/home/mom/.local/state/agentmom-${instance}/microvms"
+fi
+
+name="${MOM_DEV_UTM_NAME:-${default_name}}"
 guest_host="${MOM_DEV_UTM_HOST:-agentmom-dev-utm.local}"
 guest_user="${MOM_DEV_UTM_USER:-mom}"
-guest_dir="${MOM_DEV_UTM_GUEST_DIR:-/home/mom/agentmom}"
-guest_microvm_state_dir="${MOM_DEV_UTM_MICROVM_STATE_DIR:-/home/mom/.local/state/agentmom/microvms}"
+guest_dir="${MOM_DEV_UTM_GUEST_DIR:-${default_guest_dir}}"
+guest_microvm_state_dir="${MOM_DEV_UTM_MICROVM_STATE_DIR:-${default_guest_microvm_state_dir}}"
 guest_microvm_workspace_dir="${MOM_DEV_UTM_MICROVM_WORKSPACE_DIR:-${guest_microvm_state_dir}/workspaces}"
-state_dir="${repo_root}/.state/dev-utm"
-log_dir="${repo_root}/.state/logs"
+state_dir="${MOM_DEV_UTM_STATE_DIR:-${default_state_dir}}"
+log_dir="${MOM_DEV_UTM_LOG_DIR:-${default_log_dir}}"
 fallback_key="${state_dir}/id_ed25519"
 bundle="${HOME}/Library/Containers/com.utmapp.UTM/Data/Documents/${name}.utm"
 data_dir="${bundle}/Data"
@@ -22,6 +44,21 @@ auth_pubkey="${AGENTMOM_DEV_UTM_SSH_PUBKEY:-}"
 auth_mode="default"
 
 mkdir -p "${state_dir}" "${log_dir}"
+
+if [ "${MOM_DEV_UTM_SHOW_CONFIG:-0}" = "1" ]; then
+  cat <<EOF_CONFIG
+instance=${instance}
+name=${name}
+guest_host=${guest_host}
+guest_dir=${guest_dir}
+guest_microvm_state_dir=${guest_microvm_state_dir}
+guest_microvm_workspace_dir=${guest_microvm_workspace_dir}
+state_dir=${state_dir}
+log_dir=${log_dir}
+bundle=${bundle}
+EOF_CONFIG
+  exit 0
+fi
 
 find_port() {
   local port="$1"
@@ -302,6 +339,10 @@ wait_for_ssh() {
   ssh_log="${state_dir}/ssh-wait.log"
   printf '  %-24s' "waiting for SSH..."
   for _ in $(seq 1 180); do
+    ip="$(utmctl ip-address "${name}" 2>/dev/null | awk '/^[0-9]+\./ { print; exit }' || true)"
+    if [ -n "${ip}" ]; then
+      guest_host="${ip}"
+    fi
     if ssh_guest true >"${ssh_log}" 2>&1; then
       printf 'ok\n'
       return 0
@@ -319,10 +360,6 @@ Run a deliberate UTM reset once:
 EOF_AUTH
       cat "${ssh_log}" >&2 || true
       exit 1
-    fi
-    ip="$(utmctl ip-address "${name}" 2>/dev/null | awk '/^[0-9]+\./ { print; exit }' || true)"
-    if [ -n "${ip}" ]; then
-      guest_host="${ip}"
     fi
     sleep 2
   done
@@ -377,6 +414,7 @@ main() {
   cat <<EOF
 
 Agent Mom UTM dev is starting
+  Instance: ${instance}
   UI:       http://127.0.0.1:${api_port}
   VM:       ${name} (${guest_user}@${guest_host})
   Guest dir:${guest_dir}
@@ -389,7 +427,7 @@ EOF
     -L "127.0.0.1:${api_port}:127.0.0.1:${api_port}" \
     -L "127.0.0.1:${worker_port}:127.0.0.1:${worker_port}" \
     "${guest_user}@${guest_host}" \
-    "cd '${guest_dir}' && set -a; . ./.env; set +a; MOM_API_PORT='${api_port}' MOM_WORKER_PORT='${worker_port}' MOM_MICROVM_STATE_DIR='${guest_microvm_state_dir}' MOM_MICROVM_WORKSPACE_DIR='${guest_microvm_workspace_dir}' MOM_RUNTIME_SUDO=1 nix develop --command bash -lc 'npm --prefix ui ci && just dev'"
+    "cd '${guest_dir}' && set -a; . ./.env; set +a; MOM_API_PORT='${api_port}' MOM_WORKER_PORT='${worker_port}' MOM_DEV_FIXED_PORTS=1 MOM_MICROVM_STATE_DIR='${guest_microvm_state_dir}' MOM_MICROVM_WORKSPACE_DIR='${guest_microvm_workspace_dir}' MOM_RUNTIME_SUDO=1 nix develop --command bash -lc 'npm --prefix ui ci && just dev'"
 }
 
 main "$@"
