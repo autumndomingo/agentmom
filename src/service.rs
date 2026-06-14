@@ -21,6 +21,7 @@ const HERMES_HEALTH_PATH: &str = "/api/status";
 const HERMES_WORKDIR: &str = "/workspace";
 const HERMES_LOG_PATH: &str = "/tmp/mom-hermes/dashboard.log";
 const HERMES_READINESS_ATTEMPTS: u16 = 90;
+const HERMES_PROBE_TIMEOUT_SECS: u16 = 2;
 const HERMES_WGET_TIMEOUT_SECS: u16 = 1;
 
 #[derive(Clone, Default)]
@@ -176,15 +177,29 @@ if ! command -v hermes >/dev/null 2>&1; then
   exit 1
 fi
 mkdir -p {workdir_q} {log_dir_q}
-if wget -q -O /dev/null --timeout={wget_timeout} http://127.0.0.1:{port}{health_path} >/dev/null 2>&1; then
+probe_hermes_dashboard() {{
+  timeout {probe_timeout}s wget -q -O /dev/null --timeout={wget_timeout} http://127.0.0.1:{port}{health_path} >/dev/null 2>&1
+}}
+if probe_hermes_dashboard; then
   exit 0
 fi
 cd {workdir_q}
+hermes_bin="$(readlink -f "$(command -v hermes)")"
+hermes_prefix="$(dirname "$(dirname "$hermes_bin")")"
+hermes_web_dist="$hermes_prefix/share/hermes-agent/web_dist"
+if netstat -ltn 2>/dev/null | grep -q ':{port}[[:space:]]'; then
+  hermes dashboard --stop >/dev/null 2>&1 || true
+  sleep 1
+fi
 if ! netstat -ltn 2>/dev/null | grep -q ':{port}[[:space:]]'; then
-  setsid hermes dashboard --host 0.0.0.0 --port {port} --no-open --insecure </dev/null >{log_path_q} 2>&1 &
+  if [ -d "$hermes_web_dist" ]; then
+    HERMES_WEB_DIST="$hermes_web_dist" setsid hermes dashboard --host 0.0.0.0 --port {port} --no-open --insecure --skip-build </dev/null >{log_path_q} 2>&1 &
+  else
+    setsid hermes dashboard --host 0.0.0.0 --port {port} --no-open --insecure </dev/null >{log_path_q} 2>&1 &
+  fi
 fi
 for _ in $(seq 1 {readiness_attempts}); do
-  if wget -q -O /dev/null --timeout={wget_timeout} http://127.0.0.1:{port}{health_path} >/dev/null 2>&1; then
+  if probe_hermes_dashboard; then
     exit 0
   fi
   sleep 1
@@ -197,6 +212,7 @@ exit 1
         port = HERMES_GUEST_PORT,
         health_path = HERMES_HEALTH_PATH,
         readiness_attempts = HERMES_READINESS_ATTEMPTS,
+        probe_timeout = HERMES_PROBE_TIMEOUT_SECS,
         wget_timeout = HERMES_WGET_TIMEOUT_SECS,
         log_path_q = shell_quote(HERMES_LOG_PATH),
     )
@@ -368,8 +384,8 @@ fn http_host_for_url(host: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        HERMES_READINESS_ATTEMPTS, HERMES_WGET_TIMEOUT_SECS, hermes_dashboard_script,
-        parse_service_tunnel_port_range, service_tunnel_health_url,
+        HERMES_PROBE_TIMEOUT_SECS, HERMES_READINESS_ATTEMPTS, HERMES_WGET_TIMEOUT_SECS,
+        hermes_dashboard_script, parse_service_tunnel_port_range, service_tunnel_health_url,
         service_tunnel_public_url_from_base,
     };
 
@@ -428,6 +444,15 @@ mod tests {
     fn hermes_dashboard_readiness_loop_has_bounded_probe_timeout() {
         let script = hermes_dashboard_script();
         assert!(script.contains(&format!("seq 1 {HERMES_READINESS_ATTEMPTS}")));
+        assert!(script.contains(&format!("timeout {HERMES_PROBE_TIMEOUT_SECS}s wget")));
         assert!(script.contains(&format!("--timeout={HERMES_WGET_TIMEOUT_SECS}")));
+    }
+
+    #[test]
+    fn hermes_dashboard_uses_packaged_web_dist_when_available() {
+        let script = hermes_dashboard_script();
+        assert!(script.contains("share/hermes-agent/web_dist"));
+        assert!(script.contains("HERMES_WEB_DIST=\"$hermes_web_dist\""));
+        assert!(script.contains("--skip-build"));
     }
 }
