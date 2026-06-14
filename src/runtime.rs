@@ -1246,7 +1246,7 @@ async fn wait_for_ssh(vm: &GuestVm, spec: &MicrovmSpec, timeout: Duration) -> Re
                 }
             }
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
 
@@ -1496,5 +1496,12 @@ mod tests {
         assert!(
             template.contains("default_provider: openai-codex\n    model: ${spec.hermes_model}")
         );
+    }
+
+    #[test]
+    fn microvm_template_disables_guest_ssh_source_penalties() {
+        let template = microvm_workspace_nix();
+
+        assert!(template.contains("PerSourcePenalties = \"no\";"));
     }
 }

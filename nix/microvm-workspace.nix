@@ -220,6 +220,7 @@ EOF
     settings = {
       PasswordAuthentication = false;
       KbdInteractiveAuthentication = false;
+      PerSourcePenalties = "no";
       PermitRootLogin = "yes";
       UsePAM = false;
     };
