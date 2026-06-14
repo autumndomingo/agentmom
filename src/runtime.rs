@@ -7,6 +7,8 @@ use super::*;
 const DEFAULT_MICROVM_CIDR_PREFIX: &str = "192.168.83";
 const MIN_MACHINE_INDEX: u16 = 10;
 const MAX_MACHINE_INDEX: u16 = 229;
+const FRESH_VM_SYSTEMD_ACTIVE_TIMEOUT: Duration = Duration::from_secs(30);
+const FRESH_VM_SSH_READY_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum VmStatus {
@@ -290,8 +292,8 @@ pub(crate) async fn start_vm(name: &str) -> Result<GuestVm> {
     systemctl(&["start", &format!("agentmom-microvm@{name}.service")]).await?;
     let vm = GuestVm::new(name);
     let spec = load_microvm_spec(name)?;
-    wait_for_systemd_active(name, Duration::from_secs(30)).await?;
-    wait_for_ssh(&vm, &spec, Duration::from_secs(120)).await?;
+    wait_for_systemd_active(name, FRESH_VM_SYSTEMD_ACTIVE_TIMEOUT).await?;
+    wait_for_ssh(&vm, &spec, FRESH_VM_SSH_READY_TIMEOUT).await?;
     fs::write(machine_dir(name)?.join("state"), b"running\n")?;
     Ok(vm)
 }
