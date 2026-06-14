@@ -94,3 +94,4 @@ Keep the first production runtime narrow: Cloud Hypervisor, `/24` guest network,
 - Fixed branch commit `07a93f2` was pinned by configs test commit `61acc8d` and switched on `mom-ctrl`, `mom-1`, and `mom-2`. All three roles now evaluate/run the same Agent Mom package path.
 - Coherent all-role validation passed: read-only real-fleet passed on both nodes, mutating real-fleet passed on `mom-1` in 99.1s and `mom-2` in 101.9s, and post-test sweeps showed ready API, active worker services, no failed units, and no leftover microVM units.
 - Targeted guest validation from a disposable `storecheck-*` workspace confirmed `/nix/store` is mounted read-only from `ro-store` and `touch /nix/store/.agentmom-write-test` fails with `Read-only file system`.
+- Botched `storecheck-*` attempts briefly tripped the monitor's recent-failed-job threshold; after the 900s window aged out, `agentmom-monitor-check` returned to `monitor ok` with no failed units.
