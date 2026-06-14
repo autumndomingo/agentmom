@@ -26,7 +26,6 @@ use tokio_tungstenite::{
 
 const MOM_BIN: &str = env!("CARGO_BIN_EXE_mom");
 const WORKER_TOKEN: &str = "test-worker-token";
-const ADMIN_CODE: &str = "AM-TEST-ADMIN";
 static FLEET_TEST_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
 static ADMIN_COOKIES: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
 
@@ -92,23 +91,13 @@ impl Drop for TestFleet {
 }
 
 #[tokio::test]
-async fn first_user_needs_bootstrap_code_and_existing_users_need_their_own_code() -> Result<()> {
+async fn first_user_becomes_admin_and_existing_users_need_their_own_code() -> Result<()> {
     let fleet = TestFleet::start().await?;
     let client = reqwest::Client::new();
 
-    let unauthenticated_bootstrap = client
-        .post(format!("{}/api/auth/login", fleet.api_url))
-        .json(&json!({ "email": "admin@example.com" }))
-        .send()
-        .await?;
-    assert_eq!(unauthenticated_bootstrap.status(), StatusCode::UNAUTHORIZED);
-
     let first_response = client
         .post(format!("{}/api/auth/login", fleet.api_url))
-        .json(&json!({
-            "email": "admin@example.com",
-            "access_code": ADMIN_CODE
-        }))
+        .json(&json!({ "email": "admin@example.com" }))
         .send()
         .await?
         .error_for_status()?;
@@ -119,7 +108,7 @@ async fn first_user_needs_bootstrap_code_and_existing_users_need_their_own_code(
         .ok_or_else(|| anyhow!("first login did not return user code"))?
         .to_string();
     assert_eq!(first["user"]["role"], "admin");
-    assert_eq!(admin_code, ADMIN_CODE);
+    assert!(!admin_code.is_empty());
 
     let missing_code = client
         .post(format!("{}/api/auth/login", fleet.api_url))
@@ -1858,8 +1847,6 @@ fn spawn_api(state_dir: &Path, bind: &str, envs: &[(&str, &str)]) -> Result<Chil
             "schema_version": 1,
             "auth": {
                 "secret": "test-auth-secret"
-                ,
-                "bootstrap_admin_code": ADMIN_CODE
             }
         }))?,
     )
@@ -2551,10 +2538,7 @@ async fn admin_cookie(api_url: &str) -> Result<String> {
 async fn admin_login(client: &reqwest::Client, api_url: &str) -> Result<String> {
     let response = client
         .post(format!("{api_url}/api/auth/login"))
-        .json(&json!({
-            "email": "admin@example.com",
-            "access_code": ADMIN_CODE
-        }))
+        .json(&json!({ "email": "admin@example.com" }))
         .send()
         .await?;
     let status = response.status();

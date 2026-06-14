@@ -22,7 +22,6 @@ let
     };
     auth = {
       secret_file = cfg.auth.secretFile;
-      bootstrap_admin_code_file = cfg.auth.bootstrapAdminCodeFile;
     };
   };
   effectiveConfigFile =
@@ -422,12 +421,6 @@ in
         type = lib.types.nullOr lib.types.str;
         default = null;
         description = "Runtime file containing the Agent Mom browser-session and invite HMAC secret.";
-      };
-
-      bootstrapAdminCodeFile = lib.mkOption {
-        type = lib.types.nullOr lib.types.str;
-        default = null;
-        description = "Runtime file containing the first admin login code used to bootstrap an empty Agent Mom catalog.";
       };
 
       secureCookies = lib.mkOption {
@@ -1001,10 +994,6 @@ in
       {
         assertion = !cfg.api.enable || cfg.configFile != null || cfg.auth.secretFile != null;
         message = "services.agentmom.auth.secretFile is required when the generated config is used by services.agentmom.api.";
-      }
-      {
-        assertion = !cfg.api.enable || cfg.configFile != null || cfg.auth.bootstrapAdminCodeFile != null;
-        message = "services.agentmom.auth.bootstrapAdminCodeFile is required when the generated config is used by services.agentmom.api.";
       }
       {
         assertion = !cfg.credentialProxy.enable || cfg.credentialProxy.package != null;

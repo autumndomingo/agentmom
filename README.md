@@ -67,8 +67,7 @@ this non-secret JSON from typed `services.agentmom.*` options.
     "model": "openai/gpt-5.5"
   },
   "auth": {
-    "secret_file": "/run/secrets/agentmom-auth-secret",
-    "bootstrap_admin_code_file": "/run/secrets/agentmom-bootstrap-admin-code"
+    "secret_file": "/run/secrets/agentmom-auth-secret"
   }
 }
 ```
@@ -79,7 +78,7 @@ Required assumptions:
 - `guest.hermes_profile` is the Hermes profile name created in the guest.
 - `guest.model` is the default model written into the generated Hermes config.
 - `auth.secret_file` is required for `mom api`; it signs browser sessions.
-- `auth.bootstrap_admin_code_file` is required for `mom api`; an empty DB only creates the first admin when the login supplies this code.
+- On an empty catalog, the first login creates the admin user. Existing users log in with their app-generated user code.
 
 `mom config doctor` validates the configured file and prints a redacted
 effective config. `mom node ensure-runtime` checks host prerequisites for the
@@ -189,7 +188,6 @@ The flake exports `nixosModules.agentmom`.
     workerTokenFile = "/run/secrets/agentmom-worker-token";
     auth = {
       secretFile = "/run/secrets/agentmom-auth-secret";
-      bootstrapAdminCodeFile = "/run/secrets/agentmom-bootstrap-admin-code";
       secureCookies = true;
     };
   };
@@ -256,13 +254,14 @@ export AGENTMOM_REAL_ALLOW_BACKUP=1
 export AGENTMOM_REAL_ALLOW_CATALOG_BACKUP=1
 export AGENTMOM_REAL_API_SSH_HOST=mom-ctrl
 export AGENTMOM_REAL_ADMIN_EMAIL=you@example.com
-export AGENTMOM_REAL_ADMIN_CODE="$(ssh mom-ctrl 'sudo cat /run/agenix/agentmom-bootstrap-admin-code')"
+# Existing catalogs also need this admin user's app-generated code:
+# export AGENTMOM_REAL_ADMIN_USER_CODE=...
 just real-fleet-test-prod-mutating
 ```
 
 Use the intended production admin email for `AGENTMOM_REAL_ADMIN_EMAIL`. On a
-freshly wiped catalog, that login will consume the first-admin bootstrap path;
-do not leave it at a test address.
+freshly wiped catalog, that login creates the first admin; do not leave it at a
+test address.
 
 ## Production Cutovers
 

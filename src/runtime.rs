@@ -329,7 +329,7 @@ pub(crate) async fn remove_vm(name: &str) -> Result<()> {
     }
     let dir = machine_dir(name)?;
     if dir.exists() {
-        fs::remove_dir_all(&dir).with_context(|| format!("remove {}", dir.display()))?;
+        remove_runtime_dir_all(&dir).await?;
     }
     Ok(())
 }
@@ -337,7 +337,7 @@ pub(crate) async fn remove_vm(name: &str) -> Result<()> {
 pub(crate) async fn remove_workspace_dir(workspace_dir_name: &str) -> Result<()> {
     let path = workspace_dir_path(workspace_dir_name)?;
     if path.exists() {
-        fs::remove_dir_all(&path).with_context(|| format!("remove {}", path.display()))?;
+        remove_runtime_dir_all(&path).await?;
     }
     Ok(())
 }
@@ -986,7 +986,7 @@ fn microvm_cidr_prefix() -> String {
 }
 
 fn microvm_flake_nix(spec: &MicrovmSpec) -> Result<String> {
-    let system = env::var("MOM_MICROVM_SYSTEM").unwrap_or_else(|_| "x86_64-linux".to_string());
+    let system = microvm_system();
     Ok(format!(
         r#"{{
   description = "Agent Mom microvm.nix workspace {name}";
@@ -1032,6 +1032,17 @@ fn microvm_flake_nix(spec: &MicrovmSpec) -> Result<String> {
         hermes_agent_input_url = spec.hermes_agent_input_url,
         system = system
     ))
+}
+
+fn microvm_system() -> String {
+    env::var("MOM_MICROVM_SYSTEM").unwrap_or_else(|_| {
+        match (env::consts::OS, env::consts::ARCH) {
+            ("linux", "x86_64") => "x86_64-linux",
+            ("linux", "aarch64") => "aarch64-linux",
+            _ => "x86_64-linux",
+        }
+        .to_string()
+    })
 }
 
 fn microvm_workspace_nix() -> &'static str {
@@ -1336,15 +1347,39 @@ async fn systemctl(args: &[&str]) -> Result<()> {
     if !command_exists("systemctl").await {
         bail!("systemctl is required for the microvm.nix runtime");
     }
-    let status = TokioCommand::new("systemctl")
-        .args(args)
-        .stdin(Stdio::null())
-        .status()
-        .await?;
+    let mut command = if runtime_sudo_enabled() {
+        let mut command = TokioCommand::new("sudo");
+        command.args(["-n", "systemctl"]);
+        command
+    } else {
+        TokioCommand::new("systemctl")
+    };
+    let status = command.args(args).stdin(Stdio::null()).status().await?;
     if !status.success() {
         bail!("systemctl {} exited with {status}", args.join(" "));
     }
     Ok(())
+}
+
+async fn remove_runtime_dir_all(path: &std::path::Path) -> Result<()> {
+    if runtime_sudo_enabled() {
+        let status = TokioCommand::new("sudo")
+            .args(["-n", "rm", "-rf", "--"])
+            .arg(path)
+            .stdin(Stdio::null())
+            .status()
+            .await?;
+        if !status.success() {
+            bail!("sudo rm -rf {} exited with {status}", path.display());
+        }
+        return Ok(());
+    }
+    fs::remove_dir_all(path).with_context(|| format!("remove {}", path.display()))
+}
+
+fn runtime_sudo_enabled() -> bool {
+    env::var("MOM_RUNTIME_SUDO").ok().as_deref() == Some("1")
+        || env::var("MOM_SYSTEMCTL_SUDO").ok().as_deref() == Some("1")
 }
 
 async fn command_exists(name: &str) -> bool {

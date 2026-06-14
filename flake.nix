@@ -29,6 +29,111 @@
       eachSystem = nixpkgs.lib.genAttrs systems;
       nixpkgsInputUrl = "path:${nixpkgs.outPath}";
       microvmInputUrl = "path:${microvm.outPath}";
+      devUtmGuestModule = { config, lib, pkgs, modulesPath, ... }:
+        let
+          sshPubkey = builtins.getEnv "AGENTMOM_DEV_UTM_SSH_PUBKEY";
+        in
+        {
+          imports = [
+            "${modulesPath}/virtualisation/disk-image.nix"
+            self.nixosModules.agentmom
+          ];
+
+          assertions = [
+            {
+              assertion = sshPubkey != "";
+              message = "Set AGENTMOM_DEV_UTM_SSH_PUBKEY before building the dev UTM guest.";
+            }
+          ];
+
+          image.baseName = "agentmom-dev-utm";
+          image.format = "raw";
+          virtualisation.diskSize = 32768;
+
+          networking.hostName = "agentmom-dev-utm";
+          networking.useDHCP = false;
+          networking.usePredictableInterfaceNames = false;
+          networking.interfaces.eth0.useDHCP = true;
+          networking.firewall.allowedTCPPorts = [
+            22
+            8787
+            9090
+            1080
+          ];
+
+          services.openssh = {
+            enable = true;
+            settings = {
+              PasswordAuthentication = false;
+              PermitRootLogin = "prohibit-password";
+            };
+          };
+
+          services.avahi = {
+            enable = true;
+            nssmdns4 = true;
+            publish = {
+              enable = true;
+              addresses = true;
+            };
+          };
+
+          users.users.mom = {
+            isNormalUser = true;
+            extraGroups = [
+              "wheel"
+              "kvm"
+            ];
+            openssh.authorizedKeys.keys = [ sshPubkey ];
+          };
+          users.users.root.openssh.authorizedKeys.keys = [ sshPubkey ];
+          security.sudo.wheelNeedsPassword = false;
+
+          nix.settings = {
+            experimental-features = [
+              "nix-command"
+              "flakes"
+            ];
+            trusted-users = [
+              "root"
+              "mom"
+            ];
+          };
+
+          environment.systemPackages = with pkgs; [
+            curl
+            git
+            htop
+            iproute2
+            jq
+            just
+            lsof
+            openssh
+            rsync
+            vim
+          ];
+
+          services.agentmom = {
+            enable = true;
+            user = "mom";
+            group = "users";
+            createUser = false;
+            stateDir = "/home/mom/agentmom/.state/mom";
+            package = pkgs.writeShellScriptBin "mom" ''
+              echo "The dev checkout provides mom; this package only enables Agent Mom host services." >&2
+              exit 1
+            '';
+            nodeId = "dev-node";
+            microvm = {
+              enable = true;
+              externalInterface = "eth0";
+              stateDir = "/home/mom/.local/state/agentmom/microvms";
+              workspaceDir = "/home/mom/.local/state/agentmom/microvms/workspaces";
+            };
+          };
+
+          system.stateVersion = "26.05";
+        };
     in
     {
       packages = eachSystem (system:
@@ -147,6 +252,13 @@
           defaultHermesAgentUrl = "path:${hermes-agent.outPath}";
         });
       nixosModules.agentmom = self.nixosModules.default;
+
+      nixosConfigurations.agentmom-dev-utm = nixpkgs.lib.nixosSystem {
+        system = "aarch64-linux";
+        modules = [
+          devUtmGuestModule
+        ];
+      };
 
       devShells = eachSystem (system:
         let

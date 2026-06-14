@@ -8,7 +8,6 @@
     "model": "openai/gpt-4o-mini"
   },
   "auth": {
-    "secret_file": "dev/secrets/auth-secret",
-    "bootstrap_admin_code": "AM-DEV-ADMIN"
+    "secret_file": "dev/secrets/auth-secret"
   }
 }

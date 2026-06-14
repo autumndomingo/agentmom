@@ -352,12 +352,10 @@ impl RealFleet {
     async fn login_admin(&self) -> Result<AdminSession> {
         let email = env::var("AGENTMOM_REAL_ADMIN_EMAIL")
             .context("AGENTMOM_REAL_ADMIN_EMAIL is required; use the intended prod admin email")?;
-        let code = env::var("AGENTMOM_REAL_ADMIN_CODE")
-            .context("AGENTMOM_REAL_ADMIN_CODE is required for prod admin login")?;
-        let body = json!({
-            "email": email,
-            "access_code": code
-        });
+        let body = match env::var("AGENTMOM_REAL_ADMIN_USER_CODE") {
+            Ok(code) => json!({ "email": email, "access_code": code }),
+            Err(_) => json!({ "email": email }),
+        };
         let response = self
             .request(
                 self.client
@@ -370,7 +368,7 @@ impl RealFleet {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             bail!(
-                "admin login failed with {status}: {body}; set AGENTMOM_REAL_ADMIN_EMAIL and AGENTMOM_REAL_ADMIN_CODE for the intended prod admin"
+                "admin login failed with {status}: {body}; use AGENTMOM_REAL_ADMIN_USER_CODE for an existing admin user"
             );
         }
         let cookie = response

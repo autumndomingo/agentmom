@@ -19,8 +19,8 @@ find_port() {
 
 api_port="$(find_port "${MOM_API_PORT:-8787}")"
 worker_port="$(find_port "${MOM_WORKER_PORT:-9090}")"
-microvm_state="${repo_root}/.state/microvms"
-microvm_workspaces="${microvm_state}/workspaces"
+microvm_state="${MOM_MICROVM_STATE_DIR:-${repo_root}/.state/microvms}"
+microvm_workspaces="${MOM_MICROVM_WORKSPACE_DIR:-${microvm_state}/workspaces}"
 
 mkdir -p .state/mom .state/logs dev/iron-proxy "${microvm_state}/machines" "${microvm_workspaces}"
 dev_ca_cert="${repo_root}/dev/iron-proxy/ca.crt"
