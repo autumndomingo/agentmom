@@ -22,6 +22,11 @@ let
     approval_policy = "never"
     sandbox_mode = "danger-full-access"
   '';
+  guestHostName =
+    if builtins.stringLength spec.name > 63 then
+      "${builtins.substring 0 62 spec.name}x"
+    else
+      spec.name;
   hermesConfig = if spec.credential_mode == "openrouter-proxy" then ''
     default_provider: openrouter
     model: ${spec.hermes_model}
@@ -55,7 +60,7 @@ in
     (modulesPath + "/profiles/minimal.nix")
   ];
 
-  networking.hostName = spec.name;
+  networking.hostName = guestHostName;
   networking.useDHCP = false;
   system.stateVersion = "25.05";
   boot.initrd.systemd.enable = false;

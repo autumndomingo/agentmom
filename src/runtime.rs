@@ -1548,4 +1548,14 @@ mod tests {
         assert!(template.contains("before = [ \"sshd.service\" ];"));
         assert!(template.contains("requires = [ \"sshd-keygen.service\" ];"));
     }
+
+    #[test]
+    fn microvm_template_caps_guest_hostname_length() {
+        let template = microvm_workspace_nix();
+
+        assert!(template.contains("guestHostName ="));
+        assert!(template.contains("builtins.stringLength spec.name > 63"));
+        assert!(template.contains("\"${builtins.substring 0 62 spec.name}x\""));
+        assert!(template.contains("networking.hostName = guestHostName;"));
+    }
 }
