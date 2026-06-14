@@ -1565,6 +1565,7 @@ mod tests {
         assert!(template.contains("SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt"));
     }
 
+    #[test]
     fn guest_command_script_prefers_launcher_and_has_profile_fallback() -> Result<()> {
         let script = guest_command_script(&["printf".to_string(), "hello world".to_string()])?;
 
@@ -1609,6 +1610,7 @@ mod tests {
             )
         );
         assert!(template.contains("Restart = \"on-failure\""));
+        assert!(template.contains("Hermes web_dist is missing"));
         assert!(template.contains(". /etc/profile.d/mom.sh"));
         assert!(template.contains(". /etc/profile.d/agentmom-proxy.sh"));
         assert!(!template.contains("setsid hermes dashboard"));
