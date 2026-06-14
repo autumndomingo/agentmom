@@ -472,7 +472,16 @@ async fn run_claimed_job(api: &WorkerApi, job: JobRecord) -> Result<()> {
     let result = execute_job(api, &job).await;
     match result {
         Ok(output) => {
-            let completion = complete_claimed_job(api, &job, "succeeded", output).await;
+            let status = job_completion_status(&output);
+            if status == "failed" {
+                log_record(
+                    "error",
+                    "job_failed",
+                    Some(&job.workspace_name),
+                    &command_output_failure_message(&output),
+                );
+            }
+            let completion = complete_claimed_job(api, &job, status, output).await;
             heartbeat.abort();
             completion
         }
@@ -485,6 +494,35 @@ async fn run_claimed_job(api: &WorkerApi, job: JobRecord) -> Result<()> {
             completion
         }
     }
+}
+
+fn job_completion_status(output: &Value) -> &'static str {
+    let ok = output.get("ok").and_then(Value::as_bool);
+    let code = output.get("code").and_then(Value::as_i64);
+    if ok == Some(false) || code.is_some_and(|code| code != 0) {
+        "failed"
+    } else {
+        "succeeded"
+    }
+}
+
+fn command_output_failure_message(output: &Value) -> String {
+    let code = output
+        .get("code")
+        .and_then(Value::as_i64)
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let stderr = command_output_preview(output.get("stderr").and_then(Value::as_str));
+    let stdout = command_output_preview(output.get("stdout").and_then(Value::as_str));
+    format!("guest command failed: code={code} stderr={stderr:?} stdout={stdout:?}")
+}
+
+fn command_output_preview(value: Option<&str>) -> String {
+    value
+        .unwrap_or_default()
+        .chars()
+        .take(500)
+        .collect::<String>()
 }
 
 async fn complete_claimed_job(
@@ -684,7 +722,7 @@ async fn execute_job(api: &WorkerApi, job: &JobRecord) -> Result<Value> {
             api.update_workspace(&workspace.name, None, None, true, false)
                 .await?;
             let vm = workspace_running_vm_local(api, &workspace).await?;
-            let mut command = vec!["hermes".to_string()];
+            let mut command = vec![GUEST_AGENTMOM_HERMES.to_string()];
             command.extend(args);
             let output = capture_guest_command(&vm, command).await?;
             Ok(output)
@@ -1559,4 +1597,39 @@ async fn fake_open_hermes(workspace_name: &str) -> Result<String> {
         base.trim_end_matches('/'),
         workspace_name
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guest_command_output_controls_job_status() {
+        assert_eq!(
+            job_completion_status(&json!({ "ok": false, "code": 1 })),
+            "failed"
+        );
+        assert_eq!(
+            job_completion_status(&json!({ "ok": true, "code": 0 })),
+            "succeeded"
+        );
+        assert_eq!(job_completion_status(&json!({ "code": 1 })), "failed");
+        assert_eq!(
+            job_completion_status(&json!({ "started": true })),
+            "succeeded"
+        );
+    }
+
+    #[test]
+    fn command_output_failure_message_includes_command_result() {
+        let message = command_output_failure_message(&json!({
+            "code": 7,
+            "stdout": "out",
+            "stderr": "err"
+        }));
+
+        assert!(message.contains("code=7"));
+        assert!(message.contains("stderr=\"err\""));
+        assert!(message.contains("stdout=\"out\""));
+    }
 }

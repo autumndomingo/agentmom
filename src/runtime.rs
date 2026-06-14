@@ -199,7 +199,6 @@ struct MicrovmSpec {
     workspace_dir: String,
     hermes_profile: String,
     hermes_model: String,
-    credential_mode: String,
     credential_proxy_url: Option<String>,
     credential_proxy_ca_file: Option<String>,
     nixpkgs_url: String,
@@ -487,18 +486,68 @@ pub(crate) async fn run_guest_command(vm: &GuestVm, command: Vec<String>) -> Res
 }
 
 pub(crate) async fn capture_guest_command(vm: &GuestVm, command: Vec<String>) -> Result<Value> {
-    let command = command
-        .iter()
-        .map(|part| shell_quote(part))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let output = vm.shell(&format!("exec {command}")).await?;
+    let script = guest_command_script(&command)?;
+    let output = vm.shell(&script).await?;
     Ok(json!({
         "ok": output.ok,
         "code": output.code,
         "stdout": output.stdout,
         "stderr": output.stderr
     }))
+}
+
+fn guest_command_script(command: &[String]) -> Result<String> {
+    if command.is_empty() {
+        bail!("guest command cannot be empty");
+    }
+    let command_text = quoted_command(command);
+    let fallback_command = hermes_wrapper_fallback_command(command);
+    let runner = shell_quote(GUEST_AGENTMOM_RUN);
+    let hermes = shell_quote(GUEST_AGENTMOM_HERMES);
+    let wrapper_fallback = match fallback_command.as_deref() {
+        Some(fallback) => format!(
+            "\
+  if [ -x {hermes} ]; then
+    exec {runner} -- {command_text}
+  fi
+  exec {runner} -- {fallback}
+",
+        ),
+        None => format!("  exec {runner} -- {command_text}\n"),
+    };
+    let fallback_exec = fallback_command.as_deref().unwrap_or(&command_text);
+    Ok(format!(
+        "\
+set -e
+if [ -x {runner} ]; then
+{wrapper_fallback}fi
+if [ -x {hermes} ]; then
+  exec {command_text}
+fi
+if [ -f /etc/profile.d/mom.sh ]; then . /etc/profile.d/mom.sh; fi
+if [ -f /etc/profile.d/agentmom-proxy.sh ]; then . /etc/profile.d/agentmom-proxy.sh; fi
+export HOME=/root
+cd /workspace
+exec {fallback_exec}
+"
+    ))
+}
+
+fn quoted_command(command: &[String]) -> String {
+    command
+        .iter()
+        .map(|part| shell_quote(part))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn hermes_wrapper_fallback_command(command: &[String]) -> Option<String> {
+    if command.first().map(String::as_str) != Some(GUEST_AGENTMOM_HERMES) {
+        return None;
+    }
+    let mut fallback = vec!["hermes".to_string()];
+    fallback.extend(command.iter().skip(1).cloned());
+    Some(quoted_command(&fallback))
 }
 
 pub(crate) fn workspace_dir_path(workspace_dir_name: &str) -> Result<PathBuf> {
@@ -723,7 +772,6 @@ fn microvm_spec(
         workspace_dir: workspace_dir.display().to_string(),
         hermes_profile: String::new(),
         hermes_model: String::new(),
-        credential_mode: String::new(),
         credential_proxy_url: None,
         credential_proxy_ca_file: None,
         nixpkgs_url: String::new(),
@@ -757,11 +805,6 @@ fn apply_current_microvm_config(spec: &mut MicrovmSpec, config: &MomConfig) -> R
         .to_string();
     spec.hermes_profile = config.hermes_profile().to_string();
     spec.hermes_model = config.model().to_string();
-    spec.credential_mode = if config.credential_proxy_url().is_some() {
-        "openrouter-proxy".to_string()
-    } else {
-        "openai-codex".to_string()
-    };
     spec.credential_proxy_url = config.credential_proxy_url().map(ToString::to_string);
     spec.credential_proxy_ca_file = config
         .credentials
@@ -1413,7 +1456,6 @@ mod tests {
             workspace_dir: workspace_dir.display().to_string(),
             hermes_profile: "main".to_string(),
             hermes_model: "gpt-5.5".to_string(),
-            credential_mode: "openrouter-proxy".to_string(),
             credential_proxy_url: Some("http://192.168.83.1:1080".to_string()),
             credential_proxy_ca_file: Some("agentmom-proxy.crt".to_string()),
             nixpkgs_url: "path:/nix/store/nixpkgs-source".to_string(),
@@ -1523,29 +1565,55 @@ mod tests {
         assert!(template.contains("SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt"));
     }
 
-    #[test]
-    fn microvm_template_sets_top_level_hermes_model() {
-        let template = microvm_workspace_nix();
+    fn guest_command_script_prefers_launcher_and_has_profile_fallback() -> Result<()> {
+        let script = guest_command_script(&["printf".to_string(), "hello world".to_string()])?;
 
-        assert!(template.contains("default_provider: openrouter\n    model: ${spec.hermes_model}"));
+        assert!(script.contains("/run/current-system/sw/bin/agentmom-run"));
+        assert!(script.contains("set -e"));
+        assert!(script.contains(" -- "));
+        assert!(script.contains("printf"));
+        assert!(script.contains("'hello world'"));
+        assert!(script.contains(". /etc/profile.d/mom.sh"));
+        assert!(script.contains(". /etc/profile.d/agentmom-proxy.sh"));
+        assert!(script.contains("cd /workspace"));
+        assert!(guest_command_script(&[]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn guest_command_script_falls_back_when_hermes_wrapper_is_missing() -> Result<()> {
+        let script =
+            guest_command_script(&[GUEST_AGENTMOM_HERMES.to_string(), "--help".to_string()])?;
+
+        assert!(script.contains(GUEST_AGENTMOM_HERMES));
         assert!(
-            template.contains("default_provider: openai-codex\n    model: ${spec.hermes_model}")
+            script.contains("exec '/run/current-system/sw/bin/agentmom-run' -- 'hermes' '--help'")
         );
+        assert!(script.contains("exec 'hermes' '--help'"));
+        Ok(())
     }
 
     #[test]
-    fn microvm_template_disables_guest_ssh_source_penalties() {
+    fn microvm_template_installs_agentmom_run_and_uses_hermes_model_schema() {
         let template = microvm_workspace_nix();
 
+        assert!(template.contains("writeShellScriptBin \"agentmom-run\""));
+        assert!(template.contains("writeShellScriptBin \"agentmom-hermes\""));
+        assert!(template.contains("writeShellScriptBin \"agentmom-hermes-acp\""));
+        assert!(template.contains("writeShellScriptBin \"agentmom-hermes-dashboard-start\""));
+        assert!(template.contains(". /etc/profile.d/mom.sh"));
+        assert!(template.contains(". /etc/profile.d/agentmom-proxy.sh"));
+        assert!(
+            template.contains(
+                "model:\n      provider: openrouter\n      default: ${spec.hermes_model}"
+            )
+        );
+        assert!(!template.contains("openai-codex"));
+        assert!(!template.contains("default_provider:"));
+        assert!(template.contains("systemd.services.sshd-keygen.enable = lib.mkForce false;"));
         assert!(template.contains("PerSourcePenalties = \"no\";"));
-    }
-
-    #[test]
-    fn microvm_template_installs_pinned_ssh_host_key_after_keygen() {
-        let template = microvm_workspace_nix();
-
-        assert!(template.contains("after = [ \"sshd-keygen.service\" ];"));
         assert!(template.contains("before = [ \"sshd.service\" ];"));
-        assert!(template.contains("requires = [ \"sshd-keygen.service\" ];"));
+        assert!(!template.contains("after = [ \"sshd-keygen.service\" ];"));
+        assert!(!template.contains("requires = [ \"sshd-keygen.service\" ];"));
     }
 }

@@ -172,10 +172,15 @@ fn hermes_dashboard_script() -> String {
     format!(
         r#"
 set -e
+if command -v agentmom-hermes-dashboard-start >/dev/null 2>&1; then
+  exec agentmom-hermes-dashboard-start
+fi
 if ! command -v hermes >/dev/null 2>&1; then
   echo "Hermes is not installed in this VM; recreate it with the current runtime" >&2
   exit 1
 fi
+if [ -f /etc/profile.d/mom.sh ]; then . /etc/profile.d/mom.sh; fi
+if [ -f /etc/profile.d/agentmom-proxy.sh ]; then . /etc/profile.d/agentmom-proxy.sh; fi
 mkdir -p {workdir_q} {log_dir_q}
 probe_hermes_dashboard() {{
   timeout {probe_timeout}s wget -q -O /dev/null --timeout={wget_timeout} http://127.0.0.1:{port}{health_path} >/dev/null 2>&1
@@ -456,5 +461,14 @@ mod tests {
         assert!(script.contains("share/hermes-agent/web_dist"));
         assert!(script.contains("HERMES_WEB_DIST=\"$hermes_web_dist\""));
         assert!(script.contains("--skip-build"));
+    }
+
+    #[test]
+    fn hermes_dashboard_sources_guest_env() {
+        let script = hermes_dashboard_script();
+
+        assert!(script.contains("agentmom-hermes-dashboard-start"));
+        assert!(script.contains(". /etc/profile.d/mom.sh"));
+        assert!(script.contains(". /etc/profile.d/agentmom-proxy.sh"));
     }
 }

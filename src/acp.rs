@@ -116,7 +116,7 @@ fn acp_shell_command(config: &crate::config::MomConfig) -> String {
     let hermes_home = format!("{}/{}", crate::GUEST_HERMES_HOME, config.hermes_profile());
     let hermes_home = crate::shell_quote(&hermes_home);
     format!(
-        "stty -echo 2>/dev/null || true; if [ -f /etc/profile.d/agentmom-proxy.sh ]; then . /etc/profile.d/agentmom-proxy.sh; fi; export HERMES_HOME={hermes_home}; cd /workspace && if command -v hermes-acp >/dev/null 2>&1; then exec hermes-acp; elif command -v hermes >/dev/null 2>&1; then exec hermes acp; else echo 'hermes-acp/hermes acp is not installed' >&2; exit 127; fi"
+        "stty -echo 2>/dev/null || true; if command -v agentmom-hermes-acp >/dev/null 2>&1; then exec agentmom-hermes-acp; fi; if [ -f /etc/profile.d/agentmom-proxy.sh ]; then . /etc/profile.d/agentmom-proxy.sh; fi; export HERMES_HOME={hermes_home}; cd /workspace && if command -v hermes-acp >/dev/null 2>&1; then exec hermes-acp; elif command -v hermes >/dev/null 2>&1; then exec hermes acp; else echo 'hermes-acp/hermes acp is not installed' >&2; exit 127; fi"
     )
 }
 

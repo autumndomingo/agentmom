@@ -32,6 +32,8 @@ use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 const LABEL_MANAGED: &str = "mom.managed";
 const LABEL_VERSION: &str = "mom.version";
 const GUEST_HERMES_HOME: &str = "/root/.hermes-agent";
+const GUEST_AGENTMOM_RUN: &str = "/run/current-system/sw/bin/agentmom-run";
+const GUEST_AGENTMOM_HERMES: &str = "/run/current-system/sw/bin/agentmom-hermes";
 const HERMES_GUEST_PORT: u16 = 9119;
 
 mod acp;
@@ -1617,7 +1619,6 @@ env:
   HTTP_PROXY: {}
   HTTPS_PROXY: {}
   ALL_PROXY: {}
-  OPENAI_API_KEY: agentmom-proxy
   OPENROUTER_API_KEY: agentmom-proxy
 "#,
                 config_string(url),
@@ -1650,7 +1651,6 @@ fn proxy_env_sh(proxy_url: &str) -> String {
         r#"export HTTP_PROXY={proxy_url}
 export HTTPS_PROXY={proxy_url}
 export ALL_PROXY={proxy_url}
-export OPENAI_API_KEY=agentmom-proxy
 export OPENROUTER_API_KEY=agentmom-proxy
 export NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/agentmom-proxy.crt
 export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
