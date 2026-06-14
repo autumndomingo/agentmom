@@ -7,6 +7,7 @@ struct WorkerState {
     api: WorkerApi,
     acp: acp::HermesAcpState,
     services: service::ServiceState,
+    worker_url: String,
 }
 
 #[derive(Clone)]
@@ -91,6 +92,7 @@ pub(crate) async fn worker(args: WorkerArgs) -> Result<()> {
         api: worker_api.clone(),
         acp: acp::HermesAcpState::default(),
         services: service::ServiceState::default(),
+        worker_url: worker_url.clone(),
     });
     let worker_http = tokio::spawn(run_worker_http(listener, state));
     register_worker(&client, &api_url, &node, &worker_url).await?;
@@ -261,9 +263,34 @@ async fn worker_open_hermes(
     }
     let url = {
         let _workspace_guard = state.api.workspace_locks.lock(&workspace.name).await;
-        service::open_hermes_dashboard(&state.services, &workspace.name, &workspace.vm_name).await?
+        let heartbeat = spawn_service_open_heartbeat(&state);
+        let result =
+            service::open_hermes_dashboard(&state.services, &workspace.name, &workspace.vm_name)
+                .await;
+        heartbeat.abort();
+        result?
     };
     Ok(Json(json!({ "url": url })))
+}
+
+fn spawn_service_open_heartbeat(state: &Arc<WorkerState>) -> tokio::task::JoinHandle<()> {
+    let client = state.api.client.clone();
+    let api_url = state.api.api_url.clone();
+    let node = state.api.node.clone();
+    let worker_url = state.worker_url.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            if let Err(error) = register_worker(&client, &api_url, &node, &worker_url).await {
+                log_record(
+                    "error",
+                    "worker_service_open_heartbeat_failed",
+                    None,
+                    &format!("worker service-open heartbeat failed: {error:#}"),
+                );
+            }
+        }
+    })
 }
 
 async fn worker_hermes_acp_ws(
