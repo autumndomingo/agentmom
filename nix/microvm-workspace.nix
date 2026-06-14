@@ -9,7 +9,7 @@ let
     else
       pkgs.hermes-agent or (throw "Agent Mom guests require a hermes-agent package");
   agentmomRun = pkgs.writeShellScriptBin "agentmom-run" ''
-    set -eu
+    set -e
     if [ "''${1:-}" = "--" ]; then
       shift
     fi
@@ -43,7 +43,7 @@ let
     ' agentmom-hermes-acp "$@"
   '';
   agentmomHermesDashboard = pkgs.writeShellScriptBin "agentmom-hermes-dashboard" ''
-    set -eu
+    set -e
     port=9119
     cd /workspace
     hermes_bin="$(readlink -f "$(command -v hermes)")"
@@ -57,7 +57,7 @@ let
     exec hermes dashboard --host 0.0.0.0 --port "$port" --no-open --insecure --skip-build
   '';
   agentmomHermesDashboardStart = pkgs.writeShellScriptBin "agentmom-hermes-dashboard-start" ''
-    set -eu
+    set -e
     port=9119
     health_path=/api/status
     probe_hermes_dashboard() {
@@ -90,6 +90,7 @@ let
     HOME = "/root";
     HERMES_HOME = hermesHome;
     CODEX_HOME = "/root/.codex";
+    HERMES_DASHBOARD_SESSION_TOKEN = "agentmom-dashboard";
   } // lib.optionalAttrs (spec.credential_proxy_url != null) {
     HTTP_PROXY = spec.credential_proxy_url;
     HTTPS_PROXY = spec.credential_proxy_url;

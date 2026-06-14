@@ -1519,8 +1519,10 @@ mod tests {
         );
         assert!(template.contains("Restart = \"on-failure\""));
         assert!(template.contains("Hermes web_dist is missing"));
+        assert!(template.contains("HERMES_DASHBOARD_SESSION_TOKEN = \"agentmom-dashboard\""));
         assert!(template.contains(". /etc/profile.d/mom.sh"));
         assert!(template.contains(". /etc/profile.d/agentmom-proxy.sh"));
+        assert!(!template.contains("set -eu"));
         assert!(!template.contains("setsid hermes dashboard"));
         assert!(
             template.contains(

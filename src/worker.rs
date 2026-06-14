@@ -6,6 +6,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
 
 const RECONCILE_RUNNING_VM_SSH_TIMEOUT: Duration = Duration::from_secs(10);
+const HERMES_DASHBOARD_SESSION_TOKEN: &str = "agentmom-dashboard";
 
 #[derive(Clone)]
 struct WorkerState {
@@ -517,9 +518,12 @@ fn hermes_dashboard_pty_ws_url(dashboard_url: &str, resume: Option<&str>) -> Res
     } else if !url.starts_with("ws://") && !url.starts_with("wss://") {
         bail!("Hermes dashboard URL must start with http://, https://, ws://, or wss://");
     }
-    let mut url = format!("{url}/api/pty");
+    let mut url = format!(
+        "{url}/api/pty?token={}",
+        url_component(HERMES_DASHBOARD_SESSION_TOKEN)
+    );
     if let Some(resume) = resume.map(str::trim).filter(|value| !value.is_empty()) {
-        url.push_str("?resume=");
+        url.push_str("&resume=");
         url.push_str(&url_component(resume));
     }
     Ok(url)
@@ -2016,5 +2020,18 @@ mod tests {
         assert!(message.contains("code=7"));
         assert!(message.contains("stderr=\"err\""));
         assert!(message.contains("stdout=\"out\""));
+    }
+
+    #[test]
+    fn hermes_dashboard_pty_ws_url_authenticates_with_guest_dashboard_token() -> Result<()> {
+        assert_eq!(
+            hermes_dashboard_pty_ws_url("http://127.0.0.1:9119", None)?,
+            "ws://127.0.0.1:9119/api/pty?token=agentmom-dashboard"
+        );
+        assert_eq!(
+            hermes_dashboard_pty_ws_url("https://example.test/hermes/", Some("session 1"))?,
+            "wss://example.test/hermes/api/pty?token=agentmom-dashboard&resume=session%201"
+        );
+        Ok(())
     }
 }

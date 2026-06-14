@@ -236,7 +236,7 @@ async fn preflight_hermes(vm: &GuestVm) -> Result<()> {
 
 fn preflight_hermes_script() -> &'static str {
     r#"
-set -eu
+set -e
 if command -v agentmom-hermes-acp >/dev/null 2>&1; then
   agentmom-hermes-acp --check >/tmp/mom-acp-preflight-hermes.out 2>/tmp/mom-acp-preflight-hermes.err || {
     cat /tmp/mom-acp-preflight-hermes.err >&2
@@ -272,6 +272,8 @@ mod tests {
         let script = preflight_hermes_script();
 
         assert!(script.contains("command -v agentmom-hermes-acp"));
+        assert!(script.contains("set -e\n"));
+        assert!(!script.contains("set -eu"));
         assert!(script.contains("agentmom-hermes-acp --check"));
         assert!(script.contains(". /etc/profile.d/mom.sh"));
         assert!(script.contains(". /etc/profile.d/agentmom-proxy.sh"));
