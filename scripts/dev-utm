@@ -12,12 +12,14 @@ guest_microvm_state_dir="${MOM_DEV_UTM_MICROVM_STATE_DIR:-/home/mom/.local/state
 guest_microvm_workspace_dir="${MOM_DEV_UTM_MICROVM_WORKSPACE_DIR:-${guest_microvm_state_dir}/workspaces}"
 state_dir="${repo_root}/.state/dev-utm"
 log_dir="${repo_root}/.state/logs"
-key="${state_dir}/id_ed25519"
+fallback_key="${state_dir}/id_ed25519"
 bundle="${HOME}/Library/Containers/com.utmapp.UTM/Data/Documents/${name}.utm"
 data_dir="${bundle}/Data"
 disk="${data_dir}/root.img"
 kernel_image="${data_dir}/kernel"
 initrd_image="${data_dir}/initrd"
+auth_pubkey="${AGENTMOM_DEV_UTM_SSH_PUBKEY:-}"
+auth_mode="default"
 
 mkdir -p "${state_dir}" "${log_dir}"
 
@@ -50,16 +52,22 @@ run_step() {
   fi
 }
 
-ssh_args=(
-  -i "${key}"
-  -o BatchMode=yes
-  -o ConnectTimeout=5
-  -o ControlMaster=no
-  -o ControlPath=none
-  -o ExitOnForwardFailure=yes
-  -o StrictHostKeyChecking=accept-new
-  -o UserKnownHostsFile="${state_dir}/known_hosts"
-)
+ssh_args=()
+
+reset_ssh_args() {
+  ssh_args=(
+    -o BatchMode=yes
+    -o ConnectTimeout=5
+    -o ControlMaster=no
+    -o ControlPath=none
+    -o ExitOnForwardFailure=yes
+    -o StrictHostKeyChecking=accept-new
+    -o UserKnownHostsFile="${state_dir}/known_hosts"
+  )
+  if [ "${auth_mode}" = "generated" ]; then
+    ssh_args=(-i "${fallback_key}" "${ssh_args[@]}")
+  fi
+}
 
 ssh_guest() {
   ssh "${ssh_args[@]}" "${guest_user}@${guest_host}" "$@"
@@ -82,16 +90,39 @@ copy_image() {
   chmod u+w "${dst}"
 }
 
-ensure_key() {
-  if [ ! -f "${key}" ]; then
-    ssh-keygen -t ed25519 -N "" -f "${key}" -C "agentmom-dev-utm" >/dev/null
+select_ssh_key() {
+  local pubkey_file
+  if [ -n "${auth_pubkey}" ]; then
+    auth_mode="default"
+    reset_ssh_args
+    return 0
   fi
+
+  for pubkey_file in \
+    "${HOME}/.ssh/id_ed25519.pub" \
+    "${HOME}/.ssh/id_ecdsa.pub" \
+    "${HOME}/.ssh/id_rsa.pub"
+  do
+    if [ -f "${pubkey_file}" ]; then
+      auth_pubkey="$(cat "${pubkey_file}")"
+      auth_mode="default"
+      reset_ssh_args
+      return 0
+    fi
+  done
+
+  if [ ! -f "${fallback_key}" ]; then
+    ssh-keygen -t ed25519 -N "" -f "${fallback_key}" -C "agentmom-dev-utm" >/dev/null
+  fi
+  auth_pubkey="$(cat "${fallback_key}.pub")"
+  auth_mode="generated"
+  reset_ssh_args
 }
 
 build_image() {
   local image_out toplevel image
   export AGENTMOM_DEV_UTM_SSH_PUBKEY
-  AGENTMOM_DEV_UTM_SSH_PUBKEY="$(cat "${key}.pub")"
+  AGENTMOM_DEV_UTM_SSH_PUBKEY="${auth_pubkey}"
   image_out="$(nix build --impure --no-link --print-out-paths \
     .#nixosConfigurations.agentmom-dev-utm.config.system.build.image)"
   toplevel="$(nix build --impure --no-link --print-out-paths \
@@ -267,12 +298,27 @@ start_vm() {
 }
 
 wait_for_ssh() {
-  local ip
+  local ip ssh_log
+  ssh_log="${state_dir}/ssh-wait.log"
   printf '  %-24s' "waiting for SSH..."
   for _ in $(seq 1 180); do
-    if ssh_guest true >/dev/null 2>&1; then
+    if ssh_guest true >"${ssh_log}" 2>&1; then
       printf 'ok\n'
       return 0
+    fi
+    if grep -q "Permission denied" "${ssh_log}"; then
+      printf 'failed\n\n'
+      cat >&2 <<EOF_AUTH
+${name} rejected the SSH key used by just dev-utm.
+
+This usually means the VM was created with a different authorized key.
+Run a deliberate UTM reset once:
+
+  MOM_DEV_UTM_RESET=1 just dev-utm
+
+EOF_AUTH
+      cat "${ssh_log}" >&2 || true
+      exit 1
     fi
     ip="$(utmctl ip-address "${name}" 2>/dev/null | awk '/^[0-9]+\./ { print; exit }' || true)"
     if [ -n "${ip}" ]; then
@@ -310,7 +356,7 @@ sync_tree() {
 main() {
   local image toplevel api_port worker_port
 
-  ensure_key
+  select_ssh_key
   if [ ! -e "${disk}" ] || [ "${MOM_DEV_UTM_REBUILD:-0}" = "1" ] || [ "${MOM_DEV_UTM_RESET:-0}" = "1" ]; then
     rm -f "${state_dir}/known_hosts"
     run_step "building guest image" "${log_dir}/dev-utm-build.log" build_image
