@@ -187,6 +187,7 @@ metrics:
 transforms:
   - name: allowlist
     config:
+      warn: true
       domains:
         - api.openai.com
         - openrouter.ai

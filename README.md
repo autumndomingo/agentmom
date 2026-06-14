@@ -223,8 +223,10 @@ For multi-host deployments, set `worker.openFirewall = true` and
 rules so the API can reach the worker control port and browsers can reach the
 configured service tunnel range.
 When `credentialProxy.enable = true`, the module does not enable direct NAT for
-the guest bridge; guests reach the built-in proxy on the bridge and cannot
-bypass its allowlist through host forwarding.
+the guest bridge; guests reach the built-in proxy on the bridge. The proxy
+injects configured model-provider credentials and logs allowlist misses by
+default, but it does not block arbitrary guest egress unless
+`credentialProxy.warnOnly = false` is set intentionally.
 
 For multi-host production, give the API a per-node token map instead of a
 single shared worker token:

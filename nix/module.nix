@@ -748,13 +748,13 @@ in
           "files.pythonhosted.org"
           "astral.sh"
         ];
-        description = "Domains allowed through iron-proxy.";
+        description = "Domains annotated by iron-proxy's allowlist transform. By default, misses are logged but not blocked.";
       };
 
       warnOnly = lib.mkOption {
         type = lib.types.bool;
-        default = false;
-        description = "Log allowlist misses without blocking them.";
+        default = true;
+        description = "Log allowlist misses without blocking them. Set to false only when intentionally enforcing outbound domain filtering.";
       };
 
       logLevel = lib.mkOption {
