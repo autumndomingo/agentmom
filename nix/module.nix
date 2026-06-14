@@ -182,18 +182,38 @@ let
       exit "$status"
     }
     trap cleanup EXIT INT TERM
-    needs_build=0
-    if [ ! -x result/bin/microvm-run ] || [ ! -e .runner-built ]; then
-      needs_build=1
+    runner_input_hash() {
+      for input in flake.nix spec.json microvm-workspace.nix; do
+        if [ ! -f "$input" ]; then
+          echo "missing required microVM runner input $state_dir/$input" >&2
+          return 1
+        fi
+      done
+      {
+        for input in flake.nix flake.lock spec.json microvm-workspace.nix agentmom-proxy.crt; do
+          if [ -e "$input" ]; then
+            ${pkgs.coreutils}/bin/sha256sum "$input"
+          else
+            printf 'missing  %s\n' "$input"
+          fi
+        done
+      } | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -d' ' -f1
+    }
+    input_hash="$(runner_input_hash)"
+    built_hash=""
+    if [ -f .runner-input-hash ]; then
+      built_hash="$(cat .runner-input-hash)"
     fi
-    for input in flake.nix spec.json microvm-workspace.nix agentmom-proxy.crt; do
-      if [ -e "$input" ] && [ "$input" -nt .runner-built ]; then
-        needs_build=1
+    if [ ! -x result/bin/microvm-run ] || [ "$input_hash" != "$built_hash" ]; then
+      ${pkgs.nix}/bin/nix build --no-write-lock-file --extra-experimental-features 'nix-command flakes' .#runner -o result
+      rebuilt_hash="$(runner_input_hash)"
+      if [ "$rebuilt_hash" != "$input_hash" ]; then
+        echo "microVM runner inputs changed while building $state_dir; retry the start" >&2
+        exit 1
       fi
-    done
-    if [ "$needs_build" -eq 1 ]; then
-      ${pkgs.nix}/bin/nix build --extra-experimental-features 'nix-command flakes' .#runner -o result
-      touch .runner-built
+      printf '%s\n' "$input_hash" > .runner-input-hash.tmp
+      mv .runner-input-hash.tmp .runner-input-hash
+      rm -f .runner-built
     fi
     if [ -x result/bin/tap-up ]; then
       result/bin/tap-up

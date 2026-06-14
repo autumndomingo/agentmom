@@ -71,14 +71,23 @@ Keep the first production runtime narrow: Cloud Hypervisor, `/24` guest network,
 ## Fast Starts / Resumes
 
 - [x] Keep production `master` deployed and healthy before branching.
-- [~] Start branch `microvm-fast-start` from current `master` in `worktrees/microvm-fast-start`.
+- [x] Start branch `microvm-fast-start` from current `master` in `worktrees/microvm-fast-start`.
 - [ ] Map prototype evidence for warm slots, snapshot/restore, and EROFS prebuild costs.
-- [~] Implement the lowest-risk first fast-start improvement off `master`.
-- [ ] Validate locally and on prod-like hosts without landing to `master`.
+- [x] Implement the lowest-risk first fast-start improvement off `master`.
+- [x] Validate locally and on prod-like hosts without landing to `master`.
+- [x] Run another focused subagent review before any deploy decision.
+- [~] Apply review fixes and rerun coherent all-role validation.
 
 ## Fast Start Notes
 
 - Prod cold starts are dominated by per-workspace Nix build and `microvm-store-disk.erofs`, not by the guest reaching multi-user after the runner starts.
 - Sharing host `/nix/store` into the guest with read-only virtiofs removes `microvm-store-disk.erofs`; first measured host exec dropped to 21.8s, and same-VM restart dropped to 13.1s.
 - Removing the scripted-initrd override was slower on `mom-1` with the store share: 28.1s first start and 16.6s restart. Keep scripted initrd for now.
-- Next low-risk branch change: stamp successful runner builds so stopped workspace restarts can skip no-op Nix evaluation and rebuild only when generated inputs change.
+- Next low-risk branch change: cache successful runner builds so stopped workspace restarts can skip no-op Nix evaluation and rebuild only when generated inputs change.
+- Deployed the branch to `mom-1` only via configs branch `agentmom-fast-start-test`; branch runner cache preserved first start at 19.8s and reduced same-VM restart to 6.2s.
+- Real API mutating tests against branch `mom-1` passed in 88.9s. Logs show first starts still build 26 derivations, while restore/restart starts skip Nix and reach SSH in about 5-6s.
+- Deployed the same branch to `mom-2`; full real-fleet and mutating prod tests passed through the controller tunnel on both workers (`mom-1`: 98.5s, `mom-2`: 108.1s). Post-test sweeps showed ready API, active worker services, no failed units, and no leftover microVM units.
+- Branch logs on both workers show the expected behavior: first starts build the generated runner closure, restarts skip Nix work, no `microvm-store-disk.erofs` is produced, and SSH is ready about 5-6s after service start.
+- The second focused review found that existing stopped VM dirs could preserve old generated `microvm-workspace.nix` inputs and that mtime-based runner stamps could miss missing files or `flake.lock` changes. The branch now refreshes generated VM inputs before starting stopped VMs and caches runners by content hash in `.runner-input-hash`.
+- Host `/nix/store` sharing is intentionally read-only but expands guest read access to host store contents. Before merge/deploy, validate from a guest that `/nix/store` and `/nix/.ro-store` are read-only and document that host store contents must not be treated as confidential from workspace guests.
+- Earlier branch validation used new workers with the old controller. The next deploy-gate run should pin the fixed branch in configs and switch `mom-ctrl`, `mom-1`, and `mom-2` to the same Agent Mom package before rerunning real-fleet tests.

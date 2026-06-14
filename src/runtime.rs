@@ -225,21 +225,7 @@ pub(crate) async fn create_vm(request: WorkspaceVmRequest) -> Result<()> {
     fs::create_dir_all(&spec.workspace_dir)
         .with_context(|| format!("create workspace dir {}", spec.workspace_dir))?;
 
-    if let Some(ca_path) = &config.credentials.proxy_ca_path {
-        let ca_path = resolve_required_file(ca_path, "credentials.proxy_ca_path")?;
-        let ca_dest = dir.join("agentmom-proxy.crt");
-        fs::copy(&ca_path, &ca_dest).with_context(|| {
-            format!(
-                "copy proxy CA {} to {}",
-                ca_path.display(),
-                ca_dest.display()
-            )
-        })?;
-    }
-
-    fs::write(dir.join("spec.json"), serde_json::to_vec_pretty(&spec)?)?;
-    fs::write(dir.join("microvm-workspace.nix"), microvm_workspace_nix())?;
-    fs::write(dir.join("flake.nix"), microvm_flake_nix(&spec)?)?;
+    write_vm_definition(&dir, &spec, &config)?;
     fs::write(dir.join("state"), b"stopped\n")?;
 
     println!(
@@ -289,6 +275,7 @@ pub(crate) async fn start_vm(name: &str) -> Result<GuestVm> {
         wait_for_ssh(&vm, &spec, Duration::from_secs(90)).await?;
         return Ok(vm);
     }
+    refresh_vm_definition(name)?;
     systemctl(&["start", &format!("agentmom-microvm@{name}.service")]).await?;
     let vm = GuestVm::new(name);
     let spec = load_microvm_spec(name)?;
@@ -537,6 +524,53 @@ fn load_microvm_spec(name: &str) -> Result<MicrovmSpec> {
     serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))
 }
 
+fn refresh_vm_definition(name: &str) -> Result<()> {
+    let _lock = acquire_machine_state_lock()?;
+    let config = load_mom_config()?;
+    config.validate_for_node()?;
+    let dir = machine_dir(name)?;
+    let mut spec = load_microvm_spec(name)?;
+    apply_current_microvm_config(&mut spec, &config)?;
+    write_vm_definition(&dir, &spec, &config)
+}
+
+fn write_vm_definition(dir: &Path, spec: &MicrovmSpec, config: &MomConfig) -> Result<()> {
+    sync_proxy_ca_file(dir, config)?;
+    write_if_changed(&dir.join("spec.json"), &serde_json::to_vec_pretty(spec)?)?;
+    write_if_changed(
+        dir.join("microvm-workspace.nix").as_path(),
+        microvm_workspace_nix().as_bytes(),
+    )?;
+    write_if_changed(&dir.join("flake.nix"), microvm_flake_nix(spec)?.as_bytes())
+}
+
+fn sync_proxy_ca_file(dir: &Path, config: &MomConfig) -> Result<()> {
+    let ca_dest = dir.join("agentmom-proxy.crt");
+    if let Some(ca_path) = &config.credentials.proxy_ca_path {
+        let ca_path = resolve_required_file(ca_path, "credentials.proxy_ca_path")?;
+        fs::copy(&ca_path, &ca_dest).with_context(|| {
+            format!(
+                "copy proxy CA {} to {}",
+                ca_path.display(),
+                ca_dest.display()
+            )
+        })?;
+    } else if ca_dest.exists() {
+        fs::remove_file(&ca_dest)
+            .with_context(|| format!("remove stale proxy CA {}", ca_dest.display()))?;
+    }
+    Ok(())
+}
+
+fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Ok(existing) = fs::read(path)
+        && existing == bytes
+    {
+        return Ok(());
+    }
+    fs::write(path, bytes).with_context(|| format!("write {}", path.display()))
+}
+
 fn microvm_spec(
     request: &WorkspaceVmRequest,
     config: &MomConfig,
@@ -548,24 +582,10 @@ fn microvm_spec(
     let host_ip = env::var("MOM_MICROVM_HOST_IP").unwrap_or_else(|_| format!("{prefix}.1"));
     let host_bridge = env::var("MOM_MICROVM_BRIDGE").unwrap_or_else(|_| "agentmom0".to_string());
     let tap_prefix = env::var("MOM_MICROVM_TAP_PREFIX").unwrap_or_else(|_| "amvm".to_string());
-    let nixpkgs_url = env::var("MOM_MICROVM_NIXPKGS_URL")
-        .unwrap_or_else(|_| "github:NixOS/nixpkgs/nixpkgs-unstable".to_string());
-    let microvm_input_url = env::var("MOM_MICROVM_NIX_URL")
-        .unwrap_or_else(|_| "github:microvm-nix/microvm.nix".to_string());
-    let ca_file = config
-        .credentials
-        .proxy_ca_path
-        .as_ref()
-        .map(|_| "agentmom-proxy.crt".to_string());
     let mut labels = HashMap::new();
-    labels.insert(LABEL_MANAGED.to_string(), "true".to_string());
-    labels.insert(
-        LABEL_VERSION.to_string(),
-        env!("CARGO_PKG_VERSION").to_string(),
-    );
     labels.insert("mom.workspace".to_string(), request.workspace_name.clone());
 
-    Ok(MicrovmSpec {
+    let mut spec = MicrovmSpec {
         name: request.name.clone(),
         workspace_name: request.workspace_name.clone(),
         workspace_dir_name: request.workspace_dir_name.clone(),
@@ -579,20 +599,63 @@ fn microvm_spec(
         tap: format!("{tap_prefix}{index}"),
         mac: format!("02:00:00:83:{:02x}:{:02x}", index / 256, index % 256),
         workspace_dir: workspace_dir.display().to_string(),
-        hermes_profile: config.hermes_profile().to_string(),
-        hermes_model: config.model().to_string(),
-        credential_mode: if config.credential_proxy_url().is_some() {
-            "openrouter-proxy".to_string()
-        } else {
-            "openai-codex".to_string()
-        },
-        credential_proxy_url: config.credential_proxy_url().map(ToString::to_string),
-        credential_proxy_ca_file: ca_file,
-        nixpkgs_url,
-        microvm_input_url,
+        hermes_profile: String::new(),
+        hermes_model: String::new(),
+        credential_mode: String::new(),
+        credential_proxy_url: None,
+        credential_proxy_ca_file: None,
+        nixpkgs_url: String::new(),
+        microvm_input_url: String::new(),
         ssh_public_key,
         labels,
-    })
+    };
+    apply_current_microvm_config(&mut spec, config)?;
+    Ok(spec)
+}
+
+fn apply_current_microvm_config(spec: &mut MicrovmSpec, config: &MomConfig) -> Result<()> {
+    let prefix = microvm_cidr_prefix();
+    let host_ip = env::var("MOM_MICROVM_HOST_IP").unwrap_or_else(|_| format!("{prefix}.1"));
+    let host_bridge = env::var("MOM_MICROVM_BRIDGE").unwrap_or_else(|_| "agentmom0".to_string());
+    let tap_prefix = env::var("MOM_MICROVM_TAP_PREFIX").unwrap_or_else(|_| "amvm".to_string());
+    spec.guest_ip = format!("{prefix}.{}", spec.machine_index);
+    spec.host_ip = host_ip;
+    spec.host_bridge = host_bridge;
+    spec.tap = format!("{tap_prefix}{}", spec.machine_index);
+    spec.mac = format!(
+        "02:00:00:83:{:02x}:{:02x}",
+        spec.machine_index / 256,
+        spec.machine_index % 256
+    );
+    spec.workspace_dir = workspace_dir_path(&spec.workspace_dir_name)?
+        .display()
+        .to_string();
+    spec.hermes_profile = config.hermes_profile().to_string();
+    spec.hermes_model = config.model().to_string();
+    spec.credential_mode = if config.credential_proxy_url().is_some() {
+        "openrouter-proxy".to_string()
+    } else {
+        "openai-codex".to_string()
+    };
+    spec.credential_proxy_url = config.credential_proxy_url().map(ToString::to_string);
+    spec.credential_proxy_ca_file = config
+        .credentials
+        .proxy_ca_path
+        .as_ref()
+        .map(|_| "agentmom-proxy.crt".to_string());
+    spec.nixpkgs_url = env::var("MOM_MICROVM_NIXPKGS_URL")
+        .unwrap_or_else(|_| "github:NixOS/nixpkgs/nixpkgs-unstable".to_string());
+    spec.microvm_input_url = env::var("MOM_MICROVM_NIX_URL")
+        .unwrap_or_else(|_| "github:microvm-nix/microvm.nix".to_string());
+    spec.labels
+        .insert(LABEL_MANAGED.to_string(), "true".to_string());
+    spec.labels.insert(
+        LABEL_VERSION.to_string(),
+        env!("CARGO_PKG_VERSION").to_string(),
+    );
+    spec.labels
+        .insert("mom.workspace".to_string(), spec.workspace_name.clone());
+    Ok(())
 }
 
 async fn generate_ssh_keypair(dir: &Path, name: &str) -> Result<String> {
