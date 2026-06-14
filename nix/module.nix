@@ -851,11 +851,13 @@ in
         ${cfg.microvm.bridge}.allowedTCPPorts = [ 1080 ];
       })
       (lib.mkIf (cfg.worker.enable && cfg.worker.openFirewall && cfg.worker.firewallInterface != null) {
-        ${cfg.worker.firewallInterface}.allowedTCPPorts = [ workerBindPort ];
-        ${cfg.worker.firewallInterface}.allowedTCPPortRanges =
-          lib.optionals (cfg.worker.serviceTunnelPortRange != null) [
-            cfg.worker.serviceTunnelPortRange
-          ];
+        ${cfg.worker.firewallInterface} = {
+          allowedTCPPorts = [ workerBindPort ];
+          allowedTCPPortRanges =
+            lib.optionals (cfg.worker.serviceTunnelPortRange != null) [
+              cfg.worker.serviceTunnelPortRange
+            ];
+        };
       })
     ];
 
