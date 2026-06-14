@@ -18,7 +18,14 @@ dev-smoke:
 
 real-fleet-test:
     cargo test --test real_fleet real_api_health_metrics_and_worker_auth -- --ignored --test-threads=1
-    cargo test --test real_fleet real_unknown_explicit_node_is_rejected -- --ignored --test-threads=1
 
 real-fleet-test-mutating:
     cargo test --test real_fleet -- --ignored --test-threads=1
+
+real-fleet-test-prod:
+    AGENTMOM_REAL_NODE_A=mom-1 AGENTMOM_REAL_WORKER_TOKEN="$$(ssh mom-ctrl 'cat /run/agenix/agentmom-worker-token-mom-1')" just real-fleet-test
+    AGENTMOM_REAL_NODE_A=mom-2 AGENTMOM_REAL_WORKER_TOKEN="$$(ssh mom-ctrl 'cat /run/agenix/agentmom-worker-token-mom-2')" just real-fleet-test
+
+real-fleet-test-prod-mutating:
+    AGENTMOM_REAL_NODE_A=mom-1 AGENTMOM_REAL_WORKER_TOKEN="$$(ssh mom-ctrl 'cat /run/agenix/agentmom-worker-token-mom-1')" just real-fleet-test-mutating
+    AGENTMOM_REAL_NODE_A=mom-2 AGENTMOM_REAL_WORKER_TOKEN="$$(ssh mom-ctrl 'cat /run/agenix/agentmom-worker-token-mom-2')" just real-fleet-test-mutating

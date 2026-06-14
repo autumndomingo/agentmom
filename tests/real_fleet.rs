@@ -91,9 +91,10 @@ async fn real_api_health_metrics_and_worker_auth() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "requires AGENTMOM_REAL_API_URL; does not create workspaces"]
+#[ignore = "requires AGENTMOM_REAL_ALLOW_CREATE=1 and admin credentials"]
 async fn real_unknown_explicit_node_is_rejected() -> Result<()> {
     let fleet = RealFleet::from_env()?;
+    fleet.require_create_enabled()?;
     let workspace = unique_workspace("badnode");
     let response = fleet
         .admin_request(
@@ -334,13 +335,13 @@ impl RealFleet {
 
     async fn login_admin(&self) -> Result<AdminSession> {
         let email = env::var("AGENTMOM_REAL_ADMIN_EMAIL")
-            .unwrap_or_else(|_| "real-fleet@agentmom.local".to_string());
-        let mut body = json!({ "email": email });
-        if let Ok(code) = env::var("AGENTMOM_REAL_ADMIN_CODE") {
-            if !code.trim().is_empty() {
-                body["access_code"] = json!(code);
-            }
-        }
+            .context("AGENTMOM_REAL_ADMIN_EMAIL is required; use the intended prod admin email")?;
+        let code = env::var("AGENTMOM_REAL_ADMIN_CODE")
+            .context("AGENTMOM_REAL_ADMIN_CODE is required for prod admin login")?;
+        let body = json!({
+            "email": email,
+            "access_code": code
+        });
         let response = self
             .request(
                 self.client
@@ -353,7 +354,7 @@ impl RealFleet {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             bail!(
-                "admin login failed with {status}: {body}; set AGENTMOM_REAL_ADMIN_CODE for an existing prod admin"
+                "admin login failed with {status}: {body}; set AGENTMOM_REAL_ADMIN_EMAIL and AGENTMOM_REAL_ADMIN_CODE for the intended prod admin"
             );
         }
         let cookie = response

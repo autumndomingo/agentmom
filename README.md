@@ -230,10 +230,7 @@ Then run read-only checks:
 
 ```sh
 export AGENTMOM_REAL_API_URL=http://127.0.0.1:18080
-export AGENTMOM_REAL_ADMIN_CODE="$(ssh mom-ctrl 'cat /run/agenix/agentmom-bootstrap-admin-code')"
-export AGENTMOM_REAL_WORKER_TOKEN="$(ssh mom-ctrl 'cat /run/agenix/agentmom-worker-token-mom-1')"
-export AGENTMOM_REAL_NODE_A=mom-1
-just real-fleet-test
+just real-fleet-test-prod
 ```
 
 Workspace-creating and backup tests are opt-in because they touch real runtime
@@ -244,5 +241,11 @@ export AGENTMOM_REAL_ALLOW_CREATE=1
 export AGENTMOM_REAL_ALLOW_BACKUP=1
 export AGENTMOM_REAL_ALLOW_CATALOG_BACKUP=1
 export AGENTMOM_REAL_API_SSH_HOST=mom-ctrl
-just real-fleet-test-mutating
+export AGENTMOM_REAL_ADMIN_EMAIL=you@example.com
+export AGENTMOM_REAL_ADMIN_CODE="$(ssh mom-ctrl 'cat /run/agenix/agentmom-bootstrap-admin-code')"
+just real-fleet-test-prod-mutating
 ```
+
+Use the intended production admin email for `AGENTMOM_REAL_ADMIN_EMAIL`. On a
+freshly wiped catalog, that login will consume the first-admin bootstrap path;
+do not leave it at a test address.

@@ -782,7 +782,11 @@ in
         "agentmom-monitor-check.service"
       ];
       after = tmpfilesReadyUnits;
-      path = [ pkgs.coreutils ];
+      path = [
+        pkgs.coreutils
+        pkgs.gnugrep
+        pkgs.systemd
+      ];
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
@@ -793,6 +797,16 @@ in
         marker=${lib.escapeShellArg "${cfg.stateDir}/.${cfg.cutoverWipeMarker}"}
         if [ -e "$marker" ]; then
           exit 0
+        fi
+        systemctl list-units --all --plain --no-legend 'agentmom-microvm@*.service' | while read -r unit _rest
+        do
+          [ -n "$unit" ] || continue
+          systemctl stop "$unit"
+        done
+        if systemctl list-units --plain --no-legend --state=active 'agentmom-microvm@*.service' | grep -q .; then
+          echo "refusing Agent Mom cutover wipe while microVM units are still active" >&2
+          systemctl list-units --plain --no-legend --state=active 'agentmom-microvm@*.service' >&2 || true
+          exit 1
         fi
         stamp="$(date -u +%Y%m%dT%H%M%SZ)"
         archive="$state_dir/cutover-archive-$stamp"

@@ -401,6 +401,9 @@ pub(crate) fn service_tunnel_upsert(
 ) -> Result<()> {
     ensure_fleet_schema()?;
     let parsed = reqwest::Url::parse(url).with_context(|| format!("parse service URL {url}"))?;
+    if service_tunnel_uses_path_route(&parsed) {
+        return Ok(());
+    }
     let hostname = parsed
         .host_str()
         .ok_or_else(|| anyhow!("service URL has no hostname: {url}"))?
@@ -427,6 +430,12 @@ ON CONFLICT(hostname) DO UPDATE SET
         ],
     )?;
     Ok(())
+}
+
+fn service_tunnel_uses_path_route(url: &reqwest::Url) -> bool {
+    url.host_str()
+        .is_some_and(|host| host.eq_ignore_ascii_case("agentmom.xyz"))
+        && url.path().starts_with("/tunnels/")
 }
 
 pub(crate) fn service_tunnel_hostname_registered(hostname: &str) -> Result<bool> {
