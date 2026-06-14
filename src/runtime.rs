@@ -1487,4 +1487,14 @@ mod tests {
         assert!(template.contains("REQUESTS_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt"));
         assert!(template.contains("SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt"));
     }
+
+    #[test]
+    fn microvm_template_sets_top_level_hermes_model() {
+        let template = microvm_workspace_nix();
+
+        assert!(template.contains("default_provider: openrouter\n    model: ${spec.hermes_model}"));
+        assert!(
+            template.contains("default_provider: openai-codex\n    model: ${spec.hermes_model}")
+        );
+    }
 }

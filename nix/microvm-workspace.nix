@@ -24,6 +24,7 @@ let
   '';
   hermesConfig = if spec.credential_mode == "openrouter-proxy" then ''
     default_provider: openrouter
+    model: ${spec.hermes_model}
     providers:
       openrouter:
         provider: openrouter
@@ -40,6 +41,7 @@ let
       SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
   '' else ''
     default_provider: openai-codex
+    model: ${spec.hermes_model}
     providers:
       openai-codex:
         provider: openai-codex
