@@ -20,18 +20,17 @@ async fn utm_user_workspace_hermes_inference_e2e() -> Result<()> {
     let admin = e2e.login_admin().await?;
     let invite = e2e.create_invite(&admin).await?;
     let user_email = format!("utm-e2e-{}@example.com", now_millis()?);
-    let user = e2e.login(&user_email, Some(&invite)).await?;
+    let user = e2e
+        .signup(
+            "Agent Mom UTM E2E",
+            &user_email,
+            Some(&invite),
+            "utm e2e user password",
+        )
+        .await?;
     assert_eq!(
         user.value.pointer("/user/role").and_then(Value::as_str),
         Some("user")
-    );
-    assert!(
-        user.value
-            .pointer("/user/code")
-            .and_then(Value::as_str)
-            .is_some_and(|code| !code.is_empty()),
-        "new user login should return a reusable user code: {}",
-        user.value
     );
 
     let workspace = e2e
@@ -204,12 +203,15 @@ impl UtmE2e {
     async fn login_admin(&self) -> Result<Session> {
         let email = env::var("AGENTMOM_UTM_ADMIN_EMAIL")
             .unwrap_or_else(|_| "admin@example.com".to_string());
-        let code = env::var("AGENTMOM_UTM_ADMIN_USER_CODE").ok();
-        let session = self.login(&email, code.as_deref()).await.with_context(|| {
-            format!(
-                "admin login failed for {email}; for an existing dev DB set AGENTMOM_UTM_ADMIN_USER_CODE"
-            )
-        })?;
+        let password = env::var("AGENTMOM_UTM_ADMIN_PASSWORD")
+            .unwrap_or_else(|_| "agentmom test admin password".to_string());
+        let session = match self.login(&email, &password).await {
+            Ok(session) => session,
+            Err(_) => self
+                .signup("Admin User", &email, None, &password)
+                .await
+                .with_context(|| format!("admin login/signup failed for {email}"))?,
+        };
         if session.value.pointer("/user/role").and_then(Value::as_str) != Some("admin") {
             bail!(
                 "UTM e2e admin login did not return an admin user: {}",
@@ -219,15 +221,11 @@ impl UtmE2e {
         Ok(session)
     }
 
-    async fn login(&self, email: &str, access_code: Option<&str>) -> Result<Session> {
-        let mut body = json!({ "email": email });
-        if let Some(access_code) = access_code {
-            body["access_code"] = json!(access_code);
-        }
+    async fn login(&self, email: &str, password: &str) -> Result<Session> {
         let response = self
             .client
             .post(format!("{}/api/auth/login", self.api_url))
-            .json(&body)
+            .json(&json!({ "email": email, "password": password }))
             .send()
             .await?;
         if !response.status().is_success() {
@@ -241,6 +239,43 @@ impl UtmE2e {
             .ok_or_else(|| anyhow!("login response did not set a session cookie"))?
             .to_str()
             .context("login Set-Cookie header is not valid UTF-8")?
+            .to_string();
+        let value = response.json::<Value>().await?;
+        Ok(Session { cookie, value })
+    }
+
+    async fn signup(
+        &self,
+        full_name: &str,
+        email: &str,
+        code: Option<&str>,
+        password: &str,
+    ) -> Result<Session> {
+        let mut body = json!({
+            "full_name": full_name,
+            "email": email,
+            "password": password
+        });
+        if let Some(code) = code {
+            body["code"] = json!(code);
+        }
+        let response = self
+            .client
+            .post(format!("{}/api/auth/signup", self.api_url))
+            .json(&body)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            bail!("signup failed with {status}: {body}");
+        }
+        let cookie = response
+            .headers()
+            .get(header::SET_COOKIE)
+            .ok_or_else(|| anyhow!("signup response did not set a session cookie"))?
+            .to_str()
+            .context("signup Set-Cookie header is not valid UTF-8")?
             .to_string();
         let value = response.json::<Value>().await?;
         Ok(Session { cookie, value })

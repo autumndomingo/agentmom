@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use super::*;
 
-pub(crate) const FLEET_SCHEMA_VERSION: i64 = 3;
+pub(crate) const FLEET_SCHEMA_VERSION: i64 = 4;
 
 const NODE_HAS_CAPACITY_SQL: &str = r#"
 max_active_workspaces = 0 OR (
@@ -170,10 +170,25 @@ CREATE INDEX IF NOT EXISTS idx_service_tunnels_workspace
 ON service_tunnels (workspace_name, service);
 "#,
     )?;
+    if current == 3 {
+        reset_auth_schema_for_password_auth(&db)?;
+    }
     ensure_auth_schema(&db)?;
-    if current == 0 {
+    if current == 0 || current < FLEET_SCHEMA_VERSION {
         set_schema_version(&db, FLEET_SCHEMA_VERSION)?;
     }
+    Ok(())
+}
+
+fn reset_auth_schema_for_password_auth(db: &Connection) -> Result<()> {
+    db.execute_batch(
+        r#"
+DROP TABLE IF EXISTS sessions;
+DROP TABLE IF EXISTS invite_redemptions;
+DROP TABLE IF EXISTS invites;
+DROP TABLE IF EXISTS users;
+"#,
+    )?;
     Ok(())
 }
 
@@ -183,7 +198,7 @@ fn ensure_auth_schema(db: &Connection) -> Result<()> {
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     email TEXT NOT NULL UNIQUE,
-    code TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
     full_name TEXT NOT NULL DEFAULT '',
     role TEXT NOT NULL CHECK(role IN ('admin', 'user')),
     invite_id INTEGER,
@@ -230,7 +245,7 @@ WHERE owner_user_id IS NOT NULL;
 
 fn ensure_supported_schema_without_mutation(db: &Connection) -> Result<i64> {
     let current = read_schema_version_without_mutation(db)?;
-    if current == 0 || current == FLEET_SCHEMA_VERSION {
+    if current == 0 || current == 3 || current == FLEET_SCHEMA_VERSION {
         return Ok(current);
     }
     if current > FLEET_SCHEMA_VERSION {

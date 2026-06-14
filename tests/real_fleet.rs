@@ -292,8 +292,8 @@ run_as_service env MOM_STATE_DIR="$tmpdir" "$mom_bin" db status
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("Schema version: 3"),
-        "remote drill should report schema version 3, got {stdout:?}"
+        stdout.contains("Schema version: 4"),
+        "remote drill should report schema version 4, got {stdout:?}"
     );
     Ok(())
 }
@@ -352,24 +352,20 @@ impl RealFleet {
     async fn login_admin(&self) -> Result<AdminSession> {
         let email = env::var("AGENTMOM_REAL_ADMIN_EMAIL")
             .context("AGENTMOM_REAL_ADMIN_EMAIL is required; use the intended prod admin email")?;
-        let body = match env::var("AGENTMOM_REAL_ADMIN_USER_CODE") {
-            Ok(code) => json!({ "email": email, "access_code": code }),
-            Err(_) => json!({ "email": email }),
-        };
+        let password = env::var("AGENTMOM_REAL_ADMIN_PASSWORD")
+            .context("AGENTMOM_REAL_ADMIN_PASSWORD is required")?;
         let response = self
             .request(
                 self.client
                     .post(format!("{}/api/auth/login", self.api_url))
-                    .json(&body),
+                    .json(&json!({ "email": email, "password": password })),
             )
             .send()
             .await?;
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            bail!(
-                "admin login failed with {status}: {body}; use AGENTMOM_REAL_ADMIN_USER_CODE for an existing admin user"
-            );
+            bail!("admin login failed with {status}: {body}");
         }
         let cookie = response
             .headers()
