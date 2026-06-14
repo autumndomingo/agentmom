@@ -85,10 +85,7 @@ in
 
   networking.firewall = {
     enable = true;
-    extraInputRules = ''
-      ip saddr ${spec.host_ip} tcp dport 22 accept
-      tcp dport 22 drop
-    '';
+    allowedTCPPorts = [ 22 ];
   };
   users.users.root.hashedPassword = "";
   users.users.root.openssh.authorizedKeys.keys = [ spec.ssh_public_key ];
