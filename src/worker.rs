@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use super::*;
 
 #[derive(Clone)]
@@ -13,6 +15,7 @@ struct WorkerApi {
     api_url: String,
     node: String,
     runtime: RuntimeMode,
+    workspace_locks: WorkspaceLocks,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,6 +38,24 @@ impl RuntimeMode {
     }
 }
 
+#[derive(Clone, Default)]
+struct WorkspaceLocks {
+    inner: Arc<std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+}
+
+impl WorkspaceLocks {
+    async fn lock(&self, workspace_name: &str) -> OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self.inner.lock().expect("workspace lock map poisoned");
+            locks
+                .entry(workspace_name.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        lock.lock_owned().await
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct OpenServiceRequest {
     workspace_name: String,
@@ -47,11 +68,13 @@ pub(crate) async fn worker(args: WorkerArgs) -> Result<()> {
     let sse_client = worker_sse_client()?;
     let api_url = args.api_url.trim_end_matches('/').to_string();
     let runtime = RuntimeMode::from_env();
+    let workspace_locks = WorkspaceLocks::default();
     let worker_api = WorkerApi {
         client: client.clone(),
         api_url: api_url.clone(),
         node: node.clone(),
         runtime,
+        workspace_locks,
     };
     let worker_url = args
         .worker_url
@@ -230,13 +253,16 @@ async fn worker_open_hermes(
         )));
     }
     if state.api.runtime.is_fake() {
+        let _workspace_guard = state.api.workspace_locks.lock(&workspace.name).await;
         let url = fake_open_hermes(&workspace.name)
             .await
             .map_err(ApiError::Anyhow)?;
         return Ok(Json(json!({ "url": url })));
     }
-    let url = service::open_hermes_dashboard(&state.services, &workspace.name, &workspace.vm_name)
-        .await?;
+    let url = {
+        let _workspace_guard = state.api.workspace_locks.lock(&workspace.name).await;
+        service::open_hermes_dashboard(&state.services, &workspace.name, &workspace.vm_name).await?
+    };
     Ok(Json(json!({ "url": url })))
 }
 
@@ -271,9 +297,12 @@ async fn worker_hermes_acp_ws(
             .into_response());
     }
 
-    let vm = workspace_running_vm_local(&state.api, &workspace)
-        .await
-        .map_err(ApiError::Anyhow)?;
+    let vm = {
+        let _workspace_guard = state.api.workspace_locks.lock(&workspace.name).await;
+        workspace_running_vm_local(&state.api, &workspace)
+            .await
+            .map_err(ApiError::Anyhow)?
+    };
     let acp = state.acp.clone();
     let workspace_name = workspace.name.clone();
     let vm_name = workspace.vm_name.clone();
@@ -360,6 +389,7 @@ async fn worker_claim_once(api: &WorkerApi, worker_url: &str) -> Result<bool> {
 }
 
 async fn run_claimed_job(api: &WorkerApi, job: JobRecord) -> Result<()> {
+    let _workspace_guard = api.workspace_locks.lock(&job.workspace_name).await;
     worker_job_event(
         api,
         WorkerJobEvent {
@@ -603,6 +633,7 @@ async fn worker_reconcile_once(api: &WorkerApi) -> Result<()> {
         if record.node_id.as_deref() != Some(api.node.as_str()) {
             continue;
         }
+        let _workspace_guard = api.workspace_locks.lock(&record.name).await;
         if let Err(error) = worker_reconcile_workspace(api, &record, now).await {
             log_record(
                 "error",
@@ -1178,7 +1209,8 @@ async fn restore_workspace_local(
         .and_then(Value::as_str)
         .unwrap_or(&workspace.desired_state);
     if api.runtime.is_fake() {
-        return fake_restore_workspace(api, workspace, backup_id, backup_location).await;
+        return fake_restore_workspace(api, workspace, backup_id, backup_location, desired_state)
+            .await;
     }
     if let Ok(handle) = get_vm(&workspace.vm_name).await
         && handle.status().is_running()
@@ -1318,7 +1350,9 @@ async fn fake_remove_workspace(
     remove_workspace_dir: bool,
 ) -> Result<()> {
     let dir = fake_workspace_dir(workspace)?;
-    let _ = fs::remove_dir_all(&dir);
+    if remove_workspace_dir {
+        let _ = fs::remove_dir_all(&dir);
+    }
     api.update_workspace(
         &workspace.name,
         Some("removed"),
@@ -1365,25 +1399,30 @@ async fn fake_restore_workspace(
     workspace: &WorkspaceRecord,
     backup_id: &str,
     backup_location: &str,
+    desired_state: &str,
 ) -> Result<()> {
     let dir = fake_workspace_dir(workspace)?;
     fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     fs::write(dir.join("restored-from"), backup_location.as_bytes())?;
-    fs::write(dir.join("state"), b"running")?;
-    api.update_workspace(
-        &workspace.name,
-        Some("running"),
-        Some("running"),
-        false,
-        false,
-    )
-    .await?;
+    let status = if desired_state == "running" {
+        "running"
+    } else {
+        "stopped"
+    };
+    fs::write(dir.join("state"), status.as_bytes())?;
+    api.update_workspace(&workspace.name, Some(status), Some(status), false, false)
+        .await?;
     api.event(
         &workspace.name,
         "workspace_restored",
         "succeeded",
         "fake workspace restored from backup",
-        json!({ "runtime": "fake", "backup_id": backup_id, "location": backup_location }),
+        json!({
+            "runtime": "fake",
+            "backup_id": backup_id,
+            "location": backup_location,
+            "desired_state": status
+        }),
     )
     .await
 }

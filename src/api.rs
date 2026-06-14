@@ -182,9 +182,55 @@ async fn api_create_job(
             )));
         }
     }
+    if request.kind == "restore" {
+        request.payload = canonical_restore_payload(&workspace, &request.payload)?;
+    }
     let job = create_job(request)?;
     let _ = state.notifier.send("job_available".to_string());
     Ok(Json(JobResponse { job }))
+}
+
+fn canonical_restore_payload(workspace: &WorkspaceRecord, payload: &Value) -> Result<Value> {
+    let backup_id = payload
+        .get("backup_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("restore job payload requires backup_id"))?;
+    let backup = backup_record_get(backup_id)?;
+    if backup.kind != "restic" {
+        bail!(
+            "restore supports restic artifacts only; backup {} is {}",
+            backup.id,
+            backup.kind
+        );
+    }
+    if backup.status != "succeeded" {
+        bail!(
+            "restore requires a succeeded backup; backup {} is {}",
+            backup.id,
+            backup.status
+        );
+    }
+    if backup.workspace_name != workspace.name {
+        bail!(
+            "backup {} belongs to workspace {}, not {}",
+            backup.id,
+            backup.workspace_name,
+            workspace.name
+        );
+    }
+    let desired_state = payload
+        .get("desired_state")
+        .and_then(Value::as_str)
+        .unwrap_or(&workspace.desired_state);
+    if !matches!(desired_state, "running" | "stopped") {
+        bail!("restore desired_state must be running or stopped");
+    }
+    Ok(json!({
+        "backup_id": backup.id,
+        "backup_location": backup.location,
+        "backup_workspace_name": backup.workspace_name,
+        "desired_state": desired_state
+    }))
 }
 
 async fn api_get_job(
@@ -344,6 +390,7 @@ async fn api_worker_workspace_state(
     require_worker_report_allowed(&request.node_id)?;
     workspace_update_from_worker(
         &name,
+        &request.node_id,
         request.status.as_deref(),
         request.desired_state.as_deref(),
         request.touch,

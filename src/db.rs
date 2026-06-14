@@ -539,6 +539,23 @@ pub(crate) fn recover_host_with_backups(
             );
         }
 
+        let superseded_output = serde_json::to_string(&json!({
+            "error": "job superseded by host-loss recovery",
+            "from_node": from,
+            "to_node": to
+        }))?;
+        tx.execute(
+            r#"
+UPDATE jobs
+SET status = CASE WHEN status = 'queued' THEN 'canceled' ELSE 'failed' END,
+    output_json = ?2,
+    updated_at = ?3
+WHERE workspace_name = ?1
+  AND status IN ('queued', 'claimed', 'running')
+"#,
+            params![workspace.name, superseded_output, now],
+        )?;
+
         tx.execute(
             r#"
 UPDATE workspaces
@@ -604,6 +621,7 @@ INSERT INTO jobs (
 
 pub(crate) fn workspace_update_from_worker(
     name: &str,
+    node: &str,
     status: Option<&str>,
     desired_state: Option<&str>,
     touch: bool,
@@ -611,29 +629,24 @@ pub(crate) fn workspace_update_from_worker(
 ) -> Result<()> {
     let now = now_epoch()?;
     let db = fleet_db()?;
-    if let Some(status) = status {
-        db.execute(
-            "UPDATE workspaces SET status = ?2, updated_at = ?3 WHERE name = ?1",
-            params![name, status, now],
-        )?;
-    }
-    if let Some(desired_state) = desired_state {
-        db.execute(
-            "UPDATE workspaces SET desired_state = ?2, updated_at = ?3 WHERE name = ?1",
-            params![name, desired_state, now],
-        )?;
-    }
-    if touch {
-        db.execute(
-            "UPDATE workspaces SET last_used_at = ?2, updated_at = ?2 WHERE name = ?1",
-            params![name, now],
-        )?;
-    }
-    if mark_backup {
-        db.execute(
-            "UPDATE workspaces SET last_backup_at = ?2, updated_at = ?2 WHERE name = ?1",
-            params![name, now],
-        )?;
+    let changed = db.execute(
+        r#"
+UPDATE workspaces
+SET status = COALESCE(?3, status),
+    desired_state = COALESCE(?4, desired_state),
+    last_used_at = CASE WHEN ?5 THEN ?7 ELSE last_used_at END,
+    last_backup_at = CASE WHEN ?6 THEN ?7 ELSE last_backup_at END,
+    updated_at = ?7
+WHERE name = ?1 AND node_id = ?2
+"#,
+        params![name, node, status, desired_state, touch, mark_backup, now],
+    )?;
+    if changed == 0 {
+        let workspace = workspace_get(name)?;
+        match workspace.node_id.as_deref() {
+            Some(assigned) => bail!("workspace {name} is assigned to node {assigned}, not {node}"),
+            None => bail!("workspace {name} has no assigned node"),
+        }
     }
     Ok(())
 }
@@ -1065,15 +1078,20 @@ pub(crate) fn claim_job(node: &str) -> Result<Option<JobRecord>> {
             r#"
 SELECT id
 FROM jobs
-WHERE status = 'queued' AND node_id = ?1
-  AND EXISTS (
-      SELECT 1 FROM nodes
-      WHERE nodes.node_id = ?1
-        AND nodes.status IN ('ready', 'cordoned')
-  )
-ORDER BY created_at ASC
-LIMIT 1
-"#,
+	WHERE status = 'queued' AND node_id = ?1
+	  AND EXISTS (
+	      SELECT 1 FROM nodes
+	      WHERE nodes.node_id = ?1
+	        AND nodes.status IN ('ready', 'cordoned')
+	  )
+	  AND NOT EXISTS (
+	      SELECT 1 FROM jobs active
+	      WHERE active.workspace_name = jobs.workspace_name
+	        AND active.status IN ('claimed', 'running')
+	  )
+	ORDER BY created_at ASC
+	LIMIT 1
+	"#,
             params![node],
             |row| row.get(0),
         )

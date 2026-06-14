@@ -227,6 +227,66 @@ async fn fake_worker_start_stop_backup_jobs_update_central_state() -> Result<()>
 }
 
 #[tokio::test]
+async fn restore_job_payload_is_canonicalized_from_backup_catalog() -> Result<()> {
+    let _guard = fleet_test_guard().await;
+    let fleet = TestFleet::start().await?;
+    let node = spawn_worker("node-a", &fleet.api_url)?;
+    wait_for_node(fleet.api_state.path(), "node-a").await?;
+
+    let create = create_workspace(&fleet.api_url, "restore-canonical", "node-a", 0).await?;
+    wait_for_job_status(&fleet.api_url, &create, "succeeded").await?;
+
+    let backup = create_job(&fleet.api_url, "restore-canonical", "backup").await?;
+    wait_for_job_status(&fleet.api_url, &backup, "succeeded").await?;
+    let (backup_id, backup_location) =
+        latest_backup_record(fleet.api_state.path(), "restore-canonical")?;
+
+    let response = create_job_value_with_payload(
+        &fleet.api_url,
+        "restore-canonical",
+        "restore",
+        json!({
+            "backup_id": backup_id,
+            "backup_location": "fake-restic#tampered",
+            "backup_workspace_name": "other-workspace",
+            "desired_state": "stopped"
+        }),
+    )
+    .await?;
+    let job_id = response
+        .pointer("/job/id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("restore job response missing id: {response}"))?;
+    let payload_json = response
+        .pointer("/job/payload_json")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("restore job response missing payload_json: {response}"))?;
+    let payload: Value = serde_json::from_str(payload_json)?;
+    assert_eq!(payload["backup_location"], backup_location);
+    assert_eq!(payload["backup_workspace_name"], "restore-canonical");
+
+    wait_for_job_status(&fleet.api_url, job_id, "succeeded").await?;
+    assert_eq!(
+        std::fs::read_to_string(
+            node.runtime_home
+                .path()
+                .join("fake/restore-canonical/restored-from")
+        )?,
+        backup_location
+    );
+    assert_eq!(
+        std::fs::read_to_string(
+            node.runtime_home
+                .path()
+                .join("fake/restore-canonical/state")
+        )?,
+        "stopped"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn browser_workspace_routes_require_session_cookie() -> Result<()> {
     let _guard = fleet_test_guard().await;
     let fleet = TestFleet::start().await?;
@@ -511,9 +571,11 @@ async fn recover_host_reassigns_and_restores_latest_backup_on_target_node() -> R
     let backup = create_job(&fleet.api_url, "recover-me", "backup").await?;
     wait_for_job_status(&fleet.api_url, &backup, "succeeded").await?;
     wait_for_backup_count(fleet.api_state.path(), "recover-me", 1).await?;
+    let stale_job = insert_running_job(fleet.api_state.path(), "recover-me", "node-a")?;
 
     run_recover_host(fleet.api_state.path(), "node-a", "node-b")?;
 
+    assert_eq!(job_status(&fleet.api_url, &stale_job).await?, "failed");
     wait_for_workspace_node(&fleet.api_url, "recover-me", "node-b").await?;
     wait_for_workspace_status(&fleet.api_url, "recover-me", "running").await?;
     assert!(
@@ -911,6 +973,58 @@ async fn worker_job_completion_is_idempotent_for_retried_terminal_results() -> R
     }
 
     assert_eq!(job_status(&fleet.api_url, &job_id).await?, "succeeded");
+    Ok(())
+}
+
+#[tokio::test]
+async fn worker_claim_skips_workspace_with_active_job() -> Result<()> {
+    let _guard = fleet_test_guard().await;
+    let fleet = TestFleet::start().await?;
+    let client = reqwest::Client::new();
+    insert_node(fleet.api_state.path(), "node-a", now_epoch()?)?;
+    insert_workspace(fleet.api_state.path(), "claim-serial", "node-a")?;
+    let first_job = create_job(&fleet.api_url, "claim-serial", "start").await?;
+    let second_job = create_job(&fleet.api_url, "claim-serial", "stop").await?;
+
+    let first_claim = claim_worker_job(&client, &fleet.api_url, "node-a").await?;
+    assert_eq!(
+        first_claim
+            .as_ref()
+            .and_then(|job| job.get("id"))
+            .and_then(Value::as_str),
+        Some(first_job.as_str())
+    );
+
+    let blocked_claim = claim_worker_job(&client, &fleet.api_url, "node-a").await?;
+    assert!(
+        blocked_claim.is_none(),
+        "second job for same workspace must wait while first job is active"
+    );
+
+    client
+        .post(format!(
+            "{}/worker/jobs/{}/complete",
+            fleet.api_url, first_job
+        ))
+        .bearer_auth(WORKER_TOKEN)
+        .json(&json!({
+            "node_id": "node-a",
+            "status": "succeeded",
+            "output": { "ok": true }
+        }))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let second_claim = claim_worker_job(&client, &fleet.api_url, "node-a").await?;
+    assert_eq!(
+        second_claim
+            .as_ref()
+            .and_then(|job| job.get("id"))
+            .and_then(Value::as_str),
+        Some(second_job.as_str())
+    );
+
     Ok(())
 }
 
@@ -1501,18 +1615,56 @@ async fn create_job(api_url: &str, workspace: &str, kind: &str) -> Result<String
 }
 
 async fn create_job_value(api_url: &str, workspace: &str, kind: &str) -> Result<Value> {
+    create_job_value_with_payload(api_url, workspace, kind, json!({})).await
+}
+
+async fn create_job_value_with_payload(
+    api_url: &str,
+    workspace: &str,
+    kind: &str,
+    payload: Value,
+) -> Result<Value> {
     let cookie = admin_cookie(api_url).await?;
     Ok(reqwest::Client::new()
         .post(format!("{api_url}/api/jobs"))
         .header(reqwest::header::COOKIE, cookie)
         .json(&json!({
             "workspace_name": workspace,
-            "kind": kind
+            "kind": kind,
+            "payload": payload
         }))
         .send()
         .await?
         .error_for_status()?
         .json::<Value>()
+        .await?)
+}
+
+async fn claim_worker_job(
+    client: &reqwest::Client,
+    api_url: &str,
+    node: &str,
+) -> Result<Option<Value>> {
+    Ok(client
+        .post(format!("{api_url}/worker/claim"))
+        .bearer_auth(WORKER_TOKEN)
+        .json(&json!({
+            "node_id": node,
+            "capacity": test_capacity(),
+            "pressure": {
+                "managed_vms": 0,
+                "running_vms": 0,
+                "active_workspaces": 0,
+                "allocated_memory_mib": 0,
+                "disk_available_mib": 65536,
+                "capacity_ok": true
+            },
+            "worker_url": "http://100.64.0.42:9090"
+        }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Option<Value>>()
         .await?)
 }
 
@@ -1653,6 +1805,22 @@ INSERT INTO workspaces (
     Ok(())
 }
 
+fn insert_running_job(api_state: &Path, workspace: &str, node: &str) -> Result<String> {
+    let now = now_epoch()?;
+    let job_id = format!("job-{workspace}-running");
+    let db = Connection::open(api_state.join("fleet.db"))?;
+    db.execute(
+        r#"
+INSERT INTO jobs (
+    id, workspace_name, node_id, kind, status, payload_json, output_json,
+    claimed_by, claimed_at, created_at, updated_at
+) VALUES (?1, ?2, ?3, 'stop', 'running', '{}', NULL, ?3, ?4, ?4, ?4)
+"#,
+        (&job_id, workspace, node, now),
+    )?;
+    Ok(job_id)
+}
+
 fn insert_unassigned_workspace(api_state: &Path, name: &str) -> Result<()> {
     let now = now_epoch()?;
     let workspace_id = test_workspace_id(name);
@@ -1715,6 +1883,21 @@ fn backup_count(api_state: &Path, workspace: &str) -> Result<i64> {
         |row| row.get(0),
     )?;
     Ok(count)
+}
+
+fn latest_backup_record(api_state: &Path, workspace: &str) -> Result<(String, String)> {
+    let db = Connection::open(api_state.join("fleet.db"))?;
+    Ok(db.query_row(
+        r#"
+SELECT id, location
+FROM workspace_backups
+WHERE workspace_name = ?1
+ORDER BY created_at DESC
+LIMIT 1
+"#,
+        [workspace],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?)
 }
 
 async fn wait_for_job_status(api_url: &str, job_id: &str, status: &str) -> Result<()> {

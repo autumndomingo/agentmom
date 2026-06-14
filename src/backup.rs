@@ -285,6 +285,7 @@ pub(crate) async fn run_restic_restore(
     backup_location: &str,
     workspace_dir_path: &Path,
 ) -> Result<()> {
+    validate_backup_id_path_component(backup_id)?;
     if env::var_os("RESTIC_REPOSITORY").is_none() {
         bail!("RESTIC_REPOSITORY must be set before workspace restore can run");
     }
@@ -378,6 +379,17 @@ pub(crate) async fn run_restic_restore(
     }
     fs::remove_dir_all(&restore_tmp)
         .with_context(|| format!("remove restore dir {}", restore_tmp.display()))?;
+    Ok(())
+}
+
+fn validate_backup_id_path_component(backup_id: &str) -> Result<()> {
+    if backup_id.is_empty()
+        || !backup_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        bail!("backup id is not safe for restore temp paths: {backup_id:?}");
+    }
     Ok(())
 }
 

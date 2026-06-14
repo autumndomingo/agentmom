@@ -830,6 +830,7 @@ in
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
+        TimeoutStartSec = "40min";
       };
       script = ''
         set -eu
@@ -848,16 +849,27 @@ in
         )
         for unit in "''${stop_units[@]}"
         do
-          systemctl stop "$unit" >/dev/null 2>&1 || true
+          state="$(systemctl is-active "$unit" 2>/dev/null || true)"
+          case "$state" in
+            active|activating|deactivating)
+              if ! systemctl stop --job-mode=fail "$unit" >/dev/null 2>&1; then
+                echo "refusing Agent Mom cutover wipe because stopping $unit would replace a queued systemd job" >&2
+                exit 1
+              fi
+              ;;
+          esac
         done
         for attempt in $(seq 1 60)
         do
           still_active=""
           for unit in "''${stop_units[@]}"
           do
-            if systemctl is-active --quiet "$unit"; then
+            state="$(systemctl is-active "$unit" 2>/dev/null || true)"
+            case "$state" in
+              active|activating|deactivating)
               still_active="''${still_active} $unit"
-            fi
+                ;;
+            esac
           done
           if [ -z "$still_active" ]; then
             break
@@ -1008,11 +1020,14 @@ in
       wantedBy = [ "multi-user.target" ];
       after = [ "network-online.target" ] ++ tmpfilesReadyUnits
         ++ lib.optionals (cfg.cutoverWipeMarker != null) [ "agentmom-cutover-wipe.service" ]
+        ++ lib.optionals cfg.microvm.enable [ "agentmom-microvm-bridge.service" ]
         ++ lib.optionals cfg.credentialProxy.enable [ "agentmom-credential-proxy.service" ];
       wants = [ "network-online.target" ]
         ++ lib.optionals (cfg.cutoverWipeMarker != null) [ "agentmom-cutover-wipe.service" ]
+        ++ lib.optionals cfg.microvm.enable [ "agentmom-microvm-bridge.service" ]
         ++ lib.optionals cfg.credentialProxy.enable [ "agentmom-credential-proxy.service" ];
       requires = lib.optionals (cfg.cutoverWipeMarker != null) [ "agentmom-cutover-wipe.service" ]
+        ++ lib.optionals cfg.microvm.enable [ "agentmom-microvm-bridge.service" ]
         ++ lib.optionals cfg.credentialProxy.enable [ "agentmom-credential-proxy.service" ];
       path = commonPath;
       environment = commonEnvironment // {
