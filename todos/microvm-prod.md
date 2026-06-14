@@ -12,11 +12,12 @@ Do:
 - Fix proxy, bridge, locked-input, runtime validation, and local/remote routing issues.
 - Remove unsupported or unused configuration surface.
 - Simplify workspace VM creation and fake-runtime wiring where it is low risk.
+- Continue fast-start/resume work on a branch after the prod cutover is stable.
 
 Do not:
 - Preserve microsandbox compatibility.
 - Preserve old fleet DB data or migrations.
-- Implement warm pools or snapshot/restore in this pass.
+- Land warm pools or snapshot/restore to `master` before they are proven.
 
 ## Approach
 
@@ -66,3 +67,18 @@ Keep the first production runtime narrow: Cloud Hypervisor, `/24` guest network,
 - First prod mutating run reached SSH in the backup-drill VM about two seconds after the 120s fresh-start deadline; this was build/copy latency for the generated microVM store disk, not a guest boot failure.
 - Second prod mutating run proved the guest reached `sshd`, but host TCP/22 was dropped while ICMP worked. Use NixOS `allowedTCPPorts = [ 22 ]` instead of hand-written guest firewall rules.
 - Third prod mutating run passed on `mom-1` and `mom-2`. Intentional VM stops still left failed systemd units because the runner exits 143 on SIGTERM; mark that as a successful exit status in the unit template.
+
+## Fast Starts / Resumes
+
+- [x] Keep production `master` deployed and healthy before branching.
+- [~] Start branch `microvm-fast-start` from current `master` in `worktrees/microvm-fast-start`.
+- [ ] Map prototype evidence for warm slots, snapshot/restore, and EROFS prebuild costs.
+- [~] Implement the lowest-risk first fast-start improvement off `master`.
+- [ ] Validate locally and on prod-like hosts without landing to `master`.
+
+## Fast Start Notes
+
+- Prod cold starts are dominated by per-workspace Nix build and `microvm-store-disk.erofs`, not by the guest reaching multi-user after the runner starts.
+- Sharing host `/nix/store` into the guest with read-only virtiofs removes `microvm-store-disk.erofs`; first measured host exec dropped to 21.8s, and same-VM restart dropped to 13.1s.
+- Removing the scripted-initrd override was slower on `mom-1` with the store share: 28.1s first start and 16.6s restart. Keep scripted initrd for now.
+- Next low-risk branch change: stamp successful runner builds so stopped workspace restarts can skip no-op Nix evaluation and rebuild only when generated inputs change.

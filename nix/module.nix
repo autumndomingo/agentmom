@@ -182,7 +182,19 @@ let
       exit "$status"
     }
     trap cleanup EXIT INT TERM
-    ${pkgs.nix}/bin/nix build --extra-experimental-features 'nix-command flakes' .#runner -o result
+    needs_build=0
+    if [ ! -x result/bin/microvm-run ] || [ ! -e .runner-built ]; then
+      needs_build=1
+    fi
+    for input in flake.nix spec.json microvm-workspace.nix agentmom-proxy.crt; do
+      if [ -e "$input" ] && [ "$input" -nt .runner-built ]; then
+        needs_build=1
+      fi
+    done
+    if [ "$needs_build" -eq 1 ]; then
+      ${pkgs.nix}/bin/nix build --extra-experimental-features 'nix-command flakes' .#runner -o result
+      touch .runner-built
+    fi
     if [ -x result/bin/tap-up ]; then
       result/bin/tap-up
     fi

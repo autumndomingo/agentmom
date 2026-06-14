@@ -45,6 +45,7 @@ in
   microvm = {
     hypervisor = "cloud-hypervisor";
     optimize.enable = true;
+    storeOnDisk = false;
     vcpu = spec.cpus;
     mem = spec.memory_mib;
     registerWithMachined = true;
@@ -57,6 +58,15 @@ in
       }
     ];
     shares = [
+      {
+        proto = "virtiofs";
+        tag = "ro-store";
+        source = "/nix/store";
+        mountPoint = "/nix/.ro-store";
+        socket = "/run/agentmom-${spec.name}-store-virtiofs.sock";
+        readOnly = true;
+        cache = "always";
+      }
       {
         proto = "virtiofs";
         tag = "workspace";
