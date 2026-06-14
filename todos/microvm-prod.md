@@ -76,7 +76,7 @@ Keep the first production runtime narrow: Cloud Hypervisor, `/24` guest network,
 - [x] Implement the lowest-risk first fast-start improvement off `master`.
 - [x] Validate locally and on prod-like hosts without landing to `master`.
 - [x] Run another focused subagent review before any deploy decision.
-- [~] Apply review fixes and rerun coherent all-role validation.
+- [x] Apply review fixes and rerun coherent all-role validation.
 
 ## Fast Start Notes
 
@@ -91,3 +91,6 @@ Keep the first production runtime narrow: Cloud Hypervisor, `/24` guest network,
 - The second focused review found that existing stopped VM dirs could preserve old generated `microvm-workspace.nix` inputs and that mtime-based runner stamps could miss missing files or `flake.lock` changes. The branch now refreshes generated VM inputs before starting stopped VMs and caches runners by content hash in `.runner-input-hash`.
 - Host `/nix/store` sharing is intentionally read-only but expands guest read access to host store contents. Before merge/deploy, validate from a guest that `/nix/store` and `/nix/.ro-store` are read-only and document that host store contents must not be treated as confidential from workspace guests.
 - Earlier branch validation used new workers with the old controller. The next deploy-gate run should pin the fixed branch in configs and switch `mom-ctrl`, `mom-1`, and `mom-2` to the same Agent Mom package before rerunning real-fleet tests.
+- Fixed branch commit `07a93f2` was pinned by configs test commit `61acc8d` and switched on `mom-ctrl`, `mom-1`, and `mom-2`. All three roles now evaluate/run the same Agent Mom package path.
+- Coherent all-role validation passed: read-only real-fleet passed on both nodes, mutating real-fleet passed on `mom-1` in 99.1s and `mom-2` in 101.9s, and post-test sweeps showed ready API, active worker services, no failed units, and no leftover microVM units.
+- Targeted guest validation from a disposable `storecheck-*` workspace confirmed `/nix/store` is mounted read-only from `ro-store` and `touch /nix/store/.agentmom-write-test` fails with `Read-only file system`.
