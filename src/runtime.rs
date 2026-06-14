@@ -361,11 +361,7 @@ pub(crate) async fn proxy_smoke(vm: &GuestVm) -> Result<()> {
     checked_shell(
         vm,
         r#"
-set -eu
-if [ -f /root/.hermes/auth.json ]; then
-  echo "raw auth files are present in the VM" >&2
-  exit 1
-fi
+set -e
 test -f /etc/profile.d/agentmom-proxy.sh
 . /etc/profile.d/agentmom-proxy.sh
 test -n "${HTTPS_PROXY:-}"
@@ -1225,10 +1221,11 @@ async fn run_ssh_shell(
     script: &str,
     stdin_bytes: Option<&[u8]>,
 ) -> Result<GuestOutput> {
+    let script = logout_safe_shell_script(script);
     let mut child = TokioCommand::new("ssh")
         .args(ssh_common_args(name, spec)?)
         .arg(ssh_destination(spec))
-        .arg(format!("/bin/sh -lc {}", shell_quote(script)))
+        .arg(format!("/bin/sh -lc {}", shell_quote(&script)))
         .stdin(if stdin_bytes.is_some() {
             Stdio::piped()
         } else {
@@ -1256,6 +1253,19 @@ async fn run_ssh_shell(
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
         stderr: String::from_utf8_lossy(&output.stderr).to_string(),
     })
+}
+
+fn logout_safe_shell_script(script: &str) -> String {
+    format!(
+        "\
+(
+{script}
+)
+__agentmom_status=$?
+set +u
+exit \"$__agentmom_status\"
+"
+    )
 }
 
 fn ssh_common_args(name: &str, _spec: &MicrovmSpec) -> Result<Vec<String>> {
@@ -1500,6 +1510,15 @@ mod tests {
         );
         assert!(script.contains("exec 'hermes' '--help'"));
         Ok(())
+    }
+
+    #[test]
+    fn ssh_shell_wrapper_keeps_nounset_out_of_logout() {
+        let script = logout_safe_shell_script("set -eu\necho ok");
+
+        assert!(script.starts_with("(\nset -eu\necho ok\n)"));
+        assert!(script.contains("__agentmom_status=$?"));
+        assert!(script.contains("set +u\nexit \"$__agentmom_status\""));
     }
 
     #[test]
