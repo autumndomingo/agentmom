@@ -183,7 +183,7 @@
             pname = "agent-mom-ui";
             version = "0.1.0";
             src = ./ui;
-            npmDepsHash = "sha256-8K/nuaBIqeWYc/i3wvDnj9JED59PHhgSH9wN3E6h6Eg=";
+            npmDepsHash = "sha256-MoV/yiLW/qRGRYUJag5Vt0dM1CbbGNuxdMUW+MRFPx0=";
             installPhase = ''
               runHook preInstall
               mkdir -p "$out/share/agentmom/ui"
