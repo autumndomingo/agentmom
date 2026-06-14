@@ -76,7 +76,7 @@ Keep the first production runtime narrow: Cloud Hypervisor, `/24` guest network,
 - [x] Implement the lowest-risk first fast-start improvement off `master`.
 - [x] Validate locally and on prod-like hosts without landing to `master`.
 - [x] Run another focused subagent review before any deploy decision.
-- [~] Apply third-review deploy fixes and rerun coherent all-role validation after rolling a new pin.
+- [x] Apply third-review deploy fixes and rerun coherent all-role validation after rolling a new pin.
 
 ## Fast Start Notes
 
@@ -95,4 +95,5 @@ Keep the first production runtime narrow: Cloud Hypervisor, `/24` guest network,
 - Coherent all-role validation passed: read-only real-fleet passed on both nodes, mutating real-fleet passed on `mom-1` in 99.1s and `mom-2` in 101.9s, and post-test sweeps showed ready API, active worker services, no failed units, and no leftover microVM units.
 - Targeted guest validation from a disposable `storecheck-*` workspace confirmed `/nix/store` is mounted read-only from `ro-store` and `touch /nix/store/.agentmom-write-test` fails with `Read-only file system`.
 - Botched `storecheck-*` attempts briefly tripped the monitor's recent-failed-job threshold; after the 900s window aged out, `agentmom-monitor-check` returned to `monitor ok` with no failed units.
-- Third focused review found one deploy blocker: generated VM refresh rewrote `spec.json` in place. The branch now uses atomic same-directory writes for generated inputs, preflights workspace source paths before refresh, and adds systemd/journal diagnostics for start failures. Local validation passed; all-role prod validation still needs a new configs pin.
+- Third focused review found one deploy blocker: generated VM refresh rewrote `spec.json` in place. The branch now uses atomic same-directory writes for generated inputs, preflights workspace source paths before refresh, and adds systemd/journal diagnostics for start failures.
+- Fixed commit `1d5dd0d` was pinned by configs test commit `c5737a6` and switched on `mom-ctrl`, `mom-1`, and `mom-2`. Local validation passed, all three NixOS toplevels built, read-only real-fleet passed on both workers, mutating real-fleet passed on `mom-1` in 95.39s and `mom-2` in 100.92s, and final sweeps showed ready API, monitor OK, active worker services, no failed units, and no leftover microVM units.
