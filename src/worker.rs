@@ -149,23 +149,23 @@ pub(crate) async fn worker(args: WorkerArgs) -> Result<()> {
             shutdown_task.abort();
             return Ok(());
         }
-        if claimed && !args.once {
-            continue;
-        }
-        if let Err(error) = worker_reconcile_once(&worker_api).await {
-            log_record(
-                "error",
-                "worker_reconcile_cycle_failed",
-                None,
-                &format!("worker reconcile cycle failed: {error:#}"),
-            );
-            eprintln!("worker reconcile cycle failed: {error:#}");
-        }
         if args.once {
+            if let Err(error) = worker_reconcile_once(&worker_api).await {
+                log_record(
+                    "error",
+                    "worker_reconcile_cycle_failed",
+                    None,
+                    &format!("worker reconcile cycle failed: {error:#}"),
+                );
+                eprintln!("worker reconcile cycle failed: {error:#}");
+            }
             sse_task.abort();
             worker_http.abort();
             shutdown_task.abort();
             return Ok(());
+        }
+        if claimed {
+            continue;
         }
         if *shutdown_rx.borrow() {
             log_record(
@@ -187,8 +187,46 @@ pub(crate) async fn worker(args: WorkerArgs) -> Result<()> {
                 shutdown_task.abort();
                 return Ok(());
             },
-            _ = wake_rx.recv() => {},
+            _ = wake_rx.recv() => {
+                continue;
+            },
             _ = tokio::time::sleep(Duration::from_secs(args.interval)) => {},
+        }
+        match worker_claim_once(&worker_api, &worker_url).await {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(error) => {
+                log_record(
+                    "error",
+                    "worker_claim_failed",
+                    None,
+                    &format!("worker claim failed before reconcile: {error:#}"),
+                );
+                eprintln!("worker claim failed before reconcile: {error:#}");
+            }
+        }
+        tokio::select! {
+            result = worker_reconcile_once(&worker_api) => {
+                if let Err(error) = result {
+                    log_record(
+                        "error",
+                        "worker_reconcile_cycle_failed",
+                        None,
+                        &format!("worker reconcile cycle failed: {error:#}"),
+                    );
+                    eprintln!("worker reconcile cycle failed: {error:#}");
+                }
+            },
+            _ = shutdown_rx.changed() => {
+                log_record("info", "worker_shutdown", None, "Agent Mom worker shutting down");
+                sse_task.abort();
+                worker_http.abort();
+                shutdown_task.abort();
+                return Ok(());
+            },
+            _ = wake_rx.recv() => {
+                continue;
+            },
         }
     }
 }
