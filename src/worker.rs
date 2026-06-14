@@ -1339,7 +1339,8 @@ async fn create_workspace_local(
         json!({
             "vm": workspace.vm_name,
             "workspace_dir": workspace.workspace_dir_name,
-            "user": payload.get("user")
+            "user": payload.get("user"),
+            "mom.version": env!("CARGO_PKG_VERSION")
         }),
     )
     .await?;
@@ -1476,7 +1477,11 @@ async fn ensure_workspace_running_local(
                 "vm_recreated",
                 "succeeded",
                 "workspace vm recreated around existing workspace directory",
-                json!({ "vm": workspace.vm_name, "workspace_dir": workspace.workspace_dir_name }),
+                json!({
+                    "vm": workspace.vm_name,
+                    "workspace_dir": workspace.workspace_dir_name,
+                    "mom.version": env!("CARGO_PKG_VERSION")
+                }),
             )
             .await?;
             let handle = get_vm(&workspace.vm_name)
@@ -1752,7 +1757,10 @@ async fn fake_create_workspace(
         "workspace_created",
         "succeeded",
         "fake workspace created",
-        json!({ "runtime": "fake" }),
+        json!({
+            "runtime": "fake",
+            "mom.version": env!("CARGO_PKG_VERSION")
+        }),
     )
     .await
 }

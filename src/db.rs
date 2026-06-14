@@ -1684,6 +1684,23 @@ pub(crate) fn job_counts() -> Result<Vec<(String, i64)>> {
         .collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+pub(crate) fn recent_jobs(limit: u32) -> Result<Vec<JobRecord>> {
+    ensure_fleet_schema()?;
+    let db = fleet_db()?;
+    let mut stmt = db.prepare(
+        r#"
+SELECT id, workspace_name, node_id, kind, status, payload_json, output_json,
+       claimed_by, claimed_at, created_at, updated_at
+FROM jobs
+ORDER BY updated_at DESC, created_at DESC
+LIMIT ?1
+"#,
+    )?;
+    Ok(stmt
+        .query_map(params![i64::from(limit)], job_from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 pub(crate) fn workspace_status_counts() -> Result<Vec<(String, i64)>> {
     ensure_fleet_schema()?;
     let db = fleet_db()?;

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use super::*;
 use argon2::{
     Argon2, PasswordHash, PasswordHasher, PasswordVerifier,
@@ -100,6 +102,43 @@ struct UsersResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct AdminInfraResponse {
+    generated_at: i64,
+    app_version: String,
+    users: Vec<AdminInfraUser>,
+    nodes: Vec<AdminInfraNode>,
+    jobs: Vec<JobRecord>,
+    workspace_status_counts: HashMap<String, i64>,
+    node_status_counts: HashMap<String, i64>,
+    job_status_counts: HashMap<String, i64>,
+}
+
+#[derive(Debug, Serialize)]
+struct AdminInfraUser {
+    #[serde(flatten)]
+    user: AuthUser,
+    workspace: Option<AdminInfraWorkspace>,
+}
+
+#[derive(Debug, Serialize)]
+struct AdminInfraWorkspace {
+    #[serde(flatten)]
+    workspace: WorkspaceRecord,
+    vm_version: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct AdminInfraNode {
+    #[serde(flatten)]
+    node: NodeRecord,
+    stale: bool,
+    active_workspaces: usize,
+    desired_running_workspaces: usize,
+    allocated_cpus: u32,
+    allocated_memory_mib: u64,
+}
+
+#[derive(Debug, Serialize)]
 struct InvitesResponse {
     invites: Vec<InviteRecord>,
 }
@@ -122,6 +161,7 @@ pub(crate) fn api_routes() -> Router<Arc<ApiState>> {
         .route("/api/me", get(me))
         .route("/api/me/setup", post(setup_me))
         .route("/api/admin/users", get(admin_users))
+        .route("/api/admin/infra", get(admin_infra))
         .route("/api/admin/users/{id}", delete(admin_delete_user))
         .route(
             "/api/admin/invites",
@@ -300,6 +340,91 @@ async fn setup_me(
 async fn admin_users(headers: HeaderMap) -> Result<Json<UsersResponse>, AuthError> {
     require_admin(&headers)?;
     Ok(Json(UsersResponse { users: user_all()? }))
+}
+
+async fn admin_infra(headers: HeaderMap) -> Result<Json<AdminInfraResponse>, AuthError> {
+    require_admin(&headers)?;
+    let now = now_epoch()?;
+    let stale_cutoff = now.saturating_sub(
+        i64::try_from(env_u64("MOM_NODE_STALE_SECS", 60))
+            .context("MOM_NODE_STALE_SECS is too large")?,
+    );
+    let users = user_all()?;
+    let workspaces = workspace_all()?;
+    let workspace_versions = workspace_vm_versions()?;
+    let nodes = node_all()?;
+
+    let mut workspaces_by_owner = workspaces
+        .iter()
+        .filter_map(|workspace| workspace.owner_user_id.map(|owner| (owner, workspace)))
+        .collect::<HashMap<_, _>>();
+
+    let users = users
+        .into_iter()
+        .map(|user| {
+            let workspace =
+                workspaces_by_owner
+                    .remove(&user.id)
+                    .map(|workspace| AdminInfraWorkspace {
+                        workspace: workspace.clone(),
+                        vm_version: workspace_versions.get(&workspace.name).cloned(),
+                    });
+            AdminInfraUser { user, workspace }
+        })
+        .collect();
+
+    let nodes = nodes
+        .into_iter()
+        .map(|node| {
+            let assigned = workspaces
+                .iter()
+                .filter(|workspace| {
+                    workspace.node_id.as_deref() == Some(node.node_id.as_str())
+                        && workspace.status != "removed"
+                })
+                .collect::<Vec<_>>();
+            let active_workspaces = assigned
+                .iter()
+                .filter(|workspace| {
+                    matches!(
+                        workspace.status.as_str(),
+                        "running" | "starting" | "restoring"
+                    )
+                })
+                .count();
+            let desired_running_workspaces = assigned
+                .iter()
+                .filter(|workspace| workspace.desired_state == "running")
+                .count();
+            let allocated_cpus = assigned
+                .iter()
+                .map(|workspace| u32::from(workspace.cpus))
+                .sum();
+            let allocated_memory_mib = assigned
+                .iter()
+                .map(|workspace| u64::from(workspace.memory_mib))
+                .sum();
+            AdminInfraNode {
+                stale: node.last_seen_at < stale_cutoff,
+                active_workspaces,
+                desired_running_workspaces,
+                allocated_cpus,
+                allocated_memory_mib,
+                node,
+            }
+        })
+        .collect();
+
+    Ok(Json(AdminInfraResponse {
+        generated_at: now,
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        users,
+        nodes,
+        jobs: recent_jobs(25)?,
+        workspace_status_counts: counts_map(workspace_status_counts()?),
+        node_status_counts: counts_map(node_status_counts()?),
+        job_status_counts: counts_map(job_counts()?),
+    }))
 }
 
 async fn admin_invites(headers: HeaderMap) -> Result<Json<InvitesResponse>, AuthError> {
@@ -676,6 +801,44 @@ fn user_all() -> Result<Vec<AuthUser>, AuthError> {
     Ok(stmt
         .query_map([], user_from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn counts_map(counts: Vec<(String, i64)>) -> HashMap<String, i64> {
+    counts.into_iter().collect()
+}
+
+fn workspace_vm_versions() -> Result<HashMap<String, String>, AuthError> {
+    let db = fleet_db()?;
+    let mut stmt = db.prepare(
+        r#"
+SELECT workspace_name, metadata_json
+FROM workspace_events
+WHERE event_type IN ('workspace_created', 'vm_recreated')
+ORDER BY created_at DESC, id DESC
+"#,
+    )?;
+    let mut versions = HashMap::new();
+    for row in stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })? {
+        let (workspace_name, metadata_json) = row?;
+        if versions.contains_key(&workspace_name) {
+            continue;
+        }
+        if let Some(version) = metadata_version(&metadata_json) {
+            versions.insert(workspace_name, version);
+        }
+    }
+    Ok(versions)
+}
+
+fn metadata_version(metadata_json: &str) -> Option<String> {
+    let value = serde_json::from_str::<Value>(metadata_json).ok()?;
+    ["mom.version", "version", "agentmom_version"]
+        .into_iter()
+        .find_map(|key| value.get(key).and_then(Value::as_str))
+        .or_else(|| value.pointer("/labels/mom.version").and_then(Value::as_str))
+        .map(ToString::to_string)
 }
 
 fn users_for_invite(invite_id: i64) -> Result<Vec<AuthUser>, AuthError> {

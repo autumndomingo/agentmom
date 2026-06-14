@@ -184,6 +184,54 @@ async fn first_signup_becomes_admin_and_users_login_with_passwords() -> Result<(
 }
 
 #[tokio::test]
+async fn admin_infra_overview_returns_fleet_snapshot() -> Result<()> {
+    let _guard = fleet_test_guard().await;
+    let fleet = TestFleet::start().await?;
+    let _node = spawn_worker("node-a", &fleet.api_url)?;
+    wait_for_node(fleet.api_state.path(), "node-a").await?;
+
+    let create = create_workspace(&fleet.api_url, "infra-check", "node-a", 0).await?;
+    wait_for_job_status(&fleet.api_url, &create, "succeeded").await?;
+
+    let cookie = admin_cookie(&fleet.api_url).await?;
+    let overview = reqwest::Client::new()
+        .get(format!("{}/api/admin/infra", fleet.api_url))
+        .header(reqwest::header::COOKIE, cookie)
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Value>()
+        .await?;
+
+    assert_eq!(overview["app_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        overview.pointer("/nodes/0/node_id").and_then(Value::as_str),
+        Some("node-a")
+    );
+    let workspace_counts = overview
+        .get("workspace_status_counts")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("overview missing workspace counts: {overview}"))?;
+    let workspace_total = workspace_counts
+        .values()
+        .filter_map(Value::as_i64)
+        .sum::<i64>();
+    assert_eq!(workspace_total, 1);
+    assert!(
+        overview
+            .get("jobs")
+            .and_then(Value::as_array)
+            .is_some_and(|jobs| jobs.iter().any(|job| {
+                job.get("workspace_name").and_then(Value::as_str) == Some("infra-check")
+                    && job.get("kind").and_then(Value::as_str) == Some("create")
+            })),
+        "overview should include recent create job: {overview}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn fake_worker_start_stop_backup_jobs_update_central_state() -> Result<()> {
     let _guard = fleet_test_guard().await;
     let fleet = TestFleet::start().await?;

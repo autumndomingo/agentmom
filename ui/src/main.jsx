@@ -1,9 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
+  Activity,
+  Cpu,
   Edit3,
   ExternalLink,
   GitBranch,
+  HardDrive,
   MessageSquare,
   Monitor,
   PanelLeft,
@@ -2091,9 +2094,12 @@ function MessageBlock({ block }) {
 function AdminPage({ userSession }) {
   const [users, setUsers] = useState([]);
   const [invites, setInvites] = useState([]);
+  const [infra, setInfra] = useState(null);
   const [accessCodeStatus, setAccessCodeStatus] = useState('Generate code');
   const [adminError, setAdminError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [loadingInfra, setLoadingInfra] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
 
   function leaveAdminView() {
     window.location.href = '/';
@@ -2110,10 +2116,26 @@ function AdminPage({ userSession }) {
     setInvites(data.invites ?? []);
   }
 
+  async function loadInfra() {
+    setLoadingInfra(true);
+    const data = await apiRequest('/admin/infra');
+    setInfra(data);
+    setLoadingInfra(false);
+  }
+
   useEffect(() => {
     loadUsers().catch((error) => setAdminError(formatError(error)));
     loadInvites().catch((error) => setAdminError(formatError(error)));
+    loadInfra().catch((error) => {
+      setLoadingInfra(false);
+      setAdminError(formatError(error));
+    });
   }, [userSession?.id]);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => setNow(Date.now()), 30_000);
+    return () => window.clearInterval(interval);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -2148,6 +2170,7 @@ function AdminPage({ userSession }) {
       });
       setAccessCodeStatus(data.code);
       await loadInvites();
+      await loadInfra();
     } catch (error) {
       setAdminError(formatError(error));
     } finally {
@@ -2167,6 +2190,7 @@ function AdminPage({ userSession }) {
       if (sameEmail(user.email, userSession.email)) {
         leaveAdminView();
       }
+      await loadInfra();
     } catch (error) {
       setUsers(previousUsers);
       setAdminError(formatError(error));
@@ -2177,13 +2201,45 @@ function AdminPage({ userSession }) {
     window.location.href = '/';
   }
 
+  async function refreshInfra() {
+    setAdminError('');
+    try {
+      await Promise.all([loadUsers(), loadInvites(), loadInfra()]);
+    } catch (error) {
+      setLoadingInfra(false);
+      setAdminError(formatError(error));
+    }
+  }
+
+  const infraUsers = infra?.users ?? users.map((user) => ({ ...user, workspace: null }));
+  const nodes = infra?.nodes ?? [];
+  const jobs = infra?.jobs ?? [];
+  const workspaceCount = totalCount(infra?.workspace_status_counts);
+  const runningWorkspaces = statusCount(infra?.workspace_status_counts, 'running');
+  const readyNodes = nodes.filter((node) => node.status === 'ready' && !node.stale).length;
+  const queuedJobs = statusCount(infra?.job_status_counts, 'queued');
+  const failedJobs = statusCount(infra?.job_status_counts, 'failed');
+
   return (
     <main className="adminPage">
-      <section className="adminPanel" aria-label="Admin user management preview">
+      <section className="adminPanel" aria-label="Admin infrastructure dashboard">
         <header className="adminTopBar">
+          <div>
+            <span>Admin</span>
+            <h1>Infrastructure</h1>
+          </div>
           <div className="adminTopActions">
             <button className="adminNavButton" type="button" onClick={openWorkspace}>
               Workspace
+            </button>
+            <button
+              className="adminNavButton"
+              type="button"
+              onClick={refreshInfra}
+              disabled={loadingInfra}
+              title="Refresh infrastructure overview"
+            >
+              <RefreshCcw size={17} />
             </button>
             <div className="accessCodeControl" aria-label="Invite code">
               <code>{busy ? 'Generating...' : accessCodeStatus}</code>
@@ -2200,6 +2256,95 @@ function AdminPage({ userSession }) {
         </header>
 
         {adminError && <p className="adminError">{adminError}</p>}
+
+        <section className="adminMetricGrid" aria-label="Fleet summary">
+          <AdminMetricCard icon={<Users size={18} />} label="Users" value={infraUsers.length} detail={`${users.filter((user) => user.status === 'active').length} active`} />
+          <AdminMetricCard icon={<Monitor size={18} />} label="Workspaces" value={workspaceCount} detail={`${runningWorkspaces} running`} />
+          <AdminMetricCard icon={<Activity size={18} />} label="Nodes" value={`${readyNodes}/${nodes.length}`} detail="fresh ready" />
+          <AdminMetricCard icon={<GitBranch size={18} />} label="Jobs" value={queuedJobs} detail={`${failedJobs} failed total`} />
+          <AdminMetricCard icon={<Terminal size={18} />} label="Control plane" value={infra?.app_version ?? 'unknown'} detail={infra?.generated_at ? `sampled ${formatRelativeEpoch(infra.generated_at, now)}` : 'not loaded'} />
+        </section>
+
+        <section className="adminInfraSection">
+          <header>
+            <h2>Nodes</h2>
+            <span>{nodes.length ? `${nodes.length} registered` : 'No registered nodes'}</span>
+          </header>
+          <div className="adminNodeGrid">
+            {nodes.map((node) => (
+              <article className={`adminNodeCard ${node.stale ? 'stale' : node.status}`} key={node.node_id}>
+                <div>
+                  <strong>{node.node_id}</strong>
+                  <span>{node.status}{node.stale ? ' / stale' : ''}</span>
+                </div>
+                <dl>
+                  <dt><Cpu size={14} /> CPU</dt>
+                  <dd>{node.allocated_cpus || 0} / {node.cpus || 'open'}</dd>
+                  <dt><HardDrive size={14} /> Memory</dt>
+                  <dd>{formatMib(node.allocated_memory_mib || 0)} / {node.memory_mib ? formatMib(node.memory_mib) : 'open'}</dd>
+                  <dt><Monitor size={14} /> Workspaces</dt>
+                  <dd>{node.active_workspaces} active / {node.desired_running_workspaces} desired</dd>
+                </dl>
+                <div className="adminNodeBar" aria-label="Memory allocation">
+                  <span style={{ width: `${nodeUsagePercent(node.allocated_memory_mib, node.memory_mib)}%` }} />
+                </div>
+                <small>{node.worker_url ?? 'no worker url'} · seen {formatRelativeEpoch(node.last_seen_at, now)}</small>
+              </article>
+            ))}
+          </div>
+        </section>
+
+        <section className="adminTableShell">
+          <div className="adminTableHeader adminInfraUserGrid">
+            <span>User</span>
+            <span>VM</span>
+            <span>Node</span>
+            <span>Version</span>
+            <span>State</span>
+            <span>Resources</span>
+            <span>Last active</span>
+          </div>
+          <div className="adminUserList">
+            {infraUsers.map((row) => {
+              const user = row.user ?? row;
+              const workspace = row.workspace;
+              return (
+                <article className="adminUserRow adminInfraUserGrid" key={user.id}>
+                  <strong>{user.email}</strong>
+                  <span>{workspace?.vm_name ?? 'none'}</span>
+                  <span>{workspace?.node_id ?? 'unassigned'}</span>
+                  <span>{row.workspace?.vm_version ?? 'unknown'}</span>
+                  <span>{workspace ? `${workspace.desired_state} / ${workspace.status}` : user.role}</span>
+                  <span>{workspace ? `${workspace.cpus} CPU / ${formatMib(workspace.memory_mib)}` : '-'}</span>
+                  <span>{workspace ? formatRelativeEpoch(workspace.last_used_at, now) : formatRelativeEpoch(user.last_seen_at, now)}</span>
+                </article>
+              );
+            })}
+            {!infraUsers.length && <p className="emptyList">No users in the database yet.</p>}
+          </div>
+        </section>
+
+        <section className="adminTableShell">
+          <div className="adminTableHeader adminJobGrid">
+            <span>Job</span>
+            <span>Workspace</span>
+            <span>Node</span>
+            <span>Status</span>
+            <span>Updated</span>
+          </div>
+          <div className="adminUserList">
+            {jobs.map((job) => (
+              <article className="adminUserRow adminJobGrid" key={job.id}>
+                <strong>{job.kind}</strong>
+                <span>{job.workspace_name}</span>
+                <span>{job.node_id ?? job.claimed_by ?? 'unassigned'}</span>
+                <span>{job.status}</span>
+                <span>{formatRelativeEpoch(job.updated_at, now)}</span>
+              </article>
+            ))}
+            {!jobs.length && <p className="emptyList">No recent jobs.</p>}
+          </div>
+        </section>
 
         <section className="adminTableShell">
           <div className="adminTableHeader adminInviteGrid">
@@ -2253,6 +2398,17 @@ function AdminPage({ userSession }) {
         </section>
       </section>
     </main>
+  );
+}
+
+function AdminMetricCard({ icon, label, value, detail }) {
+  return (
+    <article className="adminMetricCard">
+      <span>{icon}</span>
+      <small>{label}</small>
+      <strong>{value}</strong>
+      <em>{detail}</em>
+    </article>
   );
 }
 
@@ -2623,6 +2779,40 @@ function adminStatusLabel(status) {
   if (status === 'idle') return 'Idle';
   if (status === 'stagnant') return 'Stagnant';
   return 'Inactive';
+}
+
+function statusCount(counts, status) {
+  return Number(counts?.[status] ?? 0);
+}
+
+function totalCount(counts) {
+  return Object.values(counts ?? {}).reduce((total, value) => total + Number(value ?? 0), 0);
+}
+
+function formatMib(value) {
+  const mib = Number(value ?? 0);
+  if (mib >= 1024) {
+    return `${(mib / 1024).toFixed(mib % 1024 === 0 ? 0 : 1)} GiB`;
+  }
+  return `${mib} MiB`;
+}
+
+function nodeUsagePercent(allocated, capacity) {
+  const total = Number(capacity ?? 0);
+  if (!total) return 0;
+  return Math.max(0, Math.min(100, Math.round((Number(allocated ?? 0) / total) * 100)));
+}
+
+function formatRelativeEpoch(epochSeconds, nowMs = Date.now()) {
+  if (!epochSeconds) return 'never';
+  const seconds = Math.max(0, Math.floor(nowMs / 1000) - Number(epochSeconds));
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
 }
 
 function normalizeAdminUser(user) {
