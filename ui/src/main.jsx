@@ -3,11 +3,13 @@ import { createRoot } from 'react-dom/client';
 import {
   Edit3,
   ExternalLink,
+  GitBranch,
   PanelLeft,
   Plus,
   RefreshCcw,
   Send,
   Sparkles,
+  Trash2,
   Users,
 } from 'lucide-react';
 import { buildPendingPermissions, buildTranscript } from './acp/transcript.js';
@@ -250,15 +252,19 @@ function App({ userSession }) {
   const [busy, setBusy] = useState(false);
   const [chatBusy, setChatBusy] = useState(false);
   const [chatInput, setChatInput] = useState('');
+  const [promptAttachments, setPromptAttachments] = useState([]);
   const [acpByWorkspace, setAcpByWorkspace] = useState({});
   const [chats, setChats] = useState([]);
   const [activeChatId, setActiveChatId] = useState('');
   const [chatStates, setChatStates] = useState({});
   const [workspaceError, setWorkspaceError] = useState('');
+  const [wakingWorkspaces, setWakingWorkspaces] = useState({});
   const [now, setNow] = useState(() => Date.now());
   const chatSocketsRef = useRef({});
+  const chatsRef = useRef([]);
   const chatStatesRef = useRef({});
   const activeChatIdRef = useRef('');
+  const fileInputRef = useRef(null);
   const pendingRpcRef = useRef({});
   const rpcIdRef = useRef(1);
 
@@ -266,7 +272,9 @@ function App({ userSession }) {
     () => workspaces.find((workspace) => workspace.name === selectedName) ?? workspaces[0],
     [selectedName, workspaces],
   );
+  const workspaceReady = isWorkspaceReady(selectedWorkspace);
   const selectedWorkspaceName = selectedWorkspace?.name ?? selectedName;
+  const workspaceWaking = selectedWorkspaceName ? Boolean(wakingWorkspaces[selectedWorkspaceName]) : false;
   const acp = selectedWorkspaceName ? acpByWorkspace[selectedWorkspaceName] ?? emptyAcpState() : emptyAcpState();
   const workspaceChats = useMemo(
     () => chats.filter((chat) => chat.workspaceName === selectedWorkspace?.name),
@@ -275,6 +283,11 @@ function App({ userSession }) {
   const activeChat =
     workspaceChats.find((chat) => chat.id === activeChatId) ?? workspaceChats[0] ?? null;
   const activeChatState = activeChat ? chatStates[activeChat.id] ?? emptyChatState() : emptyChatState();
+  const promptCapabilities = acp.capabilities?.promptCapabilities ?? acp.capabilities?.prompt_capabilities ?? {};
+  const sessionCapabilities = acp.capabilities?.sessionCapabilities ?? acp.capabilities?.session_capabilities ?? {};
+  const modelState = activeChatState.models ?? null;
+  const modeState = activeChatState.modes ?? null;
+  const configOptions = activeChatState.configOptions ?? [];
   const chatReady = acp.state === 'ready' && Boolean(activeChatState.session_id);
   const transcript = useMemo(() => buildTranscript(activeChatState.events), [activeChatState.events]);
   const pendingPermissions = useMemo(
@@ -291,6 +304,10 @@ function App({ userSession }) {
   }, [chatStates]);
 
   useEffect(() => {
+    chatsRef.current = chats;
+  }, [chats]);
+
+  useEffect(() => {
     activeChatIdRef.current = activeChatId;
   }, [activeChatId]);
 
@@ -304,11 +321,22 @@ function App({ userSession }) {
   }, []);
 
   useEffect(() => {
+    if (!selectedWorkspace || workspaceReady) return undefined;
+    const interval = window.setInterval(() => {
+      refresh().catch((error) => setWorkspaceError(formatError(error)));
+    }, 3_000);
+    return () => window.clearInterval(interval);
+  }, [selectedWorkspace?.name, selectedWorkspace?.status, workspaceReady]);
+
+  useEffect(() => {
+    if (!selectedWorkspace?.name || workspaceReady || workspaceWaking) return;
+    if (!isWorkspaceStartable(selectedWorkspace)) return;
+    wakeWorkspace(selectedWorkspace.name).catch((error) => setWorkspaceError(formatError(error)));
+  }, [selectedWorkspace?.name, selectedWorkspace?.status, workspaceReady, workspaceWaking]);
+
+  useEffect(() => {
     if (!selectedWorkspace?.name) return;
-    const hasWorkspaceChat = chats.some((chat) => chat.workspaceName === selectedWorkspace.name);
-    if (!hasWorkspaceChat) {
-      createChat(selectedWorkspace.name, { select: true });
-    } else if (!activeChat || activeChat.workspaceName !== selectedWorkspace.name) {
+    if (!activeChat || activeChat.workspaceName !== selectedWorkspace.name) {
       setActiveChatId(workspaceChats[0]?.id ?? '');
     }
   }, [selectedWorkspace?.name, chats.length]);
@@ -320,7 +348,7 @@ function App({ userSession }) {
   }, [selectedWorkspace?.name, activeChatId, acp.state]);
 
   useEffect(() => {
-    if (!selectedWorkspace?.name) return undefined;
+    if (!selectedWorkspace?.name || !workspaceReady) return undefined;
 
     const workspaceName = selectedWorkspace.name;
     const socket = new WebSocket(chatWsUrl(workspaceName));
@@ -337,7 +365,7 @@ function App({ userSession }) {
 
     socket.onopen = () => {
       if (cancelled) return;
-      setAcpConnectionState(workspaceName, { state: 'open', phase: 'initialize', error: null });
+      setAcpConnectionState(workspaceName, { state: 'initializing', phase: 'initialize', error: null });
       sendRpc(workspaceName, null, 'initialize', {
         protocolVersion: 1,
         clientCapabilities: {},
@@ -363,10 +391,15 @@ function App({ userSession }) {
         const params = message.params ?? {};
         if (params.state === 'error') {
           terminalStatusReceived = true;
+          setAcpConnectionState(workspaceName, {
+            state: 'failed',
+            phase: 'transport',
+            error: params.message ?? null,
+          });
+          return;
         }
         setAcpConnectionState(workspaceName, {
-          state: params.state === 'error' ? 'failed' : params.state ?? 'open',
-          phase: params.state === 'ready' ? 'initialize' : params.state,
+          phase: params.state ?? 'transport',
           error: params.message ?? null,
         });
         return;
@@ -378,10 +411,23 @@ function App({ userSession }) {
         delete pendingRpcRef.current[key];
         const method = rpc?.method;
         const chatId = rpc?.chatId;
+
         if (message.error) {
           terminalStatusReceived = true;
           if (method === 'session/prompt') {
             setChatBusy(false);
+          }
+          if (method === 'session/set_model' && chatId) {
+            setChatState(chatId, { modelChanging: false });
+          }
+          if (method === 'session/set_mode' && chatId) {
+            setChatState(chatId, { modeChanging: false });
+          }
+          if (method === 'session/set_config_option' && chatId) {
+            setChatState(chatId, { configChanging: false });
+          }
+          if (method === 'session/fork' && chatId) {
+            setChatState(chatId, { creatingSession: false });
           }
           setAcpConnectionState(workspaceName, {
             state: 'failed',
@@ -390,24 +436,81 @@ function App({ userSession }) {
           });
           return;
         }
+
         if (method === 'initialize') {
-          setAcpConnectionState(workspaceName, { state: 'open', phase: 'idle' });
-          ensureChatSession(workspaceName, activeChatIdRef.current);
+          setAcpConnectionState(workspaceName, {
+            state: 'open',
+            phase: 'session/list',
+            capabilities: message.result?.agentCapabilities ?? message.result?.agent_capabilities ?? {},
+            agentInfo: message.result?.agentInfo ?? message.result?.agent_info ?? null,
+            authMethods: message.result?.authMethods ?? message.result?.auth_methods ?? [],
+          });
+          sendRpc(workspaceName, null, 'session/list', { cwd: '/workspace' });
         } else if (method === 'session/new') {
           const sessionId = message.result?.sessionId ?? message.result?.session_id;
           if (chatId) {
-            setChatState(chatId, {
-              session_id: sessionId ?? null,
-              creatingSession: false,
-            });
-            touchChat(chatId, { acpSessionId: sessionId ?? null });
+            promoteChatSession(workspaceName, chatId, sessionId, message.result);
           }
           setAcpConnectionState(workspaceName, {
             state: sessionId ? 'ready' : 'open',
             phase: 'ready',
           });
+        } else if (method === 'session/list') {
+          applySessionList(workspaceName, message.result);
+        } else if (method === 'session/load' || method === 'session/resume') {
+          if (method === 'session/load' && !message.result && chatId) {
+            setAcpConnectionState(workspaceName, { state: 'open', phase: 'session/resume' });
+            sendRpc(workspaceName, chatId, 'session/resume', {
+              cwd: '/workspace',
+              sessionId: chatStatesRef.current[chatId]?.session_id ?? chatId,
+              mcpServers: [],
+            });
+            return;
+          }
+          if (chatId) {
+            setChatState(chatId, {
+              loadingSession: false,
+              loaded: true,
+              models: message.result?.models ?? null,
+              modes: message.result?.modes ?? null,
+              configOptions: message.result?.configOptions ?? message.result?.config_options ?? [],
+            });
+          }
+          setAcpConnectionState(workspaceName, { state: 'ready', phase: 'ready' });
+        } else if (method === 'session/fork') {
+          const sessionId = message.result?.sessionId ?? message.result?.session_id;
+          if (chatId) {
+            promoteChatSession(workspaceName, chatId, sessionId, message.result);
+          }
+          setAcpConnectionState(workspaceName, {
+            state: sessionId ? 'ready' : 'open',
+            phase: 'ready',
+          });
+        } else if (method === 'session/close') {
+          if (chatId) {
+            removeChat(workspaceName, chatId);
+          }
+          setAcpConnectionState(workspaceName, { state: 'open', phase: 'session/list' });
+          sendRpc(workspaceName, null, 'session/list', { cwd: '/workspace' });
+        } else if (method === 'session/set_model') {
+          if (chatId) {
+            setChatState(chatId, { modelChanging: false });
+          }
+        } else if (method === 'session/set_mode') {
+          if (chatId) {
+            setChatState(chatId, { modeChanging: false });
+          }
+        } else if (method === 'session/set_config_option') {
+          if (chatId) {
+            const previousOptions = chatStatesRef.current[chatId]?.configOptions ?? [];
+            setChatState(chatId, {
+              configChanging: false,
+              configOptions: message.result?.configOptions ?? message.result?.config_options ?? previousOptions,
+            });
+          }
         } else if (method === 'session/prompt') {
           setChatBusy(false);
+          sendRpc(workspaceName, null, 'session/list', { cwd: '/workspace' });
         }
       }
     };
@@ -436,7 +539,7 @@ function App({ userSession }) {
       }
       socket.close();
     };
-  }, [selectedWorkspace?.name]);
+  }, [selectedWorkspace?.name, workspaceReady]);
 
   async function request(path, options = {}) {
     setBusy(true);
@@ -452,19 +555,25 @@ function App({ userSession }) {
     const chat = {
       id: newChatId(workspaceName),
       workspaceName,
-      title: 'New chat',
+      title: options.title ?? 'New chat',
+      sessionId: null,
       acpSessionId: null,
+      temporary: true,
       createdAt: timestamp,
       updatedAt: timestamp,
     };
     setChats((current) => {
       const next = [chat, ...current];
+      chatsRef.current = next;
       return next;
     });
     setChatStates((current) => {
       const next = {
         ...current,
-        [chat.id]: emptyChatState(),
+        [chat.id]: {
+          ...emptyChatState(),
+          ...(options.initialState ?? {}),
+        },
       };
       chatStatesRef.current = next;
       return next;
@@ -474,6 +583,96 @@ function App({ userSession }) {
       setActiveChatId(chat.id);
     }
     return chat;
+  }
+
+  function applySessionList(workspaceName, result = {}) {
+    const timestamp = Date.now();
+    const sessionChats = normalizeAcpSessions(workspaceName, result);
+    const current = chatsRef.current;
+    let nextActiveId = activeChatIdRef.current;
+    const nextStates = { ...chatStatesRef.current };
+    const otherWorkspaces = current.filter((chat) => chat.workspaceName !== workspaceName);
+    const temporaryChats = current.filter((chat) => chat.workspaceName === workspaceName && chat.temporary);
+    const currentById = new Map(current.map((chat) => [chat.id, chat]));
+    const nextWorkspaceChats = sessionChats.map((chat) => ({
+      ...currentById.get(chat.id),
+      ...chat,
+    }));
+    const next = [...otherWorkspaces, ...temporaryChats, ...nextWorkspaceChats]
+      .sort((left, right) => (right.updatedAt ?? 0) - (left.updatedAt ?? 0));
+
+    if (!next.some((chat) => chat.id === nextActiveId && chat.workspaceName === workspaceName)) {
+      nextActiveId = nextWorkspaceChats[0]?.id ?? temporaryChats[0]?.id ?? '';
+    }
+    chatsRef.current = next;
+    setChats(next);
+
+    for (const chat of sessionChats) {
+      nextStates[chat.id] = {
+        ...emptyChatState(),
+        ...(nextStates[chat.id] ?? {}),
+        session_id: chat.sessionId,
+        listedAt: timestamp,
+      };
+    }
+    chatStatesRef.current = nextStates;
+    setChatStates(nextStates);
+
+    activeChatIdRef.current = nextActiveId;
+    setActiveChatId(nextActiveId);
+    setAcpConnectionState(workspaceName, {
+      state: nextActiveId ? 'open' : 'ready',
+      phase: nextActiveId ? 'session/load' : 'ready',
+    });
+
+    if (nextActiveId) {
+      loadChatSession(workspaceName, nextActiveId);
+    }
+  }
+
+  function promoteChatSession(workspaceName, chatId, sessionId, result = {}) {
+    if (!sessionId) {
+      setChatState(chatId, { creatingSession: false, loadingSession: false });
+      return;
+    }
+
+    const timestamp = Date.now();
+    const previous = chatStatesRef.current[chatId] ?? emptyChatState();
+    setChats((current) => {
+      const next = current.map((chat) =>
+        chat.id === chatId
+          ? {
+              ...chat,
+              id: sessionId,
+              sessionId,
+              acpSessionId: sessionId,
+              temporary: false,
+              title: sessionTitle(result) || chat.title,
+              updatedAt: timestamp,
+            }
+          : chat,
+      );
+      chatsRef.current = next;
+      return next;
+    });
+    setChatStates((current) => {
+      const next = { ...current };
+      delete next[chatId];
+      next[sessionId] = {
+        ...previous,
+        session_id: sessionId,
+        creatingSession: false,
+        loadingSession: false,
+        loaded: true,
+        models: result.models ?? previous.models ?? null,
+        modes: result.modes ?? previous.modes ?? null,
+        configOptions: result.configOptions ?? result.config_options ?? previous.configOptions ?? [],
+      };
+      chatStatesRef.current = next;
+      return next;
+    });
+    activeChatIdRef.current = sessionId;
+    setActiveChatId(sessionId);
   }
 
   function touchChat(chatId, patch = {}) {
@@ -487,8 +686,30 @@ function App({ userSession }) {
             }
           : chat,
       );
+      chatsRef.current = next;
       return next;
     });
+  }
+
+  function removeChat(workspaceName, chatId) {
+    const current = chatsRef.current;
+    const next = current.filter((chat) => chat.id !== chatId);
+    const nextStates = { ...chatStatesRef.current };
+    delete nextStates[chatId];
+
+    chatsRef.current = next;
+    chatStatesRef.current = nextStates;
+    setChats(next);
+    setChatStates(nextStates);
+
+    if (activeChatIdRef.current === chatId) {
+      const nextActiveId = next.find((chat) => chat.workspaceName === workspaceName)?.id ?? '';
+      activeChatIdRef.current = nextActiveId;
+      setActiveChatId(nextActiveId);
+      if (nextActiveId) {
+        loadChatSession(workspaceName, nextActiveId);
+      }
+    }
   }
 
   function appendChatEvent(chatId, direction, message, metadata = {}) {
@@ -564,6 +785,42 @@ function App({ userSession }) {
     }
   }
 
+  function loadChatSession(workspaceName, chatId) {
+    if (!workspaceName || !chatId) return;
+    const socket = chatSocketsRef.current[workspaceName];
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+
+    const state = chatStatesRef.current[chatId] ?? emptyChatState();
+    const sessionId = state.session_id ?? chatId;
+    if (!sessionId || state.loadingSession) return;
+    if (state.loaded && (state.events ?? []).length > 0) {
+      setAcpConnectionState(workspaceName, { state: 'ready', phase: 'ready' });
+      return;
+    }
+
+    setChatState(chatId, {
+      events: [],
+      session_id: sessionId,
+      loadingSession: true,
+      loaded: false,
+    });
+    setAcpConnectionState(workspaceName, { state: 'open', phase: 'session/load', error: null });
+    try {
+      sendRpc(workspaceName, chatId, 'session/load', {
+        cwd: '/workspace',
+        sessionId,
+        mcpServers: [],
+      });
+    } catch (error) {
+      setChatState(chatId, { loadingSession: false });
+      setAcpConnectionState(workspaceName, {
+        state: 'failed',
+        phase: 'session/load',
+        error: formatError(error),
+      });
+    }
+  }
+
   function sendRpc(workspaceName, chatId, method, params = {}) {
     const id = rpcIdRef.current++;
     const message = { jsonrpc: '2.0', id, method, params };
@@ -628,6 +885,23 @@ function App({ userSession }) {
     return nextWorkspaces;
   }
 
+  async function wakeWorkspace(workspaceName) {
+    setWakingWorkspaces((current) => ({ ...current, [workspaceName]: true }));
+    setWorkspaceError('');
+    try {
+      await request(`/workspaces/${encodeURIComponent(workspaceName)}/start`, {
+        method: 'POST',
+      });
+      await refresh();
+    } finally {
+      setWakingWorkspaces((current) => {
+        const next = { ...current };
+        delete next[workspaceName];
+        return next;
+      });
+    }
+  }
+
   function openAdminPage() {
     window.location.href = '/admin';
   }
@@ -637,13 +911,15 @@ function App({ userSession }) {
     if (!selectedWorkspace || !activeChat) return;
 
     const prompt = chatInput.trim();
-    if (!prompt) return;
+    if (!prompt && !promptAttachments.length) return;
     if (!activeChatState.session_id) {
       ensureChatSession(selectedWorkspace.name, activeChat.id);
       return;
     }
 
     setChatInput('');
+    const attachments = promptAttachments;
+    setPromptAttachments([]);
     setChatBusy(true);
     try {
       if (activeChat.title === 'New chat') {
@@ -652,10 +928,10 @@ function App({ userSession }) {
       sendRpc(selectedWorkspace.name, activeChat.id, 'session/prompt', {
         sessionId: activeChatState.session_id,
         messageId: `agent-mom-${Date.now()}`,
-        prompt: [{ type: 'text', text: prompt }],
+        prompt: promptBlocks(prompt, attachments),
       });
-      await refresh();
     } catch (error) {
+      setPromptAttachments(attachments);
       setChatBusy(false);
       setAcpConnectionState(selectedWorkspace.name, {
         state: 'failed',
@@ -667,8 +943,138 @@ function App({ userSession }) {
 
   async function restartChat() {
     if (!selectedWorkspace) return;
+    if (acp.state !== 'ready') return;
     const chat = createChat(selectedWorkspace.name, { select: true });
     ensureChatSession(selectedWorkspace.name, chat.id);
+  }
+
+  function selectChat(chat) {
+    activeChatIdRef.current = chat.id;
+    setActiveChatId(chat.id);
+    setPromptAttachments([]);
+    if (chat.sessionId || chat.acpSessionId) {
+      loadChatSession(chat.workspaceName, chat.id);
+    } else {
+      ensureChatSession(chat.workspaceName, chat.id);
+    }
+  }
+
+  async function forkChat() {
+    if (!selectedWorkspace || !activeChatState.session_id) return;
+    const chat = createChat(selectedWorkspace.name, {
+      select: true,
+      title: `${activeChat?.title ?? 'Chat'} fork`,
+      initialState: { creatingSession: true },
+    });
+    setAcpConnectionState(selectedWorkspace.name, { state: 'open', phase: 'session/fork', error: null });
+    try {
+      sendRpc(selectedWorkspace.name, chat.id, 'session/fork', {
+        cwd: '/workspace',
+        sessionId: activeChatState.session_id,
+        mcpServers: [],
+      });
+    } catch (error) {
+      setChatState(chat.id, { creatingSession: false });
+      setAcpConnectionState(selectedWorkspace.name, {
+        state: 'failed',
+        phase: 'session/fork',
+        error: formatError(error),
+      });
+    }
+  }
+
+  async function closeChat(chat, event) {
+    event.stopPropagation();
+    if (!selectedWorkspace || !chat) return;
+    if (chat.temporary) {
+      removeChat(chat.workspaceName, chat.id);
+      return;
+    }
+
+    const state = chatStatesRef.current[chat.id] ?? emptyChatState();
+    const sessionId = state.session_id ?? chat.sessionId ?? chat.acpSessionId ?? chat.id;
+    if (!sessionId) return;
+
+    setAcpConnectionState(chat.workspaceName, { state: 'open', phase: 'session/close', error: null });
+    try {
+      sendRpc(chat.workspaceName, chat.id, 'session/close', {
+        sessionId,
+        session_id: sessionId,
+      });
+    } catch (error) {
+      setAcpConnectionState(chat.workspaceName, {
+        state: 'failed',
+        phase: 'session/close',
+        error: formatError(error),
+      });
+    }
+  }
+
+  async function changeModel(modelId) {
+    if (!selectedWorkspace || !activeChat || !activeChatState.session_id || !modelId) return;
+    setChatState(activeChat.id, { modelChanging: true });
+    const previousModels = activeChatState.models;
+    setChatState(activeChat.id, {
+      models: patchCurrentModel(previousModels, modelId),
+    });
+    try {
+      sendRpc(selectedWorkspace.name, activeChat.id, 'session/set_model', {
+        sessionId: activeChatState.session_id,
+        modelId,
+      });
+    } catch (error) {
+      setChatState(activeChat.id, { modelChanging: false, models: previousModels });
+      setWorkspaceError(formatError(error));
+    }
+  }
+
+  async function changeMode(modeId) {
+    if (!selectedWorkspace || !activeChat || !activeChatState.session_id || !modeId) return;
+    setChatState(activeChat.id, { modeChanging: true });
+    const previousModes = activeChatState.modes;
+    setChatState(activeChat.id, {
+      modes: patchCurrentMode(previousModes, modeId),
+    });
+    try {
+      sendRpc(selectedWorkspace.name, activeChat.id, 'session/set_mode', {
+        sessionId: activeChatState.session_id,
+        modeId,
+      });
+    } catch (error) {
+      setChatState(activeChat.id, { modeChanging: false, modes: previousModes });
+      setWorkspaceError(formatError(error));
+    }
+  }
+
+  async function changeConfigOption(option, value) {
+    if (!selectedWorkspace || !activeChat || !activeChatState.session_id || !option?.id) return;
+    setChatState(activeChat.id, { configChanging: true });
+    const previousOptions = activeChatState.configOptions;
+    setChatState(activeChat.id, {
+      configOptions: patchConfigOption(previousOptions, option.id, value),
+    });
+    try {
+      sendRpc(selectedWorkspace.name, activeChat.id, 'session/set_config_option', {
+        sessionId: activeChatState.session_id,
+        configId: option.id,
+        value: String(value),
+      });
+    } catch (error) {
+      setChatState(activeChat.id, { configChanging: false, configOptions: previousOptions });
+      setWorkspaceError(formatError(error));
+    }
+  }
+
+  async function attachPromptFiles(event) {
+    const files = [...(event.target.files ?? [])];
+    event.target.value = '';
+    if (!files.length) return;
+    try {
+      const attachments = await Promise.all(files.map(readImageAttachment));
+      setPromptAttachments((current) => [...current, ...attachments]);
+    } catch (error) {
+      setWorkspaceError(formatError(error));
+    }
   }
 
   async function cancelChat() {
@@ -743,7 +1149,7 @@ function App({ userSession }) {
         </div>
 
         <div className="sidebarQuickActions">
-          <button className="launchButton" onClick={restartChat} disabled={!selectedWorkspace || chatBusy}>
+          <button className="launchButton" onClick={restartChat} disabled={!selectedWorkspace || !workspaceReady || chatBusy || acp.state !== 'ready'}>
             <Edit3 size={24} strokeWidth={2.25} />
             New chat
           </button>
@@ -755,13 +1161,23 @@ function App({ userSession }) {
               <h2>{group.label}</h2>
               <div className="chatHistoryList">
                 {group.chats.map((chat) => (
-                  <button
+                  <div
                     key={chat.id}
                     className={`chatHistoryItem ${chat.id === activeChat?.id ? 'active' : ''}`}
-                    onClick={() => setActiveChatId(chat.id)}
                   >
-                    <span>{chat.title}</span>
-                  </button>
+                    <button type="button" onClick={() => selectChat(chat)}>
+                      <span>{chat.title}</span>
+                    </button>
+                    <button
+                      type="button"
+                      title="Close chat"
+                      aria-label={`Close ${chat.title}`}
+                      onClick={(event) => closeChat(chat, event)}
+                      disabled={!workspaceReady || chatBusy || !['open', 'ready'].includes(acp.state)}
+                    >
+                      <Trash2 size={15} />
+                    </button>
+                  </div>
                 ))}
               </div>
             </section>
@@ -784,7 +1200,13 @@ function App({ userSession }) {
           </button>
           <div>
             <h1>{selectedWorkspace ? workspaceDisplayName(selectedWorkspace) : 'Agent workspace'}</h1>
-            <p>{selectedWorkspace ? friendlyStatus(selectedWorkspace.status) : 'Create a workspace to begin.'}</p>
+            <p>
+              {selectedWorkspace
+                ? workspaceWaking
+                  ? 'Starting'
+                  : friendlyStatus(selectedWorkspace.status)
+                : 'Create a workspace to begin.'}
+            </p>
             {selectedWorkspace && (
               <small className={`acpStatus ${acp.state}`}>
                 Hermes ACP: {acp.state}
@@ -793,6 +1215,65 @@ function App({ userSession }) {
             )}
           </div>
           <div className="headerActions">
+            {modelState && (
+              <select
+                className="sessionSelect"
+                value={modelState.currentModelId ?? modelState.current_model_id ?? ''}
+                onChange={(event) => changeModel(event.target.value)}
+                disabled={!chatReady || activeChatState.modelChanging}
+                aria-label="Model"
+              >
+                {availableModels(modelState).map((model) => (
+                  <option key={model.modelId} value={model.modelId}>
+                    {model.name}
+                  </option>
+                ))}
+              </select>
+            )}
+            {modeState && (
+              <select
+                className="sessionSelect"
+                value={modeState.currentModeId ?? modeState.current_mode_id ?? ''}
+                onChange={(event) => changeMode(event.target.value)}
+                disabled={!chatReady || activeChatState.modeChanging}
+                aria-label="Mode"
+              >
+                {availableModes(modeState).map((mode) => (
+                  <option key={mode.modeId} value={mode.modeId}>
+                    {mode.name}
+                  </option>
+                ))}
+              </select>
+            )}
+            {configOptions.map((option) =>
+              option.type === 'boolean' ? (
+                <label className="sessionToggle" key={option.id} title={option.description ?? option.name}>
+                  <input
+                    type="checkbox"
+                    checked={Boolean(option.currentValue ?? option.current_value)}
+                    onChange={(event) => changeConfigOption(option, event.target.checked)}
+                    disabled={!chatReady || activeChatState.configChanging}
+                  />
+                  <span>{option.name ?? option.id}</span>
+                </label>
+              ) : (
+                <select
+                  className="sessionSelect"
+                  key={option.id}
+                  value={option.currentValue ?? option.current_value ?? ''}
+                  onChange={(event) => changeConfigOption(option, event.target.value)}
+                  disabled={!chatReady || activeChatState.configChanging}
+                  aria-label={option.name ?? option.id}
+                  title={option.description ?? option.name ?? option.id}
+                >
+                  {configSelectOptions(option).map((choice) => (
+                    <option key={choice.value} value={choice.value}>
+                      {choice.label}
+                    </option>
+                  ))}
+                </select>
+              ),
+            )}
             {userSession.role === 'admin' && (
               <button className="refreshButton" type="button" onClick={openAdminPage}>
                 <Users size={17} />
@@ -803,11 +1284,15 @@ function App({ userSession }) {
               <RefreshCcw size={17} />
               Refresh
             </button>
-            <button className="refreshButton" onClick={launchHermes} disabled={!selectedWorkspace || busy}>
+            <button className="refreshButton" onClick={launchHermes} disabled={!selectedWorkspace || !workspaceReady || busy}>
               <ExternalLink size={17} />
               Hermes
             </button>
-            <button className="refreshButton" onClick={cancelChat} disabled={!selectedWorkspace || !activeChatState.session_id || chatBusy || !chatReady}>
+            <button className="refreshButton" onClick={forkChat} disabled={!selectedWorkspace || !workspaceReady || !activeChatState.session_id || chatBusy || !chatReady || !capabilityEnabled(sessionCapabilities, 'fork')}>
+              <GitBranch size={17} />
+              Fork
+            </button>
+            <button className="refreshButton" onClick={cancelChat} disabled={!selectedWorkspace || !workspaceReady || !activeChatState.session_id || !chatBusy}>
               Cancel
             </button>
           </div>
@@ -845,7 +1330,38 @@ function App({ userSession }) {
         </div>
 
         <form className="composer" onSubmit={sendMessage}>
-          <button type="button" disabled={!selectedWorkspace || busy} title="Add context">
+          {promptAttachments.length > 0 && (
+            <div className="attachmentTray">
+              {promptAttachments.map((attachment, index) => (
+                <span key={`${attachment.name}-${index}`}>
+                  {attachment.name}
+                  <button
+                    type="button"
+                    title="Remove image"
+                    onClick={() =>
+                      setPromptAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))
+                    }
+                  >
+                    x
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+          <input
+            ref={fileInputRef}
+            className="hiddenFileInput"
+            type="file"
+            accept="image/*"
+            multiple
+            onChange={attachPromptFiles}
+          />
+          <button
+            type="button"
+            disabled={!selectedWorkspace || !workspaceReady || busy || !promptCapabilities.image}
+            title="Add image"
+            onClick={() => fileInputRef.current?.click()}
+          >
             <Plus size={20} />
           </button>
           <input
@@ -854,9 +1370,9 @@ function App({ userSession }) {
             placeholder={
               selectedWorkspace ? 'Message Hermes in this workspace' : 'Create a workspace first'
             }
-            disabled={!selectedWorkspace || !activeChat || chatBusy || !chatReady}
+            disabled={!selectedWorkspace || !workspaceReady || !activeChat || chatBusy || !chatReady}
           />
-          <button className="sendButton" disabled={!selectedWorkspace || !activeChat || chatBusy || !chatInput.trim() || !chatReady}>
+          <button className="sendButton" disabled={!selectedWorkspace || !workspaceReady || !activeChat || chatBusy || (!chatInput.trim() && !promptAttachments.length) || !chatReady}>
             {chatBusy ? <Sparkles size={20} /> : <Send size={20} />}
           </button>
         </form>
@@ -1146,10 +1662,20 @@ function AdminPage({ userSession }) {
 function friendlyStatus(status) {
   const lower = status.toLowerCase();
   if (lower === 'running' || lower === 'draining') return 'Ready';
-  if (lower === 'stopped') return 'Paused';
+  if (lower === 'stopped' || lower === 'idle-stopped') return 'Paused';
   if (lower === 'paused') return 'Paused';
   if (lower === 'crashed') return 'Needs attention';
   return status;
+}
+
+function isWorkspaceReady(workspace) {
+  const status = String(workspace?.status ?? '').toLowerCase();
+  return status === 'running' || status === 'draining';
+}
+
+function isWorkspaceStartable(workspace) {
+  const status = String(workspace?.status ?? '').toLowerCase();
+  return status === 'stopped' || status === 'idle-stopped' || status === 'paused';
 }
 
 function emptyAcpState() {
@@ -1157,6 +1683,9 @@ function emptyAcpState() {
     state: 'starting',
     phase: 'idle',
     error: null,
+    capabilities: {},
+    agentInfo: null,
+    authMethods: [],
   };
 }
 
@@ -1165,11 +1694,46 @@ function emptyChatState() {
     events: [],
     session_id: null,
     creatingSession: false,
+    loadingSession: false,
+    loaded: false,
+    models: null,
+    modes: null,
+    configOptions: [],
   };
 }
 
+function normalizeAcpSessions(workspaceName, result = {}) {
+  return (result.sessions ?? [])
+    .map((session) => {
+      const sessionId = session.sessionId ?? session.session_id;
+      if (!sessionId) return null;
+      const updatedAt = parseAcpTimestamp(session.updatedAt ?? session.updated_at);
+      return {
+        id: sessionId,
+        sessionId,
+        acpSessionId: sessionId,
+        temporary: false,
+        workspaceName,
+        title: session.title || 'Untitled chat',
+        createdAt: updatedAt,
+        updatedAt,
+      };
+    })
+    .filter(Boolean);
+}
+
+function sessionTitle(result = {}) {
+  return result.title ?? result.session?.title ?? '';
+}
+
+function parseAcpTimestamp(value) {
+  if (!value) return Date.now();
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : Date.now();
+}
+
 function newChatId(workspaceName) {
-  return `${workspaceName}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  return `tmp:${workspaceName}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 function chatWsUrl(workspaceName) {
@@ -1228,6 +1792,106 @@ function permissionResult(optionId) {
       option_id: optionId,
     },
   };
+}
+
+function capabilityEnabled(capabilities, key) {
+  const value = capabilities?.[key] ?? capabilities?.[`can_${key}`] ?? capabilities?.[`can${key[0]?.toUpperCase() ?? ''}${key.slice(1)}`];
+  return value !== false;
+}
+
+function availableModels(models = {}) {
+  return (models.availableModels ?? models.available_models ?? [])
+    .map((model) => ({
+      modelId: model.modelId ?? model.model_id,
+      name: model.name ?? model.modelId ?? model.model_id,
+    }))
+    .filter((model) => model.modelId);
+}
+
+function availableModes(modes = {}) {
+  return (modes.availableModes ?? modes.available_modes ?? [])
+    .map((mode) => ({
+      modeId: mode.id ?? mode.modeId ?? mode.mode_id,
+      name: mode.name ?? mode.id ?? mode.modeId ?? mode.mode_id,
+    }))
+    .filter((mode) => mode.modeId);
+}
+
+function patchCurrentModel(models, modelId) {
+  if (!models) return models;
+  return {
+    ...models,
+    currentModelId: modelId,
+    current_model_id: modelId,
+  };
+}
+
+function patchCurrentMode(modes, modeId) {
+  if (!modes) return modes;
+  return {
+    ...modes,
+    currentModeId: modeId,
+    current_mode_id: modeId,
+  };
+}
+
+function patchConfigOption(options = [], optionId, value) {
+  return options.map((option) =>
+    option.id === optionId
+      ? {
+          ...option,
+          currentValue: value,
+          current_value: value,
+        }
+      : option,
+  );
+}
+
+function configSelectOptions(option) {
+  return (option.options ?? []).flatMap((choice) => {
+    if (Array.isArray(choice.options)) return configSelectOptions(choice);
+    const value = choice.value ?? choice.id;
+    return value == null
+      ? []
+      : [{
+          value: String(value),
+          label: choice.name ?? choice.label ?? String(value),
+        }];
+  });
+}
+
+function promptBlocks(text, attachments) {
+  return [
+    text ? { type: 'text', text } : null,
+    ...attachments.map((attachment) => ({
+      type: 'image',
+      data: attachment.data,
+      mimeType: attachment.mimeType,
+      uri: attachment.name,
+    })),
+  ].filter(Boolean);
+}
+
+async function readImageAttachment(file) {
+  if (!file.type.startsWith('image/')) {
+    throw new Error(`${file.name} is not an image.`);
+  }
+  const dataUrl = await readFileDataUrl(file);
+  const [, data = ''] = dataUrl.split(',', 2);
+  return {
+    name: file.name,
+    mimeType: file.type || 'image/png',
+    data,
+  };
+}
+
+function readFileDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ''));
+    reader.onerror = () => reject(reader.error ?? new Error(`Could not read ${file.name}`));
+    reader.readAsDataURL(file);
+  });
 }
 
 function PermissionCard({ permission, disabled, onRespond }) {

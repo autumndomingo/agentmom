@@ -295,18 +295,71 @@ now, and lost-host recovery remains an explicit operator command.
 - Prompt lifecycle tightened: the composer remains busy after `session/prompt`
   until the matching JSON-RPC response, websocket error, close, or local send
   failure. This prevents overlapping turns while Hermes is still streaming.
-- Added `just dev-reset` as a dev-only runtime broom. The reset contract is
-  pid-file based: `just dev` writes `.state/dev.pid` for the dev runner,
-  iron-proxy, API, and worker, and `just dev-reset` only kills those recorded
-  PIDs before deleting `.state/`, the repo-scoped `/tmp/mom-msb-*`
-  Microsandbox home, and `dev/iron-proxy/`. No port scanning, no DB surgery,
-  and no command-line matching in the committed reset path. Existing stale
-  processes from before the pid-file change were cleaned up manually once.
-- Sidebar chat state is now local product UI state instead of a disguised
+- Added `just dev-reset` as a dev-only runtime broom. The primary reset
+  contract is pid-file based: `just dev` writes `.state/dev.pid` for the dev
+  runner, iron-proxy, API, and worker. A later live failure showed pid files are
+  not enough for stale Microsandbox VM processes that were launched before the
+  pid-file discipline or survived parent shutdown, so reset also kills only
+  processes whose command contains this worktree's repo-scoped
+  `/tmp/mom-msb-*` home. Still no broad port scanning, no DB surgery, and no
+  matching unrelated `mom`/`msb` processes.
+- Sidebar chat state is now Hermes session state instead of a disguised
   workspace list. The backend ACP path remains a raw pipe. The UI keeps one ACP
-  websocket per selected workspace, creates a local chat record for each
-  `session/new`, stores the returned Hermes `sessionId` on that chat, groups
-  raw ACP frames by chat/session, and sends `session/prompt` to the active
-  chat's `sessionId`. This is intentionally not persisted yet; durable chat
-  metadata can be a small Mom-owned API/table later without teaching Rust ACP
-  semantics.
+  websocket per selected workspace, calls Hermes `session/list` after
+  `initialize`, renders those Hermes sessions in the sidebar, calls
+  `session/load` on startup/selection, and uses Hermes session IDs as chat IDs.
+  Temporary local IDs exist only before `session/new` or `session/fork` returns.
+  The grug rule is: browser product state may organize ACP frames, but Rust
+  does not learn Hermes chat semantics.
+- Concurrent `just dev` in one worktree did clobber `.state/dev.env` and could
+  leave the UI/API/worker disagreeing about dynamic ports. `scripts/dev-run`
+  now takes a worktree-local `.state/dev.lock` before writing env/state and
+  fails fast with a `just dev-reset` hint if another live dev runner owns it.
+  Stale locks are removed only when the recorded owner pid is dead.
+- Real Hermes ACP over Microsandbox SSH requires a TTY in this environment; the
+  no-PTY stdio path fails before Hermes can speak JSON-RPC. The bridge now uses
+  `ssh -tt` and disables terminal echo in the guest. Because PTY echo can still
+  race, the bridge also drops exact echoes of frames it just wrote before
+  forwarding stdout to the browser. This stays transport-level only: Mom still
+  does not parse or translate ACP.
+- Hermes ACP then blocked on an interactive browser-engine install prompt. That
+  is not acceptable for live chat because the websocket looks connected while
+  Hermes waits for input. Base provisioning now installs `nodejs`, `npm`,
+  Alpine `chromium`, and `agent-browser`, then writes root's
+  `~/.agent-browser/config.json` to use the system Chromium binary. The
+  Chrome-for-Testing downloader path is intentionally not used because it has no
+  Linux ARM64 build.
+- ACP readiness was split into explicit UI states after live debugging. The
+  raw backend pipe worked when driven as `initialize -> session/new ->
+  session/prompt`, but the React app treated socket-open as ACP-initialized and
+  fired `session/new` before the `initialize` response. The UI now uses
+  `initializing` for the open socket, treats `mom/status connected` as
+  transport information only, and only the `initialize` result moves the
+  workspace to `open` where chat session creation is allowed. A Playwright E2E
+  then verified two chats/two Hermes sessions and a real OpenRouter-backed
+  prompt rendering in the transcript.
+- The Hermes chat UI now covers the ACP must-haves reviewed on 2026-06-13:
+  `session/list`, `session/load` with `session/resume` fallback, `session/new`,
+  `session/prompt`, `session/cancel`, `session/fork`, `session/close`,
+  `session/set_model`, `session/set_mode`, `session/set_config_option`,
+  permission responses, and image prompt blocks. Model/mode/config controls are
+  rendered only from Hermes responses. The UI does not synthesize an alternate
+  Mom chat API.
+- A real browser race showed `session/list` was computing the next active chat
+  inside an async React updater and then immediately calling `session/load` with
+  potentially stale state. Chat/session mutations now update refs and React
+  state together before dependent ACP calls. New chat is disabled until ACP is
+  fully `ready`, so users cannot create a temporary local chat while startup
+  `session/load` is still in flight.
+- Fork needed one more state-machine guard: creating a temporary fork chat made
+  the generic "active chat has no session" effect send a stray `session/new`
+  alongside `session/fork`. Fork temps are now marked `creatingSession` before
+  selection, so the only ACP method sent by the Fork button is `session/fork`.
+- Playwright e2e now exercises the real dev stack through cookies and
+  `/api/workspaces/<workspace>/chat/ws`: login, `initialize`, `session/list`,
+  `session/load`, `session/new`, OpenRouter-backed `session/prompt`, wait for
+  the prompt response and post-prompt `session/list`, reload, and verify the
+  token is restored from Hermes history. A targeted fork e2e verified
+  `session/fork` responds without any stray `session/new`. A targeted close e2e
+  created an empty Hermes session, clicked the sidebar close control, observed
+  `session/close`, and refreshed `session/list`.

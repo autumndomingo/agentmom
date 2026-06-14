@@ -1,4 +1,11 @@
-use std::{collections::HashMap, env, net::SocketAddr, path::PathBuf, process::Stdio, sync::Arc};
+use std::{
+    collections::{HashMap, VecDeque},
+    env,
+    net::SocketAddr,
+    path::PathBuf,
+    process::Stdio,
+    sync::Arc,
+};
 
 use anyhow::{Context, Result, anyhow, bail};
 use axum::extract::ws::{Message, WebSocket};
@@ -84,7 +91,6 @@ async fn start_acp_process(
     sandbox: &Sandbox,
 ) -> Result<AcpProcess> {
     cleanup_workspace(state, workspace_name).await;
-    preflight_hermes(sandbox).await?;
     let config = crate::load_mom_config()?;
     let command = acp_shell_command(&config);
 
@@ -147,6 +153,7 @@ async fn start_acp_process(
         .arg("-i")
         .arg(&private_key)
         .args([
+            "-tt",
             "-o",
             "IdentitiesOnly=yes",
             "-o",
@@ -192,7 +199,7 @@ fn acp_shell_command(config: &crate::config::MomConfig) -> String {
     let hermes_home = format!("{}/{}", crate::GUEST_HERMES_HOME, config.hermes_profile());
     let hermes_home = crate::shell_quote(&hermes_home);
     format!(
-        "if [ -f /etc/profile.d/agentmom-proxy.sh ]; then . /etc/profile.d/agentmom-proxy.sh; fi; export HERMES_HOME={hermes_home}; cd /workspace && if command -v hermes-acp >/dev/null 2>&1; then exec hermes-acp; elif command -v hermes >/dev/null 2>&1; then exec hermes acp; else echo 'hermes-acp/hermes acp is not installed' >&2; exit 127; fi"
+        "stty -echo 2>/dev/null || true; if [ -f /etc/profile.d/agentmom-proxy.sh ]; then . /etc/profile.d/agentmom-proxy.sh; fi; export HERMES_HOME={hermes_home}; cd /workspace && if command -v hermes-acp >/dev/null 2>&1; then exec hermes-acp; elif command -v hermes >/dev/null 2>&1; then exec hermes acp; else echo 'hermes-acp/hermes acp is not installed' >&2; exit 127; fi"
     )
 }
 
@@ -212,6 +219,7 @@ async fn pipe_socket_to_acp(mut socket: WebSocket, process: AcpProcess) {
     let (mut ws_tx, mut ws_rx) = socket.split();
     let mut stdin = process.stdin;
     let mut stdout = BufReader::new(process.stdout);
+    let pending_echoes = Arc::new(Mutex::new(VecDeque::<String>::new()));
     let stdout_to_ws = async {
         let mut line = String::new();
         loop {
@@ -221,12 +229,21 @@ async fn pipe_socket_to_acp(mut socket: WebSocket, process: AcpProcess) {
                 break;
             }
             let message = line.trim_end_matches(['\r', '\n']).to_string();
+            let mut echoes = pending_echoes.lock().await;
+            if let Some(index) = echoes.iter().position(|echo| echo == &message) {
+                echoes.remove(index);
+                continue;
+            }
+            drop(echoes);
+
             if !serde_json::from_str::<serde_json::Value>(&message)
                 .is_ok_and(|value| value.is_object())
             {
+                let preview: String = message.chars().take(500).collect();
                 eprintln!(
-                    "dropping non-JSON Hermes ACP stdout line ({} bytes)",
-                    message.len()
+                    "dropping non-JSON Hermes ACP stdout line ({} bytes): {}",
+                    message.len(),
+                    preview
                 );
                 continue;
             }
@@ -236,15 +253,20 @@ async fn pipe_socket_to_acp(mut socket: WebSocket, process: AcpProcess) {
         }
         Ok::<(), anyhow::Error>(())
     };
+    let pending_echoes = pending_echoes.clone();
     let ws_to_stdin = async {
         while let Some(Ok(message)) = ws_rx.next().await {
             match message {
                 Message::Text(text) => {
+                    pending_echoes.lock().await.push_back(text.to_string());
                     stdin.write_all(text.as_bytes()).await?;
                     stdin.write_all(b"\n").await?;
                     stdin.flush().await?;
                 }
                 Message::Binary(bytes) => {
+                    if let Ok(text) = std::str::from_utf8(&bytes) {
+                        pending_echoes.lock().await.push_back(text.to_string());
+                    }
                     stdin.write_all(&bytes).await?;
                     stdin.write_all(b"\n").await?;
                     stdin.flush().await?;
@@ -284,36 +306,4 @@ async fn cleanup_workspace(state: &HermesAcpState, workspace_name: &str) {
         session.server_task.abort();
         let _ = std::fs::remove_dir_all(session.key_dir);
     }
-}
-
-async fn preflight_hermes(sandbox: &Sandbox) -> Result<()> {
-    let output = sandbox
-        .shell(
-            r#"
-set -eu
-if command -v hermes-acp >/dev/null 2>&1; then
-  hermes-acp --check >/tmp/mom-acp-preflight-hermes.out 2>/tmp/mom-acp-preflight-hermes.err || {
-    cat /tmp/mom-acp-preflight-hermes.err >&2
-    exit 1
-  }
-elif command -v hermes >/dev/null 2>&1; then
-  hermes acp --check >/tmp/mom-acp-preflight-hermes.out 2>/tmp/mom-acp-preflight-hermes.err || {
-    cat /tmp/mom-acp-preflight-hermes.err >&2
-    exit 1
-  }
-else
-  echo 'hermes-acp/hermes is not installed or not on PATH' >&2
-  exit 127
-fi
-"#,
-        )
-        .await
-        .context("run Hermes ACP preflight")?;
-    if !output.status().success {
-        let stderr = output
-            .stderr()
-            .unwrap_or_else(|_| "Hermes ACP preflight failed".to_string());
-        bail!("{}", stderr.trim());
-    }
-    Ok(())
 }

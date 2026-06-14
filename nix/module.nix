@@ -534,6 +534,7 @@ in
         default = [
           "api.openai.com"
           "openrouter.ai"
+          "dl-cdn.alpinelinux.org"
           "github.com"
           "api.github.com"
           "raw.githubusercontent.com"

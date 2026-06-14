@@ -290,9 +290,12 @@ apk add --no-cache \
   ca-certificates \
   clang \
   compiler-rt \
+  chromium \
   curl \
   git \
   libffi-dev \
+  nodejs \
+  npm \
   python3 \
   python3-dev
 if ! command -v uv >/dev/null 2>&1; then
@@ -300,6 +303,13 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 export PATH="/root/.local/bin:$PATH"
 CC=clang UV_LINK_MODE=copy uv tool install --python 3.13 --force 'hermes-agent[all,messaging,acp]'
+npm install -g agent-browser
+browser_bin="$(command -v chromium-browser || command -v chromium)"
+ln -sf "$browser_bin" /usr/local/bin/mom-chromium
+mkdir -p /root/.agent-browser
+cat >/root/.agent-browser/config.json <<'EOF'
+{"executablePath":"/usr/local/bin/mom-chromium","args":"--no-sandbox"}
+EOF
 ln -sf /root/.local/bin/uv /usr/local/bin/uv
 ln -sf /root/.local/bin/uvx /usr/local/bin/uvx
 ln -sf /root/.local/bin/hermes /usr/local/bin/hermes

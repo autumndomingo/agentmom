@@ -30,6 +30,18 @@ kill_pid_hard() {
   fi
 }
 
+kill_msb_home_processes() {
+  while IFS= read -r line; do
+    local pid="${line%% *}"
+    local command="${line#${pid} }"
+    if [[ "${command}" == *"${msb_home}"* ]]; then
+      kill_pid "${pid}"
+    fi
+  done < <(ps -axo pid=,command=)
+}
+
+kill_msb_home_processes
+
 if [ -f "${pid_file}" ]; then
   # shellcheck disable=SC1090
   source "${pid_file}"
@@ -44,6 +56,15 @@ if [ -f "${pid_file}" ]; then
   kill_pid_hard "${proxy_pid:-}"
   kill_pid_hard "${dev_run_pid:-}"
 fi
+
+sleep 1
+while IFS= read -r line; do
+  pid="${line%% *}"
+  command="${line#${pid} }"
+  if [[ "${command}" == *"${msb_home}"* ]]; then
+    kill_pid_hard "${pid}"
+  fi
+done < <(ps -axo pid=,command=)
 
 rm -rf "${repo_root}/.state" "${msb_home}" "${repo_root}/dev/iron-proxy"
 

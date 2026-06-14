@@ -440,7 +440,10 @@ input:disabled {
   min-height: 40px;
   padding: 0;
   border-radius: 4px;
-  display: block;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
   color: #a7a7aa;
   text-align: left;
 }
@@ -448,6 +451,38 @@ input:disabled {
 .chatHistoryItem:hover,
 .chatHistoryItem.active {
   background: transparent;
+  color: var(--text);
+}
+
+.chatHistoryItem button {
+  min-width: 0;
+  min-height: 32px;
+  border-radius: 6px;
+  display: grid;
+  align-items: center;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+
+.chatHistoryItem button:first-child {
+  padding: 0;
+}
+
+.chatHistoryItem button:last-child {
+  width: 32px;
+  justify-content: center;
+  color: var(--dim);
+  opacity: 0;
+}
+
+.chatHistoryItem:hover button:last-child,
+.chatHistoryItem:focus-within button:last-child {
+  opacity: 1;
+}
+
+.chatHistoryItem button:last-child:hover:not(:disabled) {
+  background: rgb(247 243 234 / 8%);
   color: var(--text);
 }
 
@@ -585,6 +620,37 @@ input:disabled {
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
+  flex-wrap: wrap;
+}
+
+.sessionSelect,
+.sessionToggle {
+  height: 40px;
+  max-width: 220px;
+  border-radius: 8px;
+  border: 1px solid rgb(247 243 234 / 10%);
+  background: rgb(247 243 234 / 7%);
+  color: var(--muted);
+  font: inherit;
+  font-weight: 750;
+}
+
+.sessionSelect {
+  padding: 0 10px;
+}
+
+.sessionToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+}
+
+.sessionToggle span {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .chatBody {
@@ -871,6 +937,39 @@ input:disabled {
   gap: 8px;
   background: #2b2b2f;
   box-shadow: 0 18px 70px rgb(0 0 0 / 35%);
+}
+
+.attachmentTray {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 2px 8px 0;
+}
+
+.attachmentTray span {
+  min-width: 0;
+  max-width: 220px;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgb(247 243 234 / 9%);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.attachmentTray button {
+  width: 18px;
+  height: 18px;
+  font-size: 12px;
+}
+
+.hiddenFileInput {
+  display: none;
 }
 
 .composer input {
