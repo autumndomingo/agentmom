@@ -22,6 +22,7 @@ let
     };
     auth = {
       secret_file = cfg.auth.secretFile;
+      bootstrap_admin_code_file = cfg.auth.bootstrapAdminCodeFile;
     };
   };
   effectiveConfigFile =
@@ -114,6 +115,7 @@ let
     MOM_MICROVM_NIX_URL = cfg.microvm.microvmNixUrl;
     MOM_NODE_ID = cfg.nodeId;
     MOM_LOG_FORMAT = cfg.logFormat;
+    MOM_SESSION_COOKIE_SECURE = if cfg.auth.secureCookies then "1" else "0";
     MOM_CAPACITY_CPUS = toString cfg.capacity.cpus;
     MOM_CAPACITY_MEMORY_MIB = toString cfg.capacity.memoryMib;
     MOM_CAPACITY_ACTIVE_WORKSPACES = toString cfg.capacity.activeWorkspaces;
@@ -124,6 +126,11 @@ let
   }
   // lib.optionalAttrs (cfg.workerTokenFile != null) {
     MOM_WORKER_TOKEN_FILE = cfg.workerTokenFile;
+  }
+  // lib.optionalAttrs (cfg.workerNodeTokenFiles != { }) {
+    MOM_WORKER_TOKEN_FILES = lib.concatStringsSep "," (
+      lib.mapAttrsToList (node: path: "${node}=${path}") cfg.workerNodeTokenFiles
+    );
   }
   // lib.optionalAttrs (effectiveWorkerUrlAllowlist != [ ]) {
     MOM_WORKER_URL_ALLOWLIST = lib.concatStringsSep "," effectiveWorkerUrlAllowlist;
@@ -284,6 +291,13 @@ in
         description = "Host interface used for microVM guest NAT.";
       };
 
+      kvmKernelModule = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "kvm-amd";
+        description = "Host CPU-specific KVM module to load, for example kvm-amd or kvm-intel.";
+      };
+
       nixpkgsUrl = lib.mkOption {
         type = lib.types.str;
         default = defaultNixpkgsUrl;
@@ -298,6 +312,12 @@ in
         description = "microvm.nix flake URL used by generated workspace flakes.";
       };
 
+    };
+
+    cutoverWipeMarker = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "Optional one-time marker name. When absent from stateDir, prestart moves old Agent Mom catalog/runtime state aside before starting services.";
     };
 
     nodeId = lib.mkOption {
@@ -351,6 +371,18 @@ in
         type = lib.types.nullOr lib.types.str;
         default = null;
         description = "Runtime file containing the Agent Mom browser-session and invite HMAC secret.";
+      };
+
+      bootstrapAdminCodeFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Runtime file containing the first admin login code used to bootstrap an empty Agent Mom catalog.";
+      };
+
+      secureCookies = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = "Whether Agent Mom browser session cookies include the Secure attribute. Disable only for HTTP-only local deployments.";
       };
     };
 
@@ -669,7 +701,13 @@ in
     workerTokenFile = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
-      description = "Optional runtime file containing the bearer token used by API worker endpoints.";
+      description = "Optional runtime file containing this worker's bearer token. Also used as a single-token API fallback for local/dev deployments.";
+    };
+
+    workerNodeTokenFiles = lib.mkOption {
+      type = lib.types.attrsOf lib.types.str;
+      default = { };
+      description = "API-side map of node IDs to runtime files containing per-node worker bearer tokens.";
     };
 
     workerUrlAllowlist = lib.mkOption {
@@ -727,11 +765,65 @@ in
       internalInterfaces = [ cfg.microvm.bridge ];
     };
 
-    boot.kernelModules = lib.mkIf cfg.microvm.enable [
+    boot.kernelModules = lib.mkIf cfg.microvm.enable ([
       "bridge"
       "tap"
+      "tun"
       "vhost_net"
-    ];
+    ] ++ lib.optional (cfg.microvm.kvmKernelModule != null) cfg.microvm.kvmKernelModule);
+
+    systemd.services.agentmom-cutover-wipe = lib.mkIf (cfg.cutoverWipeMarker != null) {
+      description = "Agent Mom one-time cutover state wipe";
+      wantedBy = [ "multi-user.target" ];
+      before = [
+        "agentmom-api.service"
+        "agentmom-worker.service"
+        "agentmom-catalog-backup.service"
+        "agentmom-monitor-check.service"
+      ];
+      after = tmpfilesReadyUnits;
+      path = [ pkgs.coreutils ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+      };
+      script = ''
+        set -eu
+        state_dir=${lib.escapeShellArg cfg.stateDir}
+        marker=${lib.escapeShellArg "${cfg.stateDir}/.${cfg.cutoverWipeMarker}"}
+        if [ -e "$marker" ]; then
+          exit 0
+        fi
+        stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+        archive="$state_dir/cutover-archive-$stamp"
+        mkdir -p "$archive"
+        paths=(
+          ${lib.escapeShellArg "${cfg.stateDir}/fleet.db"}
+          ${lib.escapeShellArg "${cfg.stateDir}/fleet.db-shm"}
+          ${lib.escapeShellArg "${cfg.stateDir}/fleet.db-wal"}
+          ${lib.escapeShellArg "${cfg.stateDir}/microsandbox"}
+        )
+        ${lib.optionalString cfg.microvm.enable ''
+          paths+=(
+            ${lib.escapeShellArg "${cfg.microvm.stateDir}/machines"}
+            ${lib.escapeShellArg "${cfg.microvm.workspaceDir}"}
+          )
+        ''}
+        for path in "''${paths[@]}"
+        do
+          if [ -e "$path" ]; then
+            mv "$path" "$archive/"
+          fi
+        done
+        ${lib.optionalString cfg.microvm.enable ''
+          install -d -m 0750 -o ${lib.escapeShellArg cfg.user} -g ${lib.escapeShellArg cfg.group} ${lib.escapeShellArg cfg.microvm.stateDir}
+          install -d -m 0750 -o ${lib.escapeShellArg cfg.user} -g ${lib.escapeShellArg cfg.group} ${lib.escapeShellArg "${cfg.microvm.stateDir}/machines"}
+          install -d -m 0750 -o ${lib.escapeShellArg cfg.user} -g ${lib.escapeShellArg cfg.group} ${lib.escapeShellArg cfg.microvm.workspaceDir}
+        ''}
+        touch "$marker"
+        chown ${lib.escapeShellArg cfg.user}:${lib.escapeShellArg cfg.group} "$marker"
+      '';
+    };
 
     assertions = [
       {
@@ -741,6 +833,10 @@ in
       {
         assertion = !cfg.api.enable || cfg.configFile != null || cfg.auth.secretFile != null;
         message = "services.agentmom.auth.secretFile is required when the generated config is used by services.agentmom.api.";
+      }
+      {
+        assertion = !cfg.api.enable || cfg.configFile != null || cfg.auth.bootstrapAdminCodeFile != null;
+        message = "services.agentmom.auth.bootstrapAdminCodeFile is required when the generated config is used by services.agentmom.api.";
       }
       {
         assertion = !cfg.credentialProxy.enable || cfg.credentialProxy.package != null;
@@ -763,8 +859,16 @@ in
         message = "services.agentmom.microvm.hostAddress must be the .1 address inside services.agentmom.microvm.cidr.";
       }
       {
-        assertion = !(cfg.api.enable || cfg.worker.enable) || cfg.workerTokenFile != null;
-        message = "services.agentmom.workerTokenFile is required when the Agent Mom API or worker service is enabled.";
+        assertion = !cfg.worker.enable || cfg.workerTokenFile != null;
+        message = "services.agentmom.workerTokenFile is required when the Agent Mom worker service is enabled.";
+      }
+      {
+        assertion = !cfg.api.enable || cfg.workerTokenFile != null || cfg.workerNodeTokenFiles != { };
+        message = "services.agentmom.workerTokenFile or services.agentmom.workerNodeTokenFiles is required when the Agent Mom API service is enabled.";
+      }
+      {
+        assertion = !cfg.api.enable || cfg.configFile != null || effectiveWorkerUrlAllowlist != [ ];
+        message = "services.agentmom.workerUrlAllowlist is required when the generated config is used by services.agentmom.api.";
       }
       {
         assertion = cfg.configFile != null || !cfg.worker.enable || cfg.credentials.proxyUrl != null || cfg.credentialProxy.enable;
@@ -788,7 +892,9 @@ in
       description = "Agent Mom central API";
       wantedBy = [ "multi-user.target" ];
       after = [ "network-online.target" ] ++ tmpfilesReadyUnits;
-      wants = [ "network-online.target" ];
+      wants = [ "network-online.target" ]
+        ++ lib.optionals (cfg.cutoverWipeMarker != null) [ "agentmom-cutover-wipe.service" ];
+      requires = lib.optionals (cfg.cutoverWipeMarker != null) [ "agentmom-cutover-wipe.service" ];
       path = commonPath;
       environment = commonEnvironment // {
         MOM_UI_DIST = "${cfg.package}/share/agentmom/ui";
@@ -809,10 +915,13 @@ in
       description = "Agent Mom central API worker";
       wantedBy = [ "multi-user.target" ];
       after = [ "network-online.target" ] ++ tmpfilesReadyUnits
+        ++ lib.optionals (cfg.cutoverWipeMarker != null) [ "agentmom-cutover-wipe.service" ]
         ++ lib.optionals cfg.credentialProxy.enable [ "agentmom-credential-proxy.service" ];
       wants = [ "network-online.target" ]
+        ++ lib.optionals (cfg.cutoverWipeMarker != null) [ "agentmom-cutover-wipe.service" ]
         ++ lib.optionals cfg.credentialProxy.enable [ "agentmom-credential-proxy.service" ];
-      requires = lib.optionals cfg.credentialProxy.enable [ "agentmom-credential-proxy.service" ];
+      requires = lib.optionals (cfg.cutoverWipeMarker != null) [ "agentmom-cutover-wipe.service" ]
+        ++ lib.optionals cfg.credentialProxy.enable [ "agentmom-credential-proxy.service" ];
       path = commonPath;
       environment = commonEnvironment // {
         MOM_API_URL = cfg.worker.apiUrl;

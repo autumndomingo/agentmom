@@ -391,7 +391,12 @@ fn authenticate_or_create_session(
             params![user.id, now],
         )?;
     } else if user_count(&tx)? == 0 {
-        insert_user_with_generated_code(&tx, &email, "", "admin", None, now)?;
+        let expected_code = configured_bootstrap_admin_code()?;
+        let code = code.ok_or(AuthError::Unauthorized)?;
+        if code != expected_code {
+            return Err(AuthError::Unauthorized);
+        }
+        insert_user_with_code(&tx, &email, "", "admin", None, &expected_code, now)?;
     } else {
         let code = code.ok_or(AuthError::Unauthorized)?;
         let invite = tx
@@ -432,6 +437,32 @@ WHERE code = ?1 AND active = 1
 
 fn user_count(tx: &rusqlite::Transaction<'_>) -> Result<i64, AuthError> {
     Ok(tx.query_row("SELECT COUNT(*) FROM users", [], |row| row.get(0))?)
+}
+
+fn configured_bootstrap_admin_code() -> Result<String, AuthError> {
+    let config = load_mom_config().map_err(AuthError::from)?;
+    Ok(normalize_access_code(
+        &config.bootstrap_admin_code().map_err(AuthError::from)?,
+    ))
+}
+
+fn insert_user_with_code(
+    tx: &rusqlite::Transaction<'_>,
+    email: &str,
+    full_name: &str,
+    role: &str,
+    invite_id: Option<i64>,
+    code: &str,
+    now: i64,
+) -> Result<i64, AuthError> {
+    tx.execute(
+        r#"
+INSERT INTO users (email, code, full_name, role, invite_id, created_at, updated_at, last_seen_at)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?6)
+"#,
+        params![email, code, full_name, role, invite_id, now],
+    )?;
+    Ok(tx.last_insert_rowid())
 }
 
 fn insert_user_with_generated_code(
@@ -771,11 +802,38 @@ fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
 }
 
 fn session_cookie(token: &str) -> String {
-    format!("{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax")
+    format!(
+        "{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax{}",
+        secure_cookie_suffix()
+    )
 }
 
 fn clear_session_cookie() -> String {
-    format!("{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0")
+    format!(
+        "{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax{}; Max-Age=0",
+        secure_cookie_suffix()
+    )
+}
+
+fn secure_cookie_suffix() -> &'static str {
+    if env_flag_enabled("MOM_SESSION_COOKIE_SECURE") {
+        "; Secure"
+    } else {
+        ""
+    }
+}
+
+fn env_flag_enabled(name: &str) -> bool {
+    env::var(name)
+        .ok()
+        .is_some_and(|value| bool_flag_enabled(&value))
+}
+
+fn bool_flag_enabled(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
 }
 
 #[derive(Debug)]
@@ -819,5 +877,21 @@ impl IntoResponse for AuthError {
             AuthError::Anyhow(error) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")),
         };
         (status, Json(AuthErrorBody { error })).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bool_flag_enabled_accepts_explicit_true_values() {
+        assert!(bool_flag_enabled("1"));
+        assert!(bool_flag_enabled("true"));
+        assert!(bool_flag_enabled(" YES "));
+        assert!(bool_flag_enabled("on"));
+        assert!(!bool_flag_enabled("0"));
+        assert!(!bool_flag_enabled("false"));
+        assert!(!bool_flag_enabled(""));
     }
 }

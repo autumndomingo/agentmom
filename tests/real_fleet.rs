@@ -5,8 +5,11 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
-use reqwest::{RequestBuilder, StatusCode};
+use reqwest::{RequestBuilder, StatusCode, header};
 use serde_json::{Value, json};
+use tokio::sync::OnceCell;
+
+static ADMIN_SESSION: OnceCell<AdminSession> = OnceCell::const_new();
 
 #[derive(Clone)]
 struct RealFleet {
@@ -15,6 +18,11 @@ struct RealFleet {
     worker_token: String,
     basic_auth: Option<(String, String)>,
     node_a: String,
+}
+
+#[derive(Clone)]
+struct AdminSession {
+    cookie: String,
 }
 
 #[tokio::test]
@@ -88,15 +96,16 @@ async fn real_unknown_explicit_node_is_rejected() -> Result<()> {
     let fleet = RealFleet::from_env()?;
     let workspace = unique_workspace("badnode");
     let response = fleet
-        .request(
+        .admin_request(
             fleet
                 .client
-                .post(format!("{}/api/workspaces", fleet.api_url))
-                .json(&json!({
-                    "name": workspace,
-                    "node_id": format!("missing-node-{}", now_millis()?)
-                })),
+                .post(format!("{}/api/workspaces", fleet.api_url)),
         )
+        .await?
+        .json(&json!({
+            "name": workspace,
+            "node_id": format!("missing-node-{}", now_millis()?)
+        }))
         .send()
         .await?;
     assert!(
@@ -115,67 +124,98 @@ async fn real_create_workspace_and_run_marker_job() -> Result<()> {
     let workspace = unique_workspace("real");
     let marker = format!("agentmom-marker-{}", now_millis()?);
 
-    let create = fleet
-        .create_workspace(&workspace, Some(&fleet.node_a), 0)
-        .await?;
-    fleet.wait_for_job_status(&create, "succeeded").await?;
-    fleet
-        .wait_for_workspace_node(&workspace, &fleet.node_a)
-        .await?;
+    let result = async {
+        let create = fleet
+            .create_workspace(&workspace, Some(&fleet.node_a), 0)
+            .await?;
+        fleet.wait_for_job_status(&create, "succeeded").await?;
+        fleet
+            .wait_for_workspace_node(&workspace, &fleet.node_a)
+            .await?;
 
-    let execute = fleet
-        .create_job(
-            &workspace,
-            "execute",
-            json!({
-                "command": [
-                    "sh",
-                    "-lc",
-                    format!("printf '%s\\n' {marker:?} > /workspace/agentmom-real-marker && cat /workspace/agentmom-real-marker")
-                ]
-            }),
-        )
-        .await?;
-    let job = fleet.wait_for_job_status(&execute, "succeeded").await?;
-    let output = job_output_text(&job);
-    assert!(
-        output.contains(&marker),
-        "execute output should contain marker {marker:?}, got {output:?}"
-    );
-
-    Ok(())
+        let output = fleet
+            .execute(
+                &workspace,
+                format!(
+                    "printf '%s\\n' {marker:?} > /workspace/agentmom-real-marker && cat /workspace/agentmom-real-marker"
+                ),
+            )
+            .await?;
+        assert!(
+            output.contains(&marker),
+            "execute output should contain marker {marker:?}, got {output:?}"
+        );
+        Ok(())
+    }
+    .await;
+    fleet.finish_with_cleanup(&workspace, result).await
 }
 
 #[tokio::test]
 #[ignore = "requires AGENTMOM_REAL_ALLOW_CREATE=1 and AGENTMOM_REAL_ALLOW_BACKUP=1"]
-async fn real_backup_smoke_records_artifact() -> Result<()> {
+async fn real_backup_restore_roundtrip_marker() -> Result<()> {
     let fleet = RealFleet::from_env()?;
     fleet.require_create_enabled()?;
     if env::var("AGENTMOM_REAL_ALLOW_BACKUP").ok().as_deref() != Some("1") {
-        bail!("set AGENTMOM_REAL_ALLOW_BACKUP=1 to run restic backup smoke");
+        bail!("set AGENTMOM_REAL_ALLOW_BACKUP=1 to run restic backup/restore smoke");
     }
     let workspace = unique_workspace("backup");
+    let marker = format!("agentmom-backup-marker-{}", now_millis()?);
 
-    let create = fleet
-        .create_workspace(&workspace, Some(&fleet.node_a), 0)
-        .await?;
-    fleet.wait_for_job_status(&create, "succeeded").await?;
+    let result = async {
+        let create = fleet
+            .create_workspace(&workspace, Some(&fleet.node_a), 0)
+            .await?;
+        fleet.wait_for_job_status(&create, "succeeded").await?;
 
-    let backup = fleet.create_job(&workspace, "backup", json!({})).await?;
-    fleet.wait_for_job_status(&backup, "succeeded").await?;
+        fleet
+            .execute(
+                &workspace,
+                format!("printf '%s\\n' {marker:?} > /workspace/agentmom-real-marker"),
+            )
+            .await?;
 
-    let events = fleet.workspace_events(&workspace).await?;
-    assert!(
-        events.iter().any(|event| {
-            event
-                .get("event_type")
-                .and_then(Value::as_str)
-                .is_some_and(|kind| kind == "workspace_backup_succeeded")
-        }),
-        "workspace events should include workspace_backup_succeeded: {events:?}"
-    );
+        let backup = fleet.create_job(&workspace, "backup", json!({})).await?;
+        fleet.wait_for_job_status(&backup, "succeeded").await?;
 
-    Ok(())
+        let events = fleet.workspace_events(&workspace).await?;
+        let artifact = latest_backup_artifact(&events)?;
+
+        fleet
+            .execute(
+                &workspace,
+                "printf '%s\\n' overwritten > /workspace/agentmom-real-marker".to_string(),
+            )
+            .await?;
+
+        let restore = fleet
+            .create_job(
+                &workspace,
+                "restore",
+                json!({
+                    "backup_id": artifact.backup_id,
+                    "backup_location": artifact.location,
+                    "backup_workspace_name": workspace,
+                    "desired_state": "running"
+                }),
+            )
+            .await?;
+        fleet.wait_for_job_status(&restore, "succeeded").await?;
+
+        let restored = fleet
+            .execute(
+                &workspace,
+                "cat /workspace/agentmom-real-marker".to_string(),
+            )
+            .await?;
+        assert!(
+            restored.contains(&marker),
+            "restored marker should contain {marker:?}, got {restored:?}"
+        );
+        Ok(())
+    }
+    .await;
+    fleet.finish_with_cleanup(&workspace, result).await
 }
 
 #[tokio::test]
@@ -235,8 +275,8 @@ run_as_service env MOM_STATE_DIR="$tmpdir" "$mom_bin" db status
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("Schema version: 2"),
-        "remote drill should report schema version 2, got {stdout:?}"
+        stdout.contains("Schema version: 3"),
+        "remote drill should report schema version 3, got {stdout:?}"
     );
     Ok(())
 }
@@ -278,6 +318,54 @@ impl RealFleet {
         }
     }
 
+    async fn admin_request(&self, request: RequestBuilder) -> Result<RequestBuilder> {
+        let session = self.admin_session().await?;
+        Ok(self
+            .request(request)
+            .header(header::COOKIE, session.cookie.clone()))
+    }
+
+    async fn admin_session(&self) -> Result<AdminSession> {
+        ADMIN_SESSION
+            .get_or_try_init(|| async { self.login_admin().await })
+            .await
+            .cloned()
+    }
+
+    async fn login_admin(&self) -> Result<AdminSession> {
+        let email = env::var("AGENTMOM_REAL_ADMIN_EMAIL")
+            .unwrap_or_else(|_| "real-fleet@agentmom.local".to_string());
+        let mut body = json!({ "email": email });
+        if let Ok(code) = env::var("AGENTMOM_REAL_ADMIN_CODE") {
+            if !code.trim().is_empty() {
+                body["access_code"] = json!(code);
+            }
+        }
+        let response = self
+            .request(
+                self.client
+                    .post(format!("{}/api/auth/login", self.api_url))
+                    .json(&body),
+            )
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            bail!(
+                "admin login failed with {status}: {body}; set AGENTMOM_REAL_ADMIN_CODE for an existing prod admin"
+            );
+        }
+        let cookie = response
+            .headers()
+            .get(header::SET_COOKIE)
+            .ok_or_else(|| anyhow!("admin login response did not set a session cookie"))?
+            .to_str()
+            .context("admin login Set-Cookie header is not valid UTF-8")?
+            .to_string();
+        Ok(AdminSession { cookie })
+    }
+
     fn require_create_enabled(&self) -> Result<()> {
         if env::var("AGENTMOM_REAL_ALLOW_CREATE").ok().as_deref() == Some("1") {
             Ok(())
@@ -300,11 +388,9 @@ impl RealFleet {
             body["node_id"] = json!(node_id);
         }
         let response = self
-            .request(
-                self.client
-                    .post(format!("{}/api/workspaces", self.api_url))
-                    .json(&body),
-            )
+            .admin_request(self.client.post(format!("{}/api/workspaces", self.api_url)))
+            .await?
+            .json(&body)
             .send()
             .await?
             .error_for_status()?
@@ -319,15 +405,13 @@ impl RealFleet {
 
     async fn create_job(&self, workspace: &str, kind: &str, payload: Value) -> Result<String> {
         let response = self
-            .request(
-                self.client
-                    .post(format!("{}/api/jobs", self.api_url))
-                    .json(&json!({
-                        "workspace_name": workspace,
-                        "kind": kind,
-                        "payload": payload
-                    })),
-            )
+            .admin_request(self.client.post(format!("{}/api/jobs", self.api_url)))
+            .await?
+            .json(&json!({
+                "workspace_name": workspace,
+                "kind": kind,
+                "payload": payload
+            }))
             .send()
             .await?
             .error_for_status()?
@@ -338,6 +422,45 @@ impl RealFleet {
             .and_then(Value::as_str)
             .map(ToString::to_string)
             .ok_or_else(|| anyhow!("create job response missing job id: {response}"))
+    }
+
+    async fn execute(&self, workspace: &str, script: String) -> Result<String> {
+        let execute = self
+            .create_job(
+                workspace,
+                "execute",
+                json!({
+                    "command": ["sh", "-lc", script]
+                }),
+            )
+            .await?;
+        let job = self.wait_for_job_status(&execute, "succeeded").await?;
+        Ok(job_output_text(&job))
+    }
+
+    async fn finish_with_cleanup<T>(&self, workspace: &str, result: Result<T>) -> Result<T> {
+        let cleanup = self.cleanup_workspace(workspace).await;
+        match (result, cleanup) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Ok(_), Err(error)) => Err(error.context("real fleet workspace cleanup failed")),
+            (Err(error), Ok(())) => Err(error),
+            (Err(error), Err(cleanup_error)) => Err(error.context(format!(
+                "real fleet workspace cleanup also failed: {cleanup_error:#}"
+            ))),
+        }
+    }
+
+    async fn cleanup_workspace(&self, workspace: &str) -> Result<()> {
+        let _ = self.create_job(workspace, "stop", json!({})).await;
+        let remove = self
+            .create_job(workspace, "remove", json!({ "remove_workspace_dir": true }))
+            .await?;
+        self.wait_for_job_status(&remove, "succeeded").await?;
+        let workspace = self.workspace(workspace).await?;
+        if workspace.get("status").and_then(Value::as_str) != Some("removed") {
+            bail!("workspace cleanup did not mark removed: {workspace}");
+        }
+        Ok(())
     }
 
     async fn wait_for_job_status(&self, job_id: &str, status: &str) -> Result<Value> {
@@ -375,7 +498,7 @@ impl RealFleet {
         F: FnMut() -> Fut,
         Fut: std::future::Future<Output = Result<Option<Value>>>,
     {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(900);
         while tokio::time::Instant::now() < deadline {
             if let Some(value) = check().await? {
                 return Ok(value);
@@ -386,10 +509,11 @@ impl RealFleet {
     }
 
     async fn job(&self, job_id: &str) -> Result<Value> {
-        self.request(
+        self.admin_request(
             self.client
                 .get(format!("{}/api/jobs/{job_id}", self.api_url)),
         )
+        .await?
         .send()
         .await?
         .error_for_status()?
@@ -400,7 +524,8 @@ impl RealFleet {
 
     async fn workspace(&self, name: &str) -> Result<Value> {
         let values = self
-            .request(self.client.get(format!("{}/api/workspaces", self.api_url)))
+            .admin_request(self.client.get(format!("{}/api/workspaces", self.api_url)))
+            .await?
             .send()
             .await?
             .error_for_status()?
@@ -413,10 +538,11 @@ impl RealFleet {
     }
 
     async fn workspace_events(&self, name: &str) -> Result<Vec<Value>> {
-        self.request(
+        self.admin_request(
             self.client
                 .get(format!("{}/api/workspaces/{name}/events", self.api_url)),
         )
+        .await?
         .send()
         .await?
         .error_for_status()?
@@ -424,6 +550,42 @@ impl RealFleet {
         .await
         .map_err(Into::into)
     }
+}
+
+struct BackupArtifact {
+    backup_id: String,
+    location: String,
+}
+
+fn latest_backup_artifact(events: &[Value]) -> Result<BackupArtifact> {
+    events
+        .iter()
+        .rev()
+        .find_map(|event| {
+            (event.get("event_type").and_then(Value::as_str) == Some("workspace_backup_succeeded"))
+                .then(|| event.get("metadata_json").and_then(Value::as_str))
+                .flatten()
+        })
+        .map(|metadata| -> Result<BackupArtifact> {
+            let metadata = serde_json::from_str::<Value>(metadata)
+                .context("parse workspace_backup_succeeded metadata_json")?;
+            let backup_id = metadata
+                .get("backup_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("backup event missing backup_id: {metadata}"))?
+                .to_string();
+            let location = metadata
+                .get("location")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("backup event missing location: {metadata}"))?
+                .to_string();
+            Ok(BackupArtifact {
+                backup_id,
+                location,
+            })
+        })
+        .transpose()?
+        .ok_or_else(|| anyhow!("workspace events did not include workspace_backup_succeeded"))
 }
 
 fn unique_workspace(prefix: &str) -> String {

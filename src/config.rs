@@ -54,6 +54,10 @@ pub(crate) struct AuthConfig {
     pub(crate) secret: Option<String>,
     #[serde(default)]
     pub(crate) secret_file: Option<PathBuf>,
+    #[serde(default)]
+    pub(crate) bootstrap_admin_code: Option<String>,
+    #[serde(default)]
+    pub(crate) bootstrap_admin_code_file: Option<PathBuf>,
 }
 
 impl MomConfig {
@@ -98,6 +102,7 @@ impl MomConfig {
 
     pub(crate) fn validate_for_api(&self) -> Result<()> {
         self.auth_secret()?;
+        self.bootstrap_admin_code()?;
         Ok(())
     }
 
@@ -107,6 +112,15 @@ impl MomConfig {
             self.auth.secret_file.as_ref(),
             "auth.secret",
             "auth.secret_file",
+        )
+    }
+
+    pub(crate) fn bootstrap_admin_code(&self) -> Result<String> {
+        required_config_secret(
+            self.auth.bootstrap_admin_code.as_deref(),
+            self.auth.bootstrap_admin_code_file.as_ref(),
+            "auth.bootstrap_admin_code",
+            "auth.bootstrap_admin_code_file",
         )
     }
 
@@ -124,6 +138,8 @@ impl MomConfig {
             "auth": {
                 "secret": self.auth.secret.as_ref().map(|_| "<redacted>"),
                 "secret_file": self.auth.secret_file.as_ref().map(|p| p.display().to_string()),
+                "bootstrap_admin_code": self.auth.bootstrap_admin_code.as_ref().map(|_| "<redacted>"),
+                "bootstrap_admin_code_file": self.auth.bootstrap_admin_code_file.as_ref().map(|p| p.display().to_string()),
             }
         })
     }
@@ -228,13 +244,15 @@ mod tests {
                 "model": "openai/gpt-5.5"
               },
               "auth": {
-                "secret": "dev-secret"
+                "secret": "dev-secret",
+                "bootstrap_admin_code": "AM-TEST-ADMIN"
               }
             }"#,
         );
 
         assert_eq!(config.model(), "openai/gpt-5.5");
         assert_eq!(config.auth_secret().unwrap(), "dev-secret");
+        assert_eq!(config.bootstrap_admin_code().unwrap(), "AM-TEST-ADMIN");
         assert_eq!(config.credential_proxy_url(), Some("http://127.0.0.1:1080"));
     }
 

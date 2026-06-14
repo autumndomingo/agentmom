@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use super::*;
 
 pub(crate) const FLEET_SCHEMA_VERSION: i64 = 3;
@@ -215,6 +217,16 @@ fn read_schema_version_without_mutation(db: &Connection) -> Result<i64> {
         |row| row.get::<_, i64>(0),
     )? > 0;
     if !has_table {
+        let user_tables = db.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        if user_tables > 0 {
+            bail!(
+                "fleet.db has existing tables but no schema_version; create a fresh catalog for the hard-cut microvm runtime"
+            );
+        }
         return Ok(0);
     }
     db.query_row(
@@ -896,6 +908,29 @@ pub(crate) fn select_ready_node(requested: Option<&str>) -> Result<String> {
     .ok_or_else(|| anyhow!("no ready worker nodes are registered"))
 }
 
+pub(crate) fn require_claimable_node(node: &str) -> Result<()> {
+    ensure_fleet_schema()?;
+    let now = now_epoch()?;
+    let stale_cutoff = now.saturating_sub(i64::try_from(env_u64("MOM_NODE_STALE_SECS", 60))?);
+    let db = fleet_db()?;
+    let exists = db.query_row(
+        r#"
+SELECT COUNT(*)
+FROM nodes
+WHERE node_id = ?1
+  AND status IN ('ready', 'cordoned')
+  AND worker_url IS NOT NULL
+  AND last_seen_at >= ?2
+"#,
+        params![node, stale_cutoff],
+        |row| row.get::<_, i64>(0),
+    )? > 0;
+    if !exists {
+        bail!("node is not accepting jobs: {node}");
+    }
+    Ok(())
+}
+
 pub(crate) fn node_all() -> Result<Vec<NodeRecord>> {
     ensure_fleet_schema()?;
     let db = fleet_db()?;
@@ -1015,7 +1050,7 @@ pub(crate) fn claim_job(node: &str) -> Result<Option<JobRecord>> {
     let now = now_epoch()?;
     let mut db = fleet_db()?;
     let tx = db.transaction()?;
-    requeue_stale_claims(&tx, now)?;
+    expire_stale_job_leases(&tx, now)?;
     let job_id: Option<String> = tx
         .query_row(
             r#"
@@ -1091,12 +1126,12 @@ pub(crate) fn mark_job_running(id: &str, node: &str) -> Result<JobRecord> {
         r#"
 UPDATE jobs
 SET status = 'running', claimed_at = ?3, updated_at = ?3
-WHERE id = ?1 AND claimed_by = ?2 AND status = 'claimed'
+WHERE id = ?1 AND claimed_by = ?2 AND status IN ('claimed', 'running')
 "#,
         params![id, node, now],
     )?;
     if changed == 0 {
-        bail!("job {id} is not newly claimed by node {node}");
+        bail!("job {id} is not claimed by node {node}");
     }
     job_get(id)
 }
@@ -1213,20 +1248,38 @@ fn normalized_url(url: &str) -> String {
     url.trim().trim_end_matches('/').to_string()
 }
 
-fn requeue_stale_claims(db: &Connection, now: i64) -> Result<()> {
-    let timeout = env_u64("MOM_JOB_CLAIM_TIMEOUT_SECS", 1800);
-    if timeout == 0 {
-        return Ok(());
-    }
-    let cutoff = now.saturating_sub(i64::try_from(timeout).context("job claim timeout too large")?);
-    db.execute(
-        r#"
+fn expire_stale_job_leases(db: &Connection, now: i64) -> Result<()> {
+    let claim_timeout = env_u64("MOM_JOB_CLAIM_TIMEOUT_SECS", 1800);
+    if claim_timeout != 0 {
+        let cutoff = now
+            .saturating_sub(i64::try_from(claim_timeout).context("job claim timeout too large")?);
+        db.execute(
+            r#"
 UPDATE jobs
 SET status = 'queued', claimed_by = NULL, claimed_at = NULL, updated_at = ?1
 WHERE status = 'claimed' AND claimed_at IS NOT NULL AND claimed_at < ?2
 "#,
-        params![now, cutoff],
-    )?;
+            params![now, cutoff],
+        )?;
+    }
+
+    let running_timeout = env_u64("MOM_JOB_RUNNING_TIMEOUT_SECS", 1800);
+    if running_timeout != 0 {
+        let cutoff = now.saturating_sub(
+            i64::try_from(running_timeout).context("job running timeout too large")?,
+        );
+        let output = serde_json::to_string(&json!({
+            "error": "job running lease expired before the worker completed it"
+        }))?;
+        db.execute(
+            r#"
+UPDATE jobs
+SET status = 'failed', output_json = ?3, updated_at = ?1
+WHERE status = 'running' AND claimed_at IS NOT NULL AND claimed_at < ?2
+"#,
+            params![now, cutoff, output],
+        )?;
+    }
     Ok(())
 }
 
@@ -1519,6 +1572,33 @@ pub(crate) fn env_u64(name: &str, default: u64) -> u64 {
 
 pub(crate) fn require_worker_token(headers: &HeaderMap) -> Result<()> {
     let expected = worker_token()?;
+    require_bearer_token(headers, &expected)
+}
+
+pub(crate) fn require_worker_node_token(headers: &HeaderMap, node: &str) -> Result<()> {
+    let tokens = worker_node_tokens()?;
+    if tokens.is_empty() {
+        return require_worker_token(headers);
+    }
+    let expected = tokens
+        .get(node)
+        .ok_or_else(|| anyhow!("worker token is not configured for node {node}"))?;
+    require_bearer_token(headers, expected)
+        .with_context(|| format!("authenticate worker node {node}"))
+}
+
+pub(crate) fn worker_token_for_node(node: &str) -> Result<String> {
+    let tokens = worker_node_tokens()?;
+    if tokens.is_empty() {
+        return worker_token();
+    }
+    tokens
+        .get(node)
+        .cloned()
+        .ok_or_else(|| anyhow!("worker token is not configured for node {node}"))
+}
+
+fn require_bearer_token(headers: &HeaderMap, expected: &str) -> Result<()> {
     if expected.trim().is_empty() {
         bail!("worker token is empty");
     }
@@ -1541,6 +1621,36 @@ pub(crate) fn worker_token() -> Result<String> {
         return Ok(fs::read_to_string(PathBuf::from(path))?.trim().to_string());
     }
     bail!("worker token is not configured")
+}
+
+fn worker_node_tokens() -> Result<HashMap<String, String>> {
+    let Some(raw) = env::var_os("MOM_WORKER_TOKEN_FILES") else {
+        return Ok(HashMap::new());
+    };
+    let raw = raw.to_string_lossy();
+    let mut tokens = HashMap::new();
+    for entry in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+    {
+        let (node, path) = entry
+            .split_once('=')
+            .ok_or_else(|| anyhow!("MOM_WORKER_TOKEN_FILES entries must be node=path"))?;
+        let node = node.trim();
+        if node.is_empty() {
+            bail!("MOM_WORKER_TOKEN_FILES contains an empty node id");
+        }
+        let token = fs::read_to_string(PathBuf::from(path.trim()))
+            .with_context(|| format!("read worker token file for node {node}: {path}"))?
+            .trim()
+            .to_string();
+        if token.is_empty() {
+            bail!("worker token file for node {node} is empty: {path}");
+        }
+        tokens.insert(node.to_string(), token);
+    }
+    Ok(tokens)
 }
 
 pub(crate) fn new_id(prefix: &str) -> Result<String> {

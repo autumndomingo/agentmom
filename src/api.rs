@@ -159,7 +159,13 @@ async fn api_create_job(
                 requested
             )));
         }
-        (None, Some(assigned)) => request.node_id = Some(assigned.clone()),
+        (Some(assigned), Some(_)) => {
+            require_claimable_node(assigned)?;
+        }
+        (None, Some(assigned)) => {
+            require_claimable_node(assigned)?;
+            request.node_id = Some(assigned.clone());
+        }
         (Some(requested), None) => {
             select_ready_node(Some(requested))?;
         }
@@ -169,7 +175,6 @@ async fn api_create_job(
                 workspace.name
             )));
         }
-        _ => {}
     }
     let job = create_job(request)?;
     let _ = state.notifier.send("job_available".to_string());
@@ -251,7 +256,7 @@ async fn api_worker_register(
     headers: HeaderMap,
     Json(request): Json<RegisterNodeRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    require_worker_token(&headers).map_err(ApiError::Unauthorized)?;
+    require_worker_node_token(&headers, &request.node_id).map_err(ApiError::Unauthorized)?;
     register_node(
         &request.node_id,
         &request.capacity,
@@ -264,7 +269,7 @@ async fn api_worker_claim(
     headers: HeaderMap,
     Json(request): Json<ClaimJobRequest>,
 ) -> Result<Json<Option<JobRecord>>, ApiError> {
-    require_worker_token(&headers).map_err(ApiError::Unauthorized)?;
+    require_worker_node_token(&headers, &request.node_id).map_err(ApiError::Unauthorized)?;
     register_node(
         &request.node_id,
         &request.capacity,
@@ -285,7 +290,7 @@ async fn api_worker_job_event(
     headers: HeaderMap,
     Json(request): Json<JobEventRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    require_worker_token(&headers).map_err(ApiError::Unauthorized)?;
+    require_worker_node_token(&headers, &request.node_id).map_err(ApiError::Unauthorized)?;
     let job = job_get(&id)?;
     if job.node_id.as_deref() != Some(&request.node_id) {
         return Err(ApiError::Unauthorized(anyhow!(
@@ -317,7 +322,7 @@ async fn api_worker_job_complete(
     headers: HeaderMap,
     Json(request): Json<CompleteJobRequest>,
 ) -> Result<Json<JobResponse>, ApiError> {
-    require_worker_token(&headers).map_err(ApiError::Unauthorized)?;
+    require_worker_node_token(&headers, &request.node_id).map_err(ApiError::Unauthorized)?;
     require_worker_report_allowed(&request.node_id)?;
     let job = complete_job(&id, &request.node_id, &request.status, request.output)?;
     Ok(Json(JobResponse { job }))
@@ -328,7 +333,7 @@ async fn api_worker_workspace_state(
     headers: HeaderMap,
     Json(request): Json<WorkerWorkspaceStateRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    require_worker_token(&headers).map_err(ApiError::Unauthorized)?;
+    require_worker_node_token(&headers, &request.node_id).map_err(ApiError::Unauthorized)?;
     require_assigned_worker(&name, &request.node_id)?;
     require_worker_report_allowed(&request.node_id)?;
     workspace_update_from_worker(
@@ -346,7 +351,7 @@ async fn api_worker_workspace_event(
     headers: HeaderMap,
     Json(request): Json<WorkerWorkspaceEventRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    require_worker_token(&headers).map_err(ApiError::Unauthorized)?;
+    require_worker_node_token(&headers, &request.node_id).map_err(ApiError::Unauthorized)?;
     require_assigned_worker(&name, &request.node_id)?;
     require_worker_report_allowed(&request.node_id)?;
     record_workspace_event_for_node(
@@ -365,7 +370,7 @@ async fn api_worker_backup_artifact(
     headers: HeaderMap,
     Json(request): Json<WorkerBackupArtifactRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    require_worker_token(&headers).map_err(ApiError::Unauthorized)?;
+    require_worker_node_token(&headers, &request.node_id).map_err(ApiError::Unauthorized)?;
     require_assigned_worker(&name, &request.node_id)?;
     require_worker_report_allowed(&request.node_id)?;
     let artifact = BackupArtifact {
@@ -381,7 +386,7 @@ async fn api_worker_workspaces(
     headers: HeaderMap,
     Query(query): Query<WorkerWorkspacesQuery>,
 ) -> Result<Json<Vec<WorkspaceRecord>>, ApiError> {
-    require_worker_token(&headers).map_err(ApiError::Unauthorized)?;
+    require_worker_node_token(&headers, &query.node_id).map_err(ApiError::Unauthorized)?;
     require_worker_report_allowed(&query.node_id)?;
     Ok(Json(workspaces_for_node(&query.node_id)?))
 }
@@ -416,7 +421,7 @@ async fn api_worker_events(
     Sse<impl tokio_stream::Stream<Item = std::result::Result<SseEvent, Infallible>>>,
     ApiError,
 > {
-    require_worker_token(&headers).map_err(ApiError::Unauthorized)?;
+    require_worker_node_token(&headers, &query.node_id).map_err(ApiError::Unauthorized)?;
     let node_id = query.node_id;
     require_worker_report_allowed(&node_id)?;
     let stream = BroadcastStream::new(state.notifier.subscribe()).filter_map(move |message| {

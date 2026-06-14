@@ -67,7 +67,8 @@ this non-secret JSON from typed `services.agentmom.*` options.
     "model": "openai/gpt-5.5"
   },
   "auth": {
-    "secret_file": "/run/secrets/agentmom-auth-secret"
+    "secret_file": "/run/secrets/agentmom-auth-secret",
+    "bootstrap_admin_code_file": "/run/secrets/agentmom-bootstrap-admin-code"
   }
 }
 ```
@@ -78,7 +79,7 @@ Required assumptions:
 - `guest.hermes_profile` is the Hermes profile name created in the guest.
 - `guest.model` is the default model written into the generated Hermes config.
 - `auth.secret_file` is required for `mom api`; it signs browser sessions.
-- On an empty DB, the first login creates the admin user and auto-generates that user's login code.
+- `auth.bootstrap_admin_code_file` is required for `mom api`; an empty DB only creates the first admin when the login supplies this code.
 
 `mom config doctor` validates the configured file and prints a redacted
 effective config. `mom node ensure-runtime` checks host prerequisites for the
@@ -146,6 +147,7 @@ The flake exports `nixosModules.agentmom`.
     nodeId = "mom-1";
     logFormat = "json";
     stateDir = "/var/lib/agentmom";
+    cutoverWipeMarker = "microvm-cutover-v2";
 
     microvm = {
       enable = true;
@@ -155,6 +157,7 @@ The flake exports `nixosModules.agentmom`.
       cidr = "192.168.83.0/24";
       hostAddress = "192.168.83.1";
       externalInterface = "eth0";
+      kvmKernelModule = "kvm-amd";
     };
 
     api = {
@@ -179,7 +182,11 @@ The flake exports `nixosModules.agentmom`.
 
     guest.model = "openai/gpt-5.5";
     workerTokenFile = "/run/secrets/agentmom-worker-token";
-    auth.secretFile = "/run/secrets/agentmom-auth-secret";
+    auth = {
+      secretFile = "/run/secrets/agentmom-auth-secret";
+      bootstrapAdminCodeFile = "/run/secrets/agentmom-bootstrap-admin-code";
+      secureCookies = true;
+    };
   };
 }
 ```
@@ -191,6 +198,23 @@ Workers expose private control endpoints such as
 on the host that owns a workspace. Bind these endpoints to localhost for
 single-host deployments or to a Tailscale/private address for multi-host
 deployments.
+
+For multi-host production, give the API a per-node token map instead of a
+single shared worker token:
+
+```nix
+services.agentmom.workerNodeTokenFiles = {
+  mom-1 = "/run/secrets/agentmom-worker-token-mom-1";
+  mom-2 = "/run/secrets/agentmom-worker-token-mom-2";
+};
+services.agentmom.workerUrlAllowlist = [
+  "http://100.81.250.67:9090"
+  "http://100.92.189.28:9090"
+];
+```
+
+Each worker host still sets only its own `workerTokenFile`. This binds worker
+API calls to the node identity they claim.
 
 ## Real Fleet Tests
 
@@ -206,7 +230,8 @@ Then run read-only checks:
 
 ```sh
 export AGENTMOM_REAL_API_URL=http://127.0.0.1:18080
-export AGENTMOM_REAL_WORKER_TOKEN="$(ssh mom-ctrl 'cat /run/agenix/agentmom-worker-token')"
+export AGENTMOM_REAL_ADMIN_CODE="$(ssh mom-ctrl 'cat /run/agenix/agentmom-bootstrap-admin-code')"
+export AGENTMOM_REAL_WORKER_TOKEN="$(ssh mom-ctrl 'cat /run/agenix/agentmom-worker-token-mom-1')"
 export AGENTMOM_REAL_NODE_A=mom-1
 just real-fleet-test
 ```

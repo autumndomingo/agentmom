@@ -291,11 +291,17 @@ pub(crate) async fn run_restic_restore(
     if !command_exists("restic").await {
         bail!("restic must be installed before workspace restore can run");
     }
-    let snapshot = backup_location
+    let (repository, snapshot) = backup_location
         .rsplit_once('#')
-        .map(|(_, snapshot)| snapshot)
-        .filter(|snapshot| !snapshot.is_empty())
+        .filter(|(repository, snapshot)| !repository.is_empty() && !snapshot.is_empty())
         .ok_or_else(|| anyhow!("backup {backup_id} is missing restic snapshot id"))?;
+    let ambient_repository = env::var("RESTIC_REPOSITORY")
+        .context("RESTIC_REPOSITORY must be set before workspace restore can run")?;
+    if ambient_repository != repository {
+        bail!(
+            "backup {backup_id} was recorded from restic repository {repository}, but RESTIC_REPOSITORY is {ambient_repository}"
+        );
+    }
     let parent = workspace_dir_path.parent().ok_or_else(|| {
         anyhow!(
             "workspace directory has no parent: {}",
@@ -321,6 +327,8 @@ pub(crate) async fn run_restic_restore(
         .with_context(|| format!("create restore dir {}", restore_tmp.display()))?;
     let status = TokioCommand::new("restic")
         .arg("restore")
+        .arg("-r")
+        .arg(repository)
         .arg(snapshot)
         .arg("--target")
         .arg(&restore_tmp)

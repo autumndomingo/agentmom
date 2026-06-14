@@ -329,7 +329,9 @@ async fn run_claimed_job(api: &WorkerApi, job: JobRecord) -> Result<()> {
         },
     )
     .await?;
+    let heartbeat = spawn_job_heartbeat(api.clone(), job.id.clone(), job.kind.clone());
     let result = execute_job(api, &job).await;
+    heartbeat.abort();
     match result {
         Ok(output) => {
             api.client
@@ -362,6 +364,37 @@ async fn run_claimed_job(api: &WorkerApi, job: JobRecord) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn spawn_job_heartbeat(
+    api: WorkerApi,
+    job_id: String,
+    kind: String,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            if let Err(error) = worker_job_event(
+                &api,
+                WorkerJobEvent {
+                    job_id: &job_id,
+                    event_type: "job_running",
+                    status: "running",
+                    message: "worker job heartbeat",
+                    metadata: json!({ "kind": kind }),
+                },
+            )
+            .await
+            {
+                log_record(
+                    "error",
+                    "worker_job_heartbeat_failed",
+                    None,
+                    &format!("worker job heartbeat failed for {job_id}: {error:#}"),
+                );
+            }
+        }
+    })
 }
 
 struct WorkerJobEvent<'a> {
@@ -805,14 +838,13 @@ async fn remove_workspace_local(
         false,
     )
     .await?;
-    if let Ok(handle) = get_vm(&workspace.vm_name).await {
-        if handle.status().is_running() {
-            let _ = handle.stop_with_timeout(Duration::from_secs(20)).await;
-        }
-        let _ = remove_vm(&workspace.vm_name).await;
-    }
+    remove_vm(&workspace.vm_name)
+        .await
+        .with_context(|| format!("remove VM {}", workspace.vm_name))?;
     if remove_workspace_dir {
-        let _ = runtime::remove_workspace_dir(&workspace.workspace_dir_name).await;
+        runtime::remove_workspace_dir(&workspace.workspace_dir_name)
+            .await
+            .with_context(|| format!("remove workspace dir {}", workspace.workspace_dir_name))?;
     }
     api.update_workspace(
         &workspace.name,

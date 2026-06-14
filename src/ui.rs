@@ -23,7 +23,8 @@ use tower_http::services::{ServeDir, ServeFile};
 
 use crate::{
     ApiState, JobResponse, WorkspaceRecord, create_job, job_get, node_worker_url,
-    service_tunnel_hostname_registered, service_tunnel_upsert, worker_token, workspace_get,
+    service_tunnel_hostname_registered, service_tunnel_upsert, worker_token_for_node,
+    workspace_get,
 };
 
 #[derive(Debug, Deserialize)]
@@ -204,9 +205,15 @@ async fn chat_ws(
     let workspace = workspace_get(&name)?;
     let worker_url = workspace_worker_url(&workspace)?;
     let worker_ws = worker_acp_ws_url(&worker_url, &workspace)?;
+    let worker_token = worker_token_for_node(workspace.node_id.as_deref().ok_or_else(|| {
+        anyhow!(
+            "workspace {} does not have an assigned node",
+            workspace.name
+        )
+    })?)?;
     Ok(ws
         .on_upgrade(move |socket| async move {
-            let _ = proxy_acp_websocket(socket, worker_ws).await;
+            let _ = proxy_acp_websocket(socket, worker_ws, worker_token).await;
         })
         .into_response())
 }
@@ -230,8 +237,8 @@ fn worker_acp_ws_url(worker_url: &str, workspace: &WorkspaceRecord) -> Result<St
 async fn proxy_acp_websocket(
     mut browser_socket: axum::extract::ws::WebSocket,
     worker_ws_url: String,
+    token: String,
 ) -> Result<()> {
-    let token = worker_token()?;
     let mut request = worker_ws_url.into_client_request()?;
     request.headers_mut().insert(
         AUTHORIZATION,
@@ -342,6 +349,7 @@ async fn open_hermes_dashboard(name: &str) -> Result<Json<CommandResult>, UiErro
             workspace.name
         )
     })?;
+    let token = worker_token_for_node(node)?;
     let response = reqwest::Client::builder()
         .timeout(Duration::from_secs(120))
         .build()?
@@ -349,7 +357,7 @@ async fn open_hermes_dashboard(name: &str) -> Result<Json<CommandResult>, UiErro
             "{}/worker/services/hermes/open",
             worker_url.trim_end_matches('/')
         ))
-        .with_worker_token()
+        .bearer_auth(token)
         .json(&OpenWorkerServiceRequest {
             workspace_name: workspace_name.clone(),
             vm_name,
@@ -385,6 +393,13 @@ async fn create_and_wait_for_job(
     payload: Value,
 ) -> Result<Json<CommandResult>, UiError> {
     let workspace = workspace_get(workspace_name)?;
+    let node_id = workspace.node_id.as_deref().ok_or_else(|| {
+        anyhow!(
+            "workspace {} does not have an assigned node",
+            workspace.name
+        )
+    })?;
+    crate::require_claimable_node(node_id)?;
     let job = create_job(crate::CreateJobRequest {
         workspace_name: workspace_name.to_string(),
         kind: kind.to_string(),
@@ -449,19 +464,6 @@ fn job_output_text(output_json: Option<&str>) -> String {
 
 async fn missing_ui() -> &'static str {
     "Agent Mom UI assets were not found. Set MOM_UI_DIST to a built UI directory."
-}
-
-trait WorkerTokenExt {
-    fn with_worker_token(self) -> Self;
-}
-
-impl WorkerTokenExt for reqwest::RequestBuilder {
-    fn with_worker_token(self) -> Self {
-        match worker_token() {
-            Ok(token) if !token.trim().is_empty() => self.bearer_auth(token),
-            _ => self,
-        }
-    }
 }
 
 enum UiError {

@@ -41,6 +41,9 @@ Keep the first production runtime narrow: Cloud Hypervisor, `/24` guest network,
 - Credential proxy listen URL now derives from the microVM bridge host address.
 - `mom node ensure-runtime` is intentionally expensive: it builds a host-check runner so deploys fail before accepting work.
 - Remote backup/restore now routes by assigned node before looking at local workspace directories.
+- Empty catalogs require the configured bootstrap admin code for first-admin creation.
+- Multi-worker API deployments use `workerNodeTokenFiles` so worker bearer tokens are node-scoped.
+- Prod hosts use `cutoverWipeMarker = "microvm-cutover-v2"` to move old catalog/runtime state aside once under systemd before startup.
 
 ## Second Review Before Deploy
 
@@ -52,4 +55,7 @@ Keep the first production runtime narrow: Cloud Hypervisor, `/24` guest network,
 - [x] Tighten guest isolation and load required host tap/vhost modules.
 - [x] Make generated workspace VM flakes build from deployed closure inputs, not network-dependent GitHub locks at start time.
 - [x] Add worker URL allowlist/private URL to prod examples and update `mom-1`/`mom-2` host configs from microsandbox options.
-- [ ] Consider per-node worker credentials before multi-worker prod exposure.
+- [x] Bind worker API credentials to node identity before multi-worker prod exposure.
+- [x] Require a bootstrap admin code for the first user on wiped catalogs.
+- [x] Add a declarative one-time cutover wipe marker for prod hosts.
+- [x] Update real-fleet tests to authenticate admin requests and clean up mutating workspaces.

@@ -1672,6 +1672,8 @@ mod tests {
             auth: AuthConfig {
                 secret: Some("test-auth-secret".to_string()),
                 secret_file: None,
+                bootstrap_admin_code: Some("AM-TEST-ADMIN".to_string()),
+                bootstrap_admin_code_file: None,
             },
         }
     }

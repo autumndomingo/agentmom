@@ -11,7 +11,7 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::StatusCode;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -26,8 +26,18 @@ use tokio_tungstenite::{
 
 const MOM_BIN: &str = env!("CARGO_BIN_EXE_mom");
 const WORKER_TOKEN: &str = "test-worker-token";
+const ADMIN_CODE: &str = "AM-TEST-ADMIN";
 static FLEET_TEST_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
 static ADMIN_COOKIES: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+
+fn test_capacity() -> Value {
+    json!({
+        "cpus": 8,
+        "memory_mib": 32768,
+        "max_active_workspaces": 24,
+        "disk_reserve_mib": 1024
+    })
+}
 
 async fn fleet_test_guard() -> OwnedSemaphorePermit {
     FLEET_TEST_SEMAPHORE
@@ -82,13 +92,23 @@ impl Drop for TestFleet {
 }
 
 #[tokio::test]
-async fn first_user_claims_admin_and_existing_users_need_their_own_code() -> Result<()> {
+async fn first_user_needs_bootstrap_code_and_existing_users_need_their_own_code() -> Result<()> {
     let fleet = TestFleet::start().await?;
     let client = reqwest::Client::new();
 
-    let first_response = client
+    let unauthenticated_bootstrap = client
         .post(format!("{}/api/auth/login", fleet.api_url))
         .json(&json!({ "email": "admin@example.com" }))
+        .send()
+        .await?;
+    assert_eq!(unauthenticated_bootstrap.status(), StatusCode::UNAUTHORIZED);
+
+    let first_response = client
+        .post(format!("{}/api/auth/login", fleet.api_url))
+        .json(&json!({
+            "email": "admin@example.com",
+            "access_code": ADMIN_CODE
+        }))
         .send()
         .await?
         .error_for_status()?;
@@ -99,7 +119,7 @@ async fn first_user_claims_admin_and_existing_users_need_their_own_code() -> Res
         .ok_or_else(|| anyhow!("first login did not return user code"))?
         .to_string();
     assert_eq!(first["user"]["role"], "admin");
-    assert!(admin_code.starts_with("AM-"));
+    assert_eq!(admin_code, ADMIN_CODE);
 
     let missing_code = client
         .post(format!("{}/api/auth/login", fleet.api_url))
@@ -811,12 +831,24 @@ async fn node_lifecycle_controls_placement_and_claims() -> Result<()> {
 
     run_mom(fleet.api_state.path(), &["node", "drain", "node-a"])?;
     assert_eq!(node_status(fleet.api_state.path(), "node-a")?, "draining");
-    let start = create_job(&fleet.api_url, "lifecycle", "start").await?;
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    assert_eq!(job_status(&fleet.api_url, &start).await?, "queued");
+    let response = reqwest::Client::new()
+        .post(format!("{}/api/jobs", fleet.api_url))
+        .header(reqwest::header::COOKIE, &cookie)
+        .json(&json!({
+            "workspace_name": "lifecycle",
+            "kind": "start"
+        }))
+        .send()
+        .await?;
+    assert!(
+        !response.status().is_success(),
+        "draining node should reject newly queued assigned jobs"
+    );
 
     run_mom(fleet.api_state.path(), &["node", "uncordon", "node-a"])?;
     assert_eq!(node_status(fleet.api_state.path(), "node-a")?, "ready");
+    wait_for_node_ready_fresh(fleet.api_state.path(), "node-a").await?;
+    let start = create_job(&fleet.api_url, "lifecycle", "start").await?;
     wait_for_job_status(&fleet.api_url, &start, "succeeded").await?;
 
     Ok(())
@@ -903,6 +935,71 @@ async fn worker_register_rejects_unspecified_worker_url() -> Result<()> {
         .send()
         .await?;
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn worker_tokens_are_bound_to_node_identity() -> Result<()> {
+    let _guard = fleet_test_guard().await;
+    let token_dir = tempfile::tempdir()?;
+    let token_a_path = token_dir.path().join("node-a-token");
+    let token_b_path = token_dir.path().join("node-b-token");
+    fs::write(&token_a_path, "token-a")?;
+    fs::write(&token_b_path, "token-b")?;
+    let token_files = format!(
+        "node-a={},node-b={}",
+        token_a_path.display(),
+        token_b_path.display()
+    );
+    let fleet = TestFleet::start_with_api_env(&[("MOM_WORKER_TOKEN_FILES", &token_files)]).await?;
+    let client = reqwest::Client::new();
+
+    client
+        .post(format!("{}/worker/register", fleet.api_url))
+        .bearer_auth("token-a")
+        .json(&json!({
+            "node_id": "node-a",
+            "capacity": test_capacity(),
+            "worker_url": "http://100.64.0.42:9090"
+        }))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let spoofed_register = client
+        .post(format!("{}/worker/register", fleet.api_url))
+        .bearer_auth("token-a")
+        .json(&json!({
+            "node_id": "node-b",
+            "capacity": test_capacity(),
+            "worker_url": "http://100.64.0.43:9090"
+        }))
+        .send()
+        .await?;
+    assert_eq!(spoofed_register.status(), StatusCode::UNAUTHORIZED);
+
+    let spoofed_query = client
+        .get(format!(
+            "{}/worker/workspaces?node_id=node-a",
+            fleet.api_url
+        ))
+        .bearer_auth("token-b")
+        .send()
+        .await?;
+    assert_eq!(spoofed_query.status(), StatusCode::UNAUTHORIZED);
+
+    client
+        .post(format!("{}/worker/register", fleet.api_url))
+        .bearer_auth("token-b")
+        .json(&json!({
+            "node_id": "node-b",
+            "capacity": test_capacity(),
+            "worker_url": "http://100.64.0.43:9090"
+        }))
+        .send()
+        .await?
+        .error_for_status()?;
 
     Ok(())
 }
@@ -1176,6 +1273,8 @@ fn spawn_api(state_dir: &Path, bind: &str, envs: &[(&str, &str)]) -> Result<Chil
             "schema_version": 1,
             "auth": {
                 "secret": "test-auth-secret"
+                ,
+                "bootstrap_admin_code": ADMIN_CODE
             }
         }))?,
     )
@@ -1375,6 +1474,13 @@ async fn wait_for_node(api_state: &Path, node: &str) -> Result<()> {
     .await
 }
 
+async fn wait_for_node_ready_fresh(api_state: &Path, node: &str) -> Result<()> {
+    wait_until(&format!("node {node} fresh ready"), || async {
+        node_ready_fresh(api_state, node).unwrap_or(false)
+    })
+    .await
+}
+
 fn node_exists(api_state: &Path, node: &str) -> Result<bool> {
     let db_path = api_state.join("fleet.db");
     if !db_path.exists() {
@@ -1387,6 +1493,23 @@ fn node_exists(api_state: &Path, node: &str) -> Result<bool> {
         |row| row.get(0),
     )?;
     Ok(count > 0)
+}
+
+fn node_ready_fresh(api_state: &Path, node: &str) -> Result<bool> {
+    let db_path = api_state.join("fleet.db");
+    if !db_path.exists() {
+        return Ok(false);
+    }
+    let db = Connection::open(db_path)?;
+    let now = now_epoch()?;
+    Ok(db
+        .query_row(
+            "SELECT last_seen_at FROM nodes WHERE node_id = ?1 AND status = 'ready'",
+            [node],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .is_some_and(|last_seen| now.saturating_sub(last_seen) <= 60))
 }
 
 fn insert_node(api_state: &Path, node: &str, last_seen_at: i64) -> Result<()> {
@@ -1637,7 +1760,8 @@ async fn admin_login(client: &reqwest::Client, api_url: &str) -> Result<String> 
     let response = client
         .post(format!("{api_url}/api/auth/login"))
         .json(&json!({
-            "email": "admin@example.com"
+            "email": "admin@example.com",
+            "access_code": ADMIN_CODE
         }))
         .send()
         .await?;
