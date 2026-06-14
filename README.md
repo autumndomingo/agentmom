@@ -242,7 +242,7 @@ export AGENTMOM_REAL_ALLOW_BACKUP=1
 export AGENTMOM_REAL_ALLOW_CATALOG_BACKUP=1
 export AGENTMOM_REAL_API_SSH_HOST=mom-ctrl
 export AGENTMOM_REAL_ADMIN_EMAIL=you@example.com
-export AGENTMOM_REAL_ADMIN_CODE="$(ssh mom-ctrl 'cat /run/agenix/agentmom-bootstrap-admin-code')"
+export AGENTMOM_REAL_ADMIN_CODE="$(ssh mom-ctrl 'sudo cat /run/agenix/agentmom-bootstrap-admin-code')"
 just real-fleet-test-prod-mutating
 ```
 

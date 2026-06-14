@@ -23,9 +23,9 @@ real-fleet-test-mutating:
     cargo test --test real_fleet -- --ignored --test-threads=1
 
 real-fleet-test-prod:
-    AGENTMOM_REAL_NODE_A=mom-1 AGENTMOM_REAL_WORKER_TOKEN="$$(ssh mom-ctrl 'cat /run/agenix/agentmom-worker-token-mom-1')" just real-fleet-test
-    AGENTMOM_REAL_NODE_A=mom-2 AGENTMOM_REAL_WORKER_TOKEN="$$(ssh mom-ctrl 'cat /run/agenix/agentmom-worker-token-mom-2')" just real-fleet-test
+    AGENTMOM_REAL_NODE_A=mom-1 AGENTMOM_REAL_WORKER_TOKEN="$(ssh mom-ctrl 'sudo cat /run/agenix/agentmom-worker-token-mom-1')" just real-fleet-test
+    AGENTMOM_REAL_NODE_A=mom-2 AGENTMOM_REAL_WORKER_TOKEN="$(ssh mom-ctrl 'sudo cat /run/agenix/agentmom-worker-token-mom-2')" just real-fleet-test
 
 real-fleet-test-prod-mutating:
-    AGENTMOM_REAL_NODE_A=mom-1 AGENTMOM_REAL_WORKER_TOKEN="$$(ssh mom-ctrl 'cat /run/agenix/agentmom-worker-token-mom-1')" just real-fleet-test-mutating
-    AGENTMOM_REAL_NODE_A=mom-2 AGENTMOM_REAL_WORKER_TOKEN="$$(ssh mom-ctrl 'cat /run/agenix/agentmom-worker-token-mom-2')" just real-fleet-test-mutating
+    AGENTMOM_REAL_NODE_A=mom-1 AGENTMOM_REAL_WORKER_TOKEN="$(ssh mom-ctrl 'sudo cat /run/agenix/agentmom-worker-token-mom-1')" just real-fleet-test-mutating
+    AGENTMOM_REAL_NODE_A=mom-2 AGENTMOM_REAL_WORKER_TOKEN="$(ssh mom-ctrl 'sudo cat /run/agenix/agentmom-worker-token-mom-2')" just real-fleet-test-mutating
