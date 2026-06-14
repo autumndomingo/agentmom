@@ -1512,6 +1512,8 @@ mod tests {
         assert!(template.contains("writeShellScriptBin \"agentmom-hermes-dashboard\""));
         assert!(template.contains("writeShellScriptBin \"agentmom-hermes-dashboard-start\""));
         assert!(template.contains("systemd.services.agentmom-hermes-dashboard"));
+        assert!(template.contains("HERMES_DASHBOARD_SESSION_TOKEN=agentmom-dashboard"));
+        assert!(template.contains("X-Hermes-Session-Token: agentmom-dashboard"));
         assert!(
             template.contains(
                 "ExecStart = \"${agentmomHermesDashboard}/bin/agentmom-hermes-dashboard\""

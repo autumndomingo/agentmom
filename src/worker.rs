@@ -427,6 +427,7 @@ async fn worker_hermes_sessions(
         .api
         .client
         .get(url)
+        .header("X-Hermes-Session-Token", HERMES_DASHBOARD_SESSION_TOKEN)
         .send()
         .await
         .map_err(|error| ApiError::Anyhow(error.into()))?;

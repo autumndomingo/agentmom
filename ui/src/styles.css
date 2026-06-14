@@ -625,6 +625,7 @@ input:disabled {
   font-weight: 650;
 }
 
+.headerMeta,
 .acpStatus {
   display: block;
   margin-top: 5px;
@@ -633,10 +634,12 @@ input:disabled {
   font-weight: 750;
 }
 
+.headerMeta.ready,
 .acpStatus.ready {
   color: var(--mint);
 }
 
+.headerMeta.failed,
 .acpStatus.failed,
 .acpStatus.exited {
   color: #ffb1a6;
@@ -1049,6 +1052,11 @@ input:disabled {
 
 .composer .sendButton {
   background: var(--accent);
+  color: #0a0a0b;
+}
+
+.composer .stopButton {
+  background: #f4f4f5;
   color: #0a0a0b;
 }
 
@@ -1884,9 +1892,11 @@ body {
 }
 
 .tuiPage {
-  min-height: 100vh;
+  height: 100dvh;
+  min-height: 0;
   display: grid;
   grid-template-columns: 312px minmax(0, 1fr);
+  overflow: hidden;
   background:
     linear-gradient(rgb(255 255 255 / 2.4%) 1px, transparent 1px),
     linear-gradient(90deg, rgb(255 255 255 / 2.4%) 1px, transparent 1px),
@@ -1899,11 +1909,13 @@ body {
 
 .tuiSidebar {
   min-width: 0;
+  min-height: 0;
   padding: 22px 18px;
   border-right: 1px solid rgb(247 243 234 / 12%);
   display: grid;
   align-content: start;
   gap: 18px;
+  overflow: hidden;
   background:
     linear-gradient(180deg, rgb(255 255 255 / 4%), transparent 32%),
     rgb(8 8 10 / 91%);
@@ -1937,8 +1949,10 @@ body {
 
 .tuiSessionList {
   min-width: 0;
+  min-height: 0;
   display: grid;
   gap: 8px;
+  overflow: auto;
 }
 
 .tuiSessionHeader {
@@ -1994,9 +2008,11 @@ body {
 
 .tuiMain {
   min-width: 0;
-  min-height: 100vh;
+  min-height: 0;
+  height: 100%;
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
+  overflow: hidden;
 }
 
 .tuiHeader {
@@ -2009,6 +2025,11 @@ body {
   gap: 16px;
   background: rgb(9 10 11 / 42%);
   backdrop-filter: blur(14px);
+}
+
+.chatHeader.tuiHeader {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
 }
 
 .tuiHeader h1 {
@@ -2037,11 +2058,14 @@ body {
 .tuiTerminal {
   min-width: 0;
   min-height: 0;
+  height: 100%;
   padding: 14px;
   background: #070809;
+  overflow: hidden;
 }
 
 .tuiTerminal .xterm {
+  width: 100%;
   height: 100%;
 }
 
@@ -2083,6 +2107,10 @@ body {
 
 .composer .sendButton {
   background: var(--accent);
+}
+
+.composer .stopButton {
+  background: #f4f4f5;
 }
 
 .composer .sendButton:hover:not(:disabled) {
@@ -2175,6 +2203,7 @@ body {
 
   .tuiPage {
     grid-template-columns: 1fr;
+    grid-template-rows: minmax(0, 40dvh) minmax(0, 1fr);
   }
 
   .tuiSidebar {
@@ -2183,7 +2212,7 @@ body {
   }
 
   .tuiMain {
-    min-height: 75vh;
+    min-height: 0;
   }
 
   .appShell.withPreview {

@@ -10,7 +10,7 @@ import {
   Plus,
   RefreshCcw,
   Send,
-  Sparkles,
+  Square,
   Terminal,
   Trash2,
   Users,
@@ -289,6 +289,31 @@ function WorkspaceSetupPage({ userSession, onSubmit }) {
         </div>
       </section>
     </main>
+  );
+}
+
+function WorkspaceHeader({
+  className = '',
+  title,
+  status,
+  meta = null,
+  metaClassName = 'headerMeta',
+  navTitle = 'Toggle sidebar',
+  onNavClick,
+  children,
+}) {
+  return (
+    <header className={`chatHeader${className ? ` ${className}` : ''}`}>
+      <button className="squareButton" type="button" onClick={onNavClick} title={navTitle} aria-label={navTitle}>
+        <PanelLeft size={20} />
+      </button>
+      <div>
+        <h1>{title}</h1>
+        <p>{status}</p>
+        {meta ? <small className={metaClassName}>{meta}</small> : null}
+      </div>
+      <div className="headerActions">{children}</div>
+    </header>
   );
 }
 
@@ -1209,7 +1234,7 @@ function App({ userSession }) {
   }
 
   async function cancelChat() {
-    if (!selectedWorkspace || !activeChat) return;
+    if (!selectedWorkspace || !activeChat || !activeChatState.session_id) return;
     setChatBusy(true);
     try {
       sendAcpMessage(selectedWorkspace.name, {
@@ -1325,117 +1350,111 @@ function App({ userSession }) {
       </aside>
 
       <section className="chatShell">
-        <header className="chatHeader">
-          <button className="squareButton" title="Toggle sidebar">
-            <PanelLeft size={20} />
-          </button>
-          <div>
-            <h1>{selectedWorkspace ? workspaceDisplayName(selectedWorkspace) : 'Agent workspace'}</h1>
-            <p>
-              {selectedWorkspace
-                ? workspaceWaking
-                  ? 'Starting'
-                  : friendlyStatus(selectedWorkspace.status)
-                : 'Create a workspace to begin.'}
-            </p>
-            {selectedWorkspace && (
-              <small className={`acpStatus ${acp.state}`}>
+        <WorkspaceHeader
+          title={selectedWorkspace ? workspaceDisplayName(selectedWorkspace) : 'Agent workspace'}
+          status={
+            selectedWorkspace
+              ? workspaceWaking
+                ? 'Starting'
+                : friendlyStatus(selectedWorkspace.status)
+              : 'Create a workspace to begin.'
+          }
+          meta={
+            selectedWorkspace ? (
+              <>
                 Hermes ACP: {acp.state}
                 {acp.phase && ` (${acp.phase})`}
-              </small>
-            )}
-          </div>
-          <div className="headerActions">
-            {modelState && (
-              <select
-                className="sessionSelect"
-                value={modelState.currentModelId ?? modelState.current_model_id ?? ''}
-                onChange={(event) => changeModel(event.target.value)}
-                disabled={!chatReady || activeChatState.modelChanging}
-                aria-label="Model"
-              >
-                {availableModels(modelState).map((model) => (
-                  <option key={model.modelId} value={model.modelId}>
-                    {model.name}
-                  </option>
-                ))}
-              </select>
-            )}
-            {modeState && (
-              <select
-                className="sessionSelect"
-                value={modeState.currentModeId ?? modeState.current_mode_id ?? ''}
-                onChange={(event) => changeMode(event.target.value)}
-                disabled={!chatReady || activeChatState.modeChanging}
-                aria-label="Mode"
-              >
-                {availableModes(modeState).map((mode) => (
-                  <option key={mode.modeId} value={mode.modeId}>
-                    {mode.name}
-                  </option>
-                ))}
-              </select>
-            )}
-            {configOptions.map((option) =>
-              option.type === 'boolean' ? (
-                <label className="sessionToggle" key={option.id} title={option.description ?? option.name}>
-                  <input
-                    type="checkbox"
-                    checked={Boolean(option.currentValue ?? option.current_value)}
-                    onChange={(event) => changeConfigOption(option, event.target.checked)}
-                    disabled={!chatReady || activeChatState.configChanging}
-                  />
-                  <span>{option.name ?? option.id}</span>
-                </label>
-              ) : (
-                <select
-                  className="sessionSelect"
-                  key={option.id}
-                  value={option.currentValue ?? option.current_value ?? ''}
-                  onChange={(event) => changeConfigOption(option, event.target.value)}
+              </>
+            ) : null
+          }
+          metaClassName={`acpStatus ${acp.state}`}
+        >
+          {modelState && (
+            <select
+              className="sessionSelect"
+              value={modelState.currentModelId ?? modelState.current_model_id ?? ''}
+              onChange={(event) => changeModel(event.target.value)}
+              disabled={!chatReady || activeChatState.modelChanging}
+              aria-label="Model"
+            >
+              {availableModels(modelState).map((model) => (
+                <option key={model.modelId} value={model.modelId}>
+                  {model.name}
+                </option>
+              ))}
+            </select>
+          )}
+          {modeState && (
+            <select
+              className="sessionSelect"
+              value={modeState.currentModeId ?? modeState.current_mode_id ?? ''}
+              onChange={(event) => changeMode(event.target.value)}
+              disabled={!chatReady || activeChatState.modeChanging}
+              aria-label="Mode"
+            >
+              {availableModes(modeState).map((mode) => (
+                <option key={mode.modeId} value={mode.modeId}>
+                  {mode.name}
+                </option>
+              ))}
+            </select>
+          )}
+          {configOptions.map((option) =>
+            option.type === 'boolean' ? (
+              <label className="sessionToggle" key={option.id} title={option.description ?? option.name}>
+                <input
+                  type="checkbox"
+                  checked={Boolean(option.currentValue ?? option.current_value)}
+                  onChange={(event) => changeConfigOption(option, event.target.checked)}
                   disabled={!chatReady || activeChatState.configChanging}
-                  aria-label={option.name ?? option.id}
-                  title={option.description ?? option.name ?? option.id}
-                >
-                  {configSelectOptions(option).map((choice) => (
-                    <option key={choice.value} value={choice.value}>
-                      {choice.label}
-                    </option>
-                  ))}
-                </select>
-              ),
-            )}
-            {userSession.role === 'admin' && (
-              <button className="refreshButton" type="button" onClick={openAdminPage}>
-                <Users size={17} />
-                Admin
-              </button>
-            )}
-            <button className="refreshButton" onClick={refresh} disabled={busy}>
-              <RefreshCcw size={17} />
-              Refresh
+                />
+                <span>{option.name ?? option.id}</span>
+              </label>
+            ) : (
+              <select
+                className="sessionSelect"
+                key={option.id}
+                value={option.currentValue ?? option.current_value ?? ''}
+                onChange={(event) => changeConfigOption(option, event.target.value)}
+                disabled={!chatReady || activeChatState.configChanging}
+                aria-label={option.name ?? option.id}
+                title={option.description ?? option.name ?? option.id}
+              >
+                {configSelectOptions(option).map((choice) => (
+                  <option key={choice.value} value={choice.value}>
+                    {choice.label}
+                  </option>
+                ))}
+              </select>
+            ),
+          )}
+          {userSession.role === 'admin' && (
+            <button className="refreshButton" type="button" onClick={openAdminPage}>
+              <Users size={17} />
+              Admin
             </button>
-            <button className="refreshButton" onClick={togglePreviewPane} disabled={!selectedWorkspace || busy}>
-              <Monitor size={17} />
-              Preview
-            </button>
-            <button className="refreshButton" onClick={launchHermes} disabled={!selectedWorkspace || !workspaceReady || busy}>
-              <ExternalLink size={17} />
-              Hermes
-            </button>
-            <button className="refreshButton" type="button" onClick={openTuiPage} disabled={!selectedWorkspace || !workspaceReady}>
-              <Terminal size={17} />
-              TUI
-            </button>
-            <button className="refreshButton" onClick={forkChat} disabled={!selectedWorkspace || !workspaceReady || !activeChatState.session_id || chatBusy || !chatReady || !capabilityEnabled(sessionCapabilities, 'fork')}>
-              <GitBranch size={17} />
-              Fork
-            </button>
-            <button className="refreshButton" onClick={cancelChat} disabled={!selectedWorkspace || !workspaceReady || !activeChatState.session_id || !chatBusy}>
-              Cancel
-            </button>
-          </div>
-        </header>
+          )}
+          <button className="refreshButton" onClick={refresh} disabled={busy}>
+            <RefreshCcw size={17} />
+            Refresh
+          </button>
+          <button className="refreshButton" onClick={togglePreviewPane} disabled={!selectedWorkspace || busy}>
+            <Monitor size={17} />
+            Preview
+          </button>
+          <button className="refreshButton" onClick={launchHermes} disabled={!selectedWorkspace || !workspaceReady || busy}>
+            <ExternalLink size={17} />
+            Hermes
+          </button>
+          <button className="refreshButton" type="button" onClick={openTuiPage} disabled={!selectedWorkspace || !workspaceReady}>
+            <Terminal size={17} />
+            TUI
+          </button>
+          <button className="refreshButton" onClick={forkChat} disabled={!selectedWorkspace || !workspaceReady || !activeChatState.session_id || chatBusy || !chatReady || !capabilityEnabled(sessionCapabilities, 'fork')}>
+            <GitBranch size={17} />
+            Fork
+          </button>
+        </WorkspaceHeader>
 
         <div className="chatBody">
           {workspaceError ? (
@@ -1511,9 +1530,22 @@ function App({ userSession }) {
             }
             disabled={!selectedWorkspace || !workspaceReady || !activeChat || chatBusy || !chatReady}
           />
-          <button className="sendButton" disabled={!selectedWorkspace || !workspaceReady || !activeChat || chatBusy || (!chatInput.trim() && !promptAttachments.length) || !chatReady}>
-            {chatBusy ? <Sparkles size={20} /> : <Send size={20} />}
-          </button>
+          {chatBusy ? (
+            <button
+              className="sendButton stopButton"
+              type="button"
+              onClick={cancelChat}
+              disabled={!selectedWorkspace || !workspaceReady || !activeChat || !activeChatState.session_id}
+              title="Stop generating"
+              aria-label="Stop generating"
+            >
+              <Square size={16} fill="currentColor" strokeWidth={2.5} />
+            </button>
+          ) : (
+            <button className="sendButton" disabled={!selectedWorkspace || !workspaceReady || !activeChat || (!chatInput.trim() && !promptAttachments.length) || !chatReady}>
+              <Send size={20} />
+            </button>
+          )}
         </form>
       </section>
 
@@ -1682,6 +1714,31 @@ function TuiPage({ userSession }) {
     setTerminalKey((current) => current + 1);
   }
 
+  function openAdminPage() {
+    window.location.href = '/admin';
+  }
+
+  async function launchHermes() {
+    if (!selectedWorkspace) return;
+
+    setBusy(true);
+    setError('');
+    try {
+      const result = await apiRequest(`/workspaces/${encodeURIComponent(selectedWorkspace.name)}/hermes-ui`, {
+        method: 'POST',
+      });
+      const url = launchUrlFromResult(result);
+      if (url) {
+        window.open(url, '_blank', 'noopener,noreferrer');
+      }
+      await refreshWorkspaces();
+    } catch (launchError) {
+      setError(formatError(launchError));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function backToChat() {
     window.location.href = '/';
   }
@@ -1740,16 +1797,30 @@ function TuiPage({ userSession }) {
       </aside>
 
       <section className="tuiMain">
-        <header className="tuiHeader">
-          <div>
-            <h1>{selectedWorkspace ? workspaceDisplayName(selectedWorkspace) : 'Hermes TUI'}</h1>
-            <p>{selectedWorkspace ? friendlyStatus(selectedWorkspace.status) : 'No workspace selected'}</p>
-          </div>
+        <WorkspaceHeader
+          className="tuiHeader"
+          navTitle="Back to chat"
+          onNavClick={backToChat}
+          title={selectedWorkspace ? workspaceDisplayName(selectedWorkspace) : 'Hermes TUI'}
+          status={selectedWorkspace ? friendlyStatus(selectedWorkspace.status) : 'No workspace selected'}
+          meta={activeSessionId ? `Hermes TUI: resuming ${activeSessionId.slice(0, 8)}` : 'Hermes TUI: new session'}
+          metaClassName="headerMeta ready"
+        >
+          {userSession.role === 'admin' && (
+            <button className="refreshButton" type="button" onClick={openAdminPage}>
+              <Users size={17} />
+              Admin
+            </button>
+          )}
+          <button className="refreshButton" type="button" onClick={launchHermes} disabled={!selectedWorkspace || busy}>
+            <ExternalLink size={17} />
+            Hermes
+          </button>
           <button className="refreshButton" type="button" onClick={backToChat}>
             <MessageSquare size={17} />
-            Chat
+            ACP
           </button>
-        </header>
+        </WorkspaceHeader>
         {error ? <div className="tuiError">{error}</div> : null}
         {selectedWorkspace ? (
           <TerminalPane
@@ -1772,13 +1843,44 @@ function TerminalPane({ workspaceName, sessionId }) {
   const containerRef = useRef(null);
 
   useEffect(() => {
-    if (!containerRef.current) return undefined;
+    const host = containerRef.current;
+    if (!host) return undefined;
     let cancelled = false;
     let terminal = null;
     let socket = null;
     let dataDisposable = null;
     let resizeDisposable = null;
+    let resizeObserver = null;
+    let fitFrame = 0;
     let fit = null;
+    let lastCols = 0;
+    let lastRows = 0;
+
+    const sendResize = () => {
+      if (!terminal || !socket || socket.readyState !== WebSocket.OPEN) return;
+      if (terminal.cols === lastCols && terminal.rows === lastRows) return;
+      lastCols = terminal.cols;
+      lastRows = terminal.rows;
+      socket.send(`\x1b[RESIZE:${terminal.cols}x${terminal.rows}]`);
+    };
+
+    const fitTerminal = () => {
+      if (!host.isConnected || host.clientWidth <= 0 || host.clientHeight <= 0 || !fit) return;
+      try {
+        fit.fit();
+        sendResize();
+      } catch {
+        // xterm can throw while layout is settling; the next observer tick retries.
+      }
+    };
+
+    const scheduleFit = () => {
+      if (fitFrame) return;
+      fitFrame = requestAnimationFrame(() => {
+        fitFrame = 0;
+        fitTerminal();
+      });
+    };
 
     async function startTerminal() {
       const [{ Terminal: LazyXTerm }, { FitAddon }] = await Promise.all([
@@ -1800,15 +1902,18 @@ function TerminalPane({ workspaceName, sessionId }) {
       });
       fit = new FitAddon();
       terminal.loadAddon(fit);
-      terminal.open(containerRef.current);
-      fit.fit();
+      terminal.open(host);
+      resizeObserver = new ResizeObserver(scheduleFit);
+      resizeObserver.observe(host);
+      scheduleFit();
       terminal.focus();
       terminal.writeln('Connecting to Hermes TUI...');
 
       socket = new WebSocket(tuiWsUrl(workspaceName, sessionId));
       socket.binaryType = 'arraybuffer';
+      const sgrMouse = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/;
       dataDisposable = terminal.onData((data) => {
-        if (socket?.readyState === WebSocket.OPEN) {
+        if (socket?.readyState === WebSocket.OPEN && !sgrMouse.test(data)) {
           socket.send(data);
         }
       });
@@ -1820,7 +1925,7 @@ function TerminalPane({ workspaceName, sessionId }) {
 
       socket.onopen = () => {
         terminal?.write('\r\n');
-        fit?.fit();
+        fitTerminal();
       };
       socket.onmessage = (event) => {
         if (typeof event.data === 'string') {
@@ -1849,11 +1954,13 @@ function TerminalPane({ workspaceName, sessionId }) {
       }
     });
 
-    const onResize = () => fit?.fit();
+    const onResize = scheduleFit;
     window.addEventListener('resize', onResize);
     return () => {
       cancelled = true;
       window.removeEventListener('resize', onResize);
+      resizeObserver?.disconnect();
+      if (fitFrame) cancelAnimationFrame(fitFrame);
       dataDisposable?.dispose();
       resizeDisposable?.dispose();
       socket?.close();

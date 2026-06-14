@@ -54,19 +54,21 @@ let
       exit 1
     fi
     export HERMES_WEB_DIST="$hermes_web_dist"
+    export HERMES_DASHBOARD_SESSION_TOKEN=agentmom-dashboard
     exec hermes dashboard --host 0.0.0.0 --port "$port" --no-open --insecure --skip-build
   '';
   agentmomHermesDashboardStart = pkgs.writeShellScriptBin "agentmom-hermes-dashboard-start" ''
     set -e
     port=9119
-    health_path=/api/status
     probe_hermes_dashboard() {
-      timeout 2s wget -q -O /dev/null --timeout=1 "http://127.0.0.1:$port$health_path" >/dev/null 2>&1
+      timeout 2s wget -q -O /dev/null --timeout=1 \
+        --header "X-Hermes-Session-Token: agentmom-dashboard" \
+        "http://127.0.0.1:$port/api/sessions?limit=1" >/dev/null 2>&1
     }
     if probe_hermes_dashboard; then
       exit 0
     fi
-    systemctl start agentmom-hermes-dashboard.service
+    systemctl restart agentmom-hermes-dashboard.service
     for _ in $(seq 1 90); do
       if probe_hermes_dashboard; then
         exit 0
