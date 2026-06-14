@@ -8,6 +8,9 @@ let
       hermesAgentPackage pkgs
     else
       pkgs.hermes-agent or (throw "Agent Mom guests require a hermes-agent package");
+  agentmomHermesBundledPlugins = pkgs.runCommand "agentmom-hermes-bundled-plugins" { } ''
+    mkdir -p "$out"
+  '';
   agentmomRun = pkgs.writeShellScriptBin "agentmom-run" ''
     set -e
     if [ "''${1:-}" = "--" ]; then
@@ -92,6 +95,7 @@ let
     HOME = "/root";
     HERMES_HOME = hermesHome;
     CODEX_HOME = "/root/.codex";
+    HERMES_BUNDLED_PLUGINS = "${agentmomHermesBundledPlugins}";
     HERMES_DASHBOARD_SESSION_TOKEN = "agentmom-dashboard";
   } // lib.optionalAttrs (spec.credential_proxy_url != null) {
     HTTP_PROXY = spec.credential_proxy_url;
@@ -123,12 +127,72 @@ let
     approvals:
       mode: off
     toolsets:
-      - all
+      - terminal
+      - file
+      - code_execution
+      - skills
+      - todo
+      - session_search
+      - clarify
+      - delegation
+    platform_toolsets:
+      cli:
+        - terminal
+        - file
+        - code_execution
+        - skills
+        - todo
+        - session_search
+        - clarify
+        - delegation
+      acp:
+        - terminal
+        - file
+        - code_execution
+        - skills
+        - todo
+        - session_search
+        - delegation
+      api_server:
+        - terminal
+        - file
+        - code_execution
+        - skills
+        - todo
+        - session_search
+        - delegation
+    agent:
+      coding_context: focus
+      disabled_toolsets:
+        - web
+        - browser
+        - vision
+        - image_gen
+        - video
+        - video_gen
+        - tts
+        - memory
+        - messaging
+        - cronjob
+        - homeassistant
+        - spotify
+        - discord
+        - discord_admin
+        - x_search
+        - computer_use
+        - moa
+    plugins:
+      enabled: []
+      disabled: []
+    mcp_servers: {}
+    security:
+      allow_lazy_installs: false
     env:
       HTTP_PROXY: ${spec.credential_proxy_url}
       HTTPS_PROXY: ${spec.credential_proxy_url}
       ALL_PROXY: ${spec.credential_proxy_url}
       OPENROUTER_API_KEY: agentmom-proxy
+      HERMES_BUNDLED_PLUGINS: ${agentmomHermesBundledPlugins}
       NODE_EXTRA_CA_CERTS: /usr/local/share/ca-certificates/agentmom-proxy.crt
       REQUESTS_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
       SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
@@ -252,6 +316,8 @@ in
   environment.etc."profile.d/mom.sh".text = ''
     export HERMES_HOME=${hermesHome}
     export CODEX_HOME=/root/.codex
+    export HERMES_BUNDLED_PLUGINS=${agentmomHermesBundledPlugins}
+    export MOM_WORKSPACE_NAME=${spec.workspace_name}
   '';
 
   systemd.tmpfiles.rules = [
@@ -292,6 +358,15 @@ ${hermesConfig}
 EOF
     cat > ${hermesHome}/SOUL.md <<'EOF'
 You are running inside an isolated Agent Mom microvm.nix VM. Work in /workspace.
+
+If you start a web app or dev server, report the preview target to Agent Mom after
+the server is listening:
+
+  mom workspace preview register "$MOM_WORKSPACE_NAME" --preview web --port <port>
+
+Include --host if the app only listens on a non-default interface, and --path for
+a non-root path. This is a host-side Agent Mom command, so ask the outer Agent
+Mom session to run it rather than running it inside the VM.
 EOF
     cat > /root/.config/opencode/opencode.json <<'EOF'
 {"provider":"openrouter","model":"${spec.hermes_model}"}

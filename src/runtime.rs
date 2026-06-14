@@ -1525,6 +1525,7 @@ mod tests {
     fn microvm_template_installs_agentmom_run_and_uses_hermes_model_schema() {
         let template = microvm_workspace_nix();
 
+        assert!(template.contains("export MOM_WORKSPACE_NAME=${spec.workspace_name}"));
         assert!(template.contains("writeShellScriptBin \"agentmom-run\""));
         assert!(template.contains("writeShellScriptBin \"agentmom-hermes\""));
         assert!(template.contains("writeShellScriptBin \"agentmom-hermes-acp\""));
@@ -1557,6 +1558,17 @@ mod tests {
         assert!(template.contains("before = [ \"sshd.service\" ];"));
         assert!(!template.contains("after = [ \"sshd-keygen.service\" ];"));
         assert!(!template.contains("requires = [ \"sshd-keygen.service\" ];"));
+    }
+
+    #[test]
+    fn microvm_template_tells_agents_to_register_previews() {
+        let template = microvm_workspace_nix();
+
+        assert!(template.contains("report the preview target to Agent Mom"));
+        assert!(template.contains(
+            "mom workspace preview register \"$MOM_WORKSPACE_NAME\" --preview web --port <port>"
+        ));
+        assert!(template.contains("This is a host-side Agent Mom command"));
     }
 
     #[test]

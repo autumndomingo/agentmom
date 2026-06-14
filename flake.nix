@@ -111,6 +111,7 @@
             lsof
             openssh
             rsync
+            sqlite
             vim
           ];
 
