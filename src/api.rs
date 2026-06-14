@@ -336,6 +336,7 @@ async fn api_worker_claim(
     Ok(Json(claim_job(
         &request.node_id,
         request.pressure.capacity_ok,
+        request.pressure.disk_ok,
     )?))
 }
 

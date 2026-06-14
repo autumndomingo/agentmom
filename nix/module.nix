@@ -627,12 +627,12 @@ in
           options = {
             from = lib.mkOption {
               type = lib.types.port;
-              default = 32768;
+              default = 41000;
               description = "First TCP port Agent Mom may use for worker service tunnels.";
             };
             to = lib.mkOption {
               type = lib.types.port;
-              default = 60999;
+              default = 41999;
               description = "Last TCP port Agent Mom may use for worker service tunnels.";
             };
           };
@@ -861,7 +861,7 @@ in
       })
     ];
 
-    networking.nat = lib.mkIf cfg.microvm.enable {
+    networking.nat = lib.mkIf (cfg.microvm.enable && !cfg.credentialProxy.enable) {
       enable = true;
       externalInterface = cfg.microvm.externalInterface;
       internalInterfaces = [ cfg.microvm.bridge ];

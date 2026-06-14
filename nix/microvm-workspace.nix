@@ -80,6 +80,15 @@ in
         socket = "/run/agentmom-${spec.name}-workspace-virtiofs.sock";
         cache = "never";
       }
+      {
+        proto = "virtiofs";
+        tag = "agentmom-secrets";
+        source = spec.ssh_host_key_dir;
+        mountPoint = "/run/agentmom-secrets";
+        socket = "/run/agentmom-${spec.name}-secrets-virtiofs.sock";
+        readOnly = true;
+        cache = "never";
+      }
     ];
     socket = "control.socket";
     binScripts.tap-up = lib.mkAfter ''
@@ -182,6 +191,12 @@ EOF
     enable = true;
     startWhenNeeded = false;
     openFirewall = false;
+    hostKeys = [
+      {
+        path = "/etc/ssh/ssh_host_ed25519_key";
+        type = "ed25519";
+      }
+    ];
     listenAddresses = [
       {
         addr = "0.0.0.0";
@@ -194,5 +209,24 @@ EOF
       PermitRootLogin = "yes";
       UsePAM = false;
     };
+  };
+  systemd.services.agentmom-ssh-host-key = {
+    description = "Install Agent Mom pinned SSH host key";
+    before = [ "sshd.service" ];
+    requiredBy = [ "sshd.service" ];
+    requiresMountsFor = [ "/run/agentmom-secrets" ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+    };
+    script = ''
+      ${lib.getExe' pkgs.coreutils "install"} -d -m 0755 /etc/ssh
+      ${lib.getExe' pkgs.coreutils "install"} -m 0600 /run/agentmom-secrets/ssh_host_ed25519_key /etc/ssh/ssh_host_ed25519_key
+      ${lib.getExe' pkgs.coreutils "install"} -m 0644 /run/agentmom-secrets/ssh_host_ed25519_key.pub /etc/ssh/ssh_host_ed25519_key.pub
+    '';
+  };
+  systemd.services.sshd = {
+    after = [ "agentmom-ssh-host-key.service" ];
+    requires = [ "agentmom-ssh-host-key.service" ];
   };
 }

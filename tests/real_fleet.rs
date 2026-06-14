@@ -146,6 +146,22 @@ async fn real_create_workspace_and_run_marker_job() -> Result<()> {
             output.contains(&marker),
             "execute output should contain marker {marker:?}, got {output:?}"
         );
+        let hermes_bins = fleet
+            .execute(
+                &workspace,
+                "set -eu\ncommand -v hermes\ncommand -v hermes-acp\nhermes --help >/dev/null"
+                    .to_string(),
+            )
+            .await?;
+        assert!(
+            hermes_bins.contains("hermes") && hermes_bins.contains("hermes-acp"),
+            "Hermes binaries should be present in the guest, got {hermes_bins:?}"
+        );
+        let hermes_url = fleet.open_hermes_ui(&workspace).await?;
+        assert!(
+            hermes_url.starts_with("http://") || hermes_url.starts_with("https://"),
+            "Hermes UI open should return a URL, got {hermes_url:?}"
+        );
         Ok(())
     }
     .await;
@@ -301,7 +317,7 @@ impl RealFleet {
             })
             .transpose()?;
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(360))
             .build()?;
         Ok(Self {
             client,
@@ -437,6 +453,27 @@ impl RealFleet {
             .await?;
         let job = self.wait_for_job_status(&execute, "succeeded").await?;
         Ok(job_output_text(&job))
+    }
+
+    async fn open_hermes_ui(&self, workspace: &str) -> Result<String> {
+        let response = self
+            .admin_request(self.client.post(format!(
+                "{}/api/workspaces/{workspace}/hermes-ui",
+                self.api_url
+            )))
+            .await?
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        response
+            .get("stdout")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .map(ToString::to_string)
+            .ok_or_else(|| anyhow!("Hermes UI response did not include stdout URL: {response}"))
     }
 
     async fn finish_with_cleanup<T>(&self, workspace: &str, result: Result<T>) -> Result<T> {

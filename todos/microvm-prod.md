@@ -89,6 +89,16 @@ Keep the first production runtime narrow: Cloud Hypervisor, `/24` guest network,
 - [x] Run ninth predeploy review before the next prod deploy.
 - [x] Fix ninth-review findings: require Hermes in generated guest flakes, prove SSH before reconcile marks VMs running, retry incomplete stopped/removed desired states, recover interrupted restore swaps, enforce CPU/memory placement and claim projections, declare service tunnel port/firewall wiring, align UI wait timeouts with cold-start limits, and include root-cause errors in structured worker logs.
 
+## Tenth Review Before Deploy
+
+- [x] Fix tenth-review deploy blockers from subagent review.
+- [x] Let stopped restore/recovery jobs claim without active-runner capacity.
+- [x] Preserve remove-directory cleanup intent across interrupted removes.
+- [x] Make service tunnel reservation/probing use the actual bind host safely.
+- [x] Pin guest SSH host identity per VM instead of disabling host-key checks.
+- [x] Add Hermes/tunnel prod-gate coverage and update docs/config hygiene.
+- [x] Re-run local Rust/Nix validation before any deploy decision.
+
 ## Fast Start Notes
 
 - Prod cold starts are dominated by per-workspace Nix build and `microvm-store-disk.erofs`, not by the guest reaching multi-user after the runner starts.

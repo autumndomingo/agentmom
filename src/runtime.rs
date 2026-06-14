@@ -159,6 +159,8 @@ impl GuestVm {
             .args(ssh_common_args(&self.name, &spec)?)
             .args([
                 "-N",
+                "-o",
+                "ExitOnForwardFailure=yes",
                 "-L",
                 &format!("{bind_host}:{host_port}:127.0.0.1:{guest_port}"),
             ])
@@ -204,6 +206,10 @@ struct MicrovmSpec {
     microvm_input_url: String,
     hermes_agent_input_url: String,
     ssh_public_key: String,
+    #[serde(default)]
+    ssh_host_public_key: String,
+    #[serde(default)]
+    ssh_host_key_dir: String,
     labels: HashMap<String, String>,
 }
 
@@ -223,7 +229,14 @@ pub(crate) async fn create_vm(request: WorkspaceVmRequest) -> Result<()> {
     let dir = machine_dir(&name)?;
     fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let ssh_public_key = generate_ssh_keypair(&dir, &name).await?;
-    let spec = microvm_spec(&request, &config, ssh_public_key)?;
+    let (ssh_host_public_key, ssh_host_key_dir) = ensure_ssh_host_keypair(&dir, &name).await?;
+    let spec = microvm_spec(
+        &request,
+        &config,
+        ssh_public_key,
+        ssh_host_public_key,
+        ssh_host_key_dir,
+    )?;
     fs::create_dir_all(&spec.workspace_dir)
         .with_context(|| format!("create workspace dir {}", spec.workspace_dir))?;
 
@@ -543,11 +556,13 @@ fn refresh_vm_definition(name: &str) -> Result<()> {
     let dir = machine_dir(name)?;
     let mut spec = load_microvm_spec(name)?;
     validate_workspace_source(name, &spec)?;
+    ensure_spec_ssh_host_identity(&dir, name, &mut spec)?;
     apply_current_microvm_config(&mut spec, &config)?;
     write_vm_definition(&dir, &spec, &config)
 }
 
 fn write_vm_definition(dir: &Path, spec: &MicrovmSpec, config: &MomConfig) -> Result<()> {
+    validate_ssh_host_identity(spec)?;
     if let Some(ca_path) = &config.credentials.proxy_ca_path {
         sync_proxy_ca_file(dir, ca_path)?;
     }
@@ -561,6 +576,7 @@ fn write_vm_definition(dir: &Path, spec: &MicrovmSpec, config: &MomConfig) -> Re
         hermes_agent_package_nix().as_bytes(),
     )?;
     write_file_if_changed(&dir.join("flake.nix"), microvm_flake_nix(spec)?.as_bytes())?;
+    write_file_if_changed(&dir.join("known_hosts"), known_hosts_entry(spec).as_bytes())?;
     if config.credentials.proxy_ca_path.is_none() {
         remove_file_if_exists(&dir.join("agentmom-proxy.crt"))?;
     }
@@ -679,6 +695,8 @@ fn microvm_spec(
     request: &WorkspaceVmRequest,
     config: &MomConfig,
     ssh_public_key: String,
+    ssh_host_public_key: String,
+    ssh_host_key_dir: String,
 ) -> Result<MicrovmSpec> {
     let workspace_dir = workspace_dir_path(&request.workspace_dir_name)?;
     let index = allocate_machine_index(&request.name)?;
@@ -712,6 +730,8 @@ fn microvm_spec(
         microvm_input_url: String::new(),
         hermes_agent_input_url: String::new(),
         ssh_public_key,
+        ssh_host_public_key,
+        ssh_host_key_dir,
         labels,
     };
     apply_current_microvm_config(&mut spec, config)?;
@@ -793,6 +813,91 @@ async fn generate_ssh_keypair(dir: &Path, name: &str) -> Result<String> {
     let key = fs::read_to_string(&public_key)
         .with_context(|| format!("read SSH public key {}", public_key.display()))?;
     Ok(key.trim().to_string())
+}
+
+async fn ensure_ssh_host_keypair(dir: &Path, name: &str) -> Result<(String, String)> {
+    let host_key_dir = dir.join("guest-ssh");
+    fs::create_dir_all(&host_key_dir)
+        .with_context(|| format!("create {}", host_key_dir.display()))?;
+    let private_key = host_key_dir.join("ssh_host_ed25519_key");
+    let public_key = host_key_dir.join("ssh_host_ed25519_key.pub");
+    if !private_key.exists() || !public_key.exists() {
+        let status = TokioCommand::new("ssh-keygen")
+            .args([
+                "-t",
+                "ed25519",
+                "-N",
+                "",
+                "-C",
+                &format!("agentmom-microvm-host-{name}"),
+                "-f",
+                private_key.to_str().ok_or_else(|| {
+                    anyhow!("non-UTF-8 SSH host key path {}", private_key.display())
+                })?,
+            ])
+            .stdin(Stdio::null())
+            .status()
+            .await
+            .with_context(|| format!("generate SSH host key {}", private_key.display()))?;
+        if !status.success() {
+            bail!("ssh-keygen exited with {status}");
+        }
+    }
+    let key = fs::read_to_string(&public_key)
+        .with_context(|| format!("read SSH host public key {}", public_key.display()))?;
+    Ok((key.trim().to_string(), host_key_dir.display().to_string()))
+}
+
+fn ensure_spec_ssh_host_identity(dir: &Path, name: &str, spec: &mut MicrovmSpec) -> Result<()> {
+    if !spec.ssh_host_public_key.trim().is_empty() && !spec.ssh_host_key_dir.trim().is_empty() {
+        return Ok(());
+    }
+    let host_key_dir = dir.join("guest-ssh");
+    fs::create_dir_all(&host_key_dir)
+        .with_context(|| format!("create {}", host_key_dir.display()))?;
+    let private_key = host_key_dir.join("ssh_host_ed25519_key");
+    let public_key = host_key_dir.join("ssh_host_ed25519_key.pub");
+    if !private_key.exists() || !public_key.exists() {
+        let status = std::process::Command::new("ssh-keygen")
+            .args([
+                "-t",
+                "ed25519",
+                "-N",
+                "",
+                "-C",
+                &format!("agentmom-microvm-host-{name}"),
+                "-f",
+                private_key.to_str().ok_or_else(|| {
+                    anyhow!("non-UTF-8 SSH host key path {}", private_key.display())
+                })?,
+            ])
+            .stdin(std::process::Stdio::null())
+            .status()
+            .with_context(|| format!("generate SSH host key {}", private_key.display()))?;
+        if !status.success() {
+            bail!("ssh-keygen exited with {status}");
+        }
+    }
+    spec.ssh_host_public_key = fs::read_to_string(&public_key)
+        .with_context(|| format!("read SSH host public key {}", public_key.display()))?
+        .trim()
+        .to_string();
+    spec.ssh_host_key_dir = host_key_dir.display().to_string();
+    Ok(())
+}
+
+fn validate_ssh_host_identity(spec: &MicrovmSpec) -> Result<()> {
+    if spec.ssh_host_public_key.trim().is_empty() {
+        bail!("microVM spec {} is missing ssh_host_public_key", spec.name);
+    }
+    if spec.ssh_host_key_dir.trim().is_empty() {
+        bail!("microVM spec {} is missing ssh_host_key_dir", spec.name);
+    }
+    Ok(())
+}
+
+fn known_hosts_entry(spec: &MicrovmSpec) -> String {
+    format!("{} {}\n", spec.guest_ip, spec.ssh_host_public_key.trim())
 }
 
 fn acquire_machine_state_lock() -> Result<MachineStateLock> {
@@ -1020,10 +1125,14 @@ async fn ensure_probe_runner_builds(config: &MomConfig) -> Result<()> {
         workspace_dir_name: "host-check".to_string(),
         workspace_quota_mib: 1,
     };
+    let (ssh_host_public_key, ssh_host_key_dir) =
+        ensure_ssh_host_keypair(&dir, &request.name).await?;
     let spec = microvm_spec(
         &request,
         config,
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKf2probehostcheck agentmom-host-check".to_string(),
+        ssh_host_public_key,
+        ssh_host_key_dir,
     )?;
     fs::create_dir_all(&spec.workspace_dir)
         .with_context(|| format!("create host-check workspace dir {}", spec.workspace_dir))?;
@@ -1181,9 +1290,14 @@ async fn run_ssh_shell(
 }
 
 fn ssh_common_args(name: &str, _spec: &MicrovmSpec) -> Result<Vec<String>> {
-    let private_key = machine_dir(name)?.join("ssh_ed25519");
+    let dir = machine_dir(name)?;
+    let private_key = dir.join("ssh_ed25519");
     if !private_key.exists() {
         bail!("missing SSH private key {}", private_key.display());
+    }
+    let known_hosts = dir.join("known_hosts");
+    if !known_hosts.exists() {
+        bail!("missing SSH known_hosts {}", known_hosts.display());
     }
     Ok(vec![
         "-F".to_string(),
@@ -1201,9 +1315,9 @@ fn ssh_common_args(name: &str, _spec: &MicrovmSpec) -> Result<Vec<String>> {
         "-o".to_string(),
         "LogLevel=ERROR".to_string(),
         "-o".to_string(),
-        "StrictHostKeyChecking=no".to_string(),
+        "StrictHostKeyChecking=yes".to_string(),
         "-o".to_string(),
-        "UserKnownHostsFile=/dev/null".to_string(),
+        format!("UserKnownHostsFile={}", known_hosts.display()),
     ])
 }
 
@@ -1271,6 +1385,8 @@ mod tests {
             microvm_input_url: "path:/nix/store/microvm-source".to_string(),
             hermes_agent_input_url: "path:/nix/store/hermes-agent-source".to_string(),
             ssh_public_key: "ssh-ed25519 test".to_string(),
+            ssh_host_public_key: "ssh-ed25519 host-test".to_string(),
+            ssh_host_key_dir: workspace_dir.display().to_string(),
             labels: HashMap::new(),
         }
     }

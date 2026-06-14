@@ -732,9 +732,15 @@ async fn worker_reconcile_workspace(
     }
 
     if record.desired_state == "removed" && record.status != "removed" {
+        let remove_workspace_dir = record.status == "removing-dir";
         remove_vm(&record.vm_name)
             .await
             .with_context(|| format!("remove VM {}", record.vm_name))?;
+        if remove_workspace_dir {
+            runtime::remove_workspace_dir(&record.workspace_dir_name)
+                .await
+                .with_context(|| format!("remove workspace dir {}", record.workspace_dir_name))?;
+        }
         api.update_workspace(&record.name, Some("removed"), None, false, false)
             .await?;
         api.event(
@@ -742,7 +748,10 @@ async fn worker_reconcile_workspace(
             "workspace_remove_reconciled",
             "succeeded",
             "workspace desired-removed VM state reconciled",
-            json!({ "vm": record.vm_name, "workspace_dir_removed": false }),
+            json!({
+                "vm": record.vm_name,
+                "workspace_dir_removed": remove_workspace_dir
+            }),
         )
         .await?;
     }
@@ -972,9 +981,14 @@ async fn remove_workspace_local(
     if api.runtime.is_fake() {
         return fake_remove_workspace(api, workspace, remove_workspace_dir).await;
     }
+    let removing_status = if remove_workspace_dir {
+        "removing-dir"
+    } else {
+        "removing-vm"
+    };
     api.update_workspace(
         &workspace.name,
-        Some("removing"),
+        Some(removing_status),
         Some("removed"),
         false,
         false,

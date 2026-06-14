@@ -377,7 +377,13 @@ struct NodePressure {
     managed_vms: usize,
     allocated_memory_mib: u64,
     disk_available_mib: Option<u64>,
+    #[serde(default = "default_true")]
+    disk_ok: bool,
     capacity_ok: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -845,7 +851,7 @@ async fn fleet_command(command: FleetCommand) -> Result<()> {
 }
 
 fn fleet_recover_host(from: &str, to: &str, dry_run: bool) -> Result<()> {
-    select_ready_node(Some(to))?;
+    require_ready_worker_node(to)?;
     let workspaces = workspaces_for_node(from)?;
     if workspaces.is_empty() {
         println!("no workspaces assigned to {from}");
@@ -1276,6 +1282,7 @@ async fn node_pressure(records: &[WorkspaceRecord]) -> Result<NodePressure> {
         managed_vms,
         allocated_memory_mib,
         disk_available_mib,
+        disk_ok,
         capacity_ok: active_ok && memory_ok && disk_ok,
     })
 }

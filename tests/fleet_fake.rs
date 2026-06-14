@@ -683,6 +683,49 @@ async fn recover_host_reassigns_and_restores_latest_backup_on_target_node() -> R
 }
 
 #[tokio::test]
+async fn stopped_recovery_restores_on_full_target_without_active_capacity() -> Result<()> {
+    let _guard = fleet_test_guard().await;
+    let fleet = TestFleet::start().await?;
+    let target = spawn_worker_with_envs(
+        "target-node",
+        &fleet.api_url,
+        &[("MOM_CAPACITY_ACTIVE_WORKSPACES", "1")],
+    )?;
+    wait_for_node(fleet.api_state.path(), "target-node").await?;
+
+    let occupying = create_workspace(&fleet.api_url, "target-running", "target-node", 0).await?;
+    wait_for_job_status(&fleet.api_url, &occupying, "succeeded").await?;
+    wait_for_workspace_status(&fleet.api_url, "target-running", "running").await?;
+
+    let now = now_epoch()?;
+    insert_node(fleet.api_state.path(), "source-node", now)?;
+    insert_workspace_with_state(
+        fleet.api_state.path(),
+        "recover-stopped",
+        "source-node",
+        "stopped",
+        "stopped",
+    )?;
+    insert_backup_record(fleet.api_state.path(), "recover-stopped", "source-node")?;
+
+    run_recover_host(fleet.api_state.path(), "source-node", "target-node")?;
+
+    wait_for_workspace_node(&fleet.api_url, "recover-stopped", "target-node").await?;
+    wait_for_workspace_status(&fleet.api_url, "recover-stopped", "stopped").await?;
+    let restored_from = target
+        .runtime_home
+        .path()
+        .join("fake/recover-stopped/restored-from");
+    wait_until("stopped workspace restored on full target", || {
+        let restored_from = restored_from.clone();
+        async move { restored_from.exists() }
+    })
+    .await?;
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn recover_host_rejects_batches_that_exceed_target_capacity() -> Result<()> {
     let _guard = fleet_test_guard().await;
     let fleet = TestFleet::start().await?;
@@ -721,6 +764,37 @@ async fn recover_host_rejects_batches_that_exceed_target_capacity() -> Result<()
         "ready",
         "failed recovery must not mark the source offline"
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn reconcile_removed_workspace_preserves_directory_cleanup_intent() -> Result<()> {
+    let _guard = fleet_test_guard().await;
+    let fleet = TestFleet::start().await?;
+    let node = spawn_worker("node-a", &fleet.api_url)?;
+    wait_for_node(fleet.api_state.path(), "node-a").await?;
+
+    insert_workspace_with_state(
+        fleet.api_state.path(),
+        "remove-dir",
+        "node-a",
+        "removed",
+        "removing-dir",
+    )?;
+    let source_dir = node
+        .runtime_home
+        .path()
+        .join("workspaces/mom-remove-dir-workspace");
+    fs::create_dir_all(&source_dir)?;
+    fs::write(source_dir.join("marker"), b"delete me")?;
+
+    wait_for_workspace_status(&fleet.api_url, "remove-dir", "removed").await?;
+    wait_until("interrupted remove workspace dir cleaned up", || {
+        let source_dir = source_dir.clone();
+        async move { !source_dir.exists() }
+    })
+    .await?;
 
     Ok(())
 }
@@ -1034,6 +1108,7 @@ async fn offline_node_is_not_reenabled_by_stale_heartbeat() -> Result<()> {
                 "active_workspaces": 0,
                 "allocated_memory_mib": 0,
                 "disk_available_mib": 65536,
+                "disk_ok": true,
                 "capacity_ok": true
             },
             "worker_url": "http://100.64.0.42:9090"
@@ -1136,6 +1211,7 @@ async fn worker_job_completion_is_idempotent_for_retried_terminal_results() -> R
                 "active_workspaces": 0,
                 "allocated_memory_mib": 0,
                 "disk_available_mib": 65536,
+                "disk_ok": true,
                 "capacity_ok": true
             },
             "worker_url": "http://100.64.0.42:9090"
@@ -1815,6 +1891,20 @@ fn spawn_worker_with_options(
     interval: &str,
     fake_service_base_url: Option<&str>,
 ) -> Result<TestNode> {
+    spawn_worker_with_envs_and_options(node, api_url, interval, fake_service_base_url, &[])
+}
+
+fn spawn_worker_with_envs(node: &str, api_url: &str, envs: &[(&str, &str)]) -> Result<TestNode> {
+    spawn_worker_with_envs_and_options(node, api_url, "1", None, envs)
+}
+
+fn spawn_worker_with_envs_and_options(
+    node: &str,
+    api_url: &str,
+    interval: &str,
+    fake_service_base_url: Option<&str>,
+    envs: &[(&str, &str)],
+) -> Result<TestNode> {
     let state = tempfile::tempdir()?;
     let runtime_home = tempfile::tempdir()?;
     let bind = free_addr()?;
@@ -1833,6 +1923,9 @@ fn spawn_worker_with_options(
         .stderr(Stdio::null());
     if let Some(base_url) = fake_service_base_url {
         command.env("MOM_FAKE_SERVICE_BASE_URL", base_url);
+    }
+    for (key, value) in envs {
+        command.env(key, value);
     }
     let child = command
         .spawn()
@@ -2011,6 +2104,7 @@ async fn claim_worker_job_with_capacity(
                 "active_workspaces": 0,
                 "allocated_memory_mib": 0,
                 "disk_available_mib": 65536,
+                "disk_ok": true,
                 "capacity_ok": capacity_ok
             },
             "worker_url": "http://100.64.0.42:9090"

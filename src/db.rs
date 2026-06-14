@@ -1137,6 +1137,29 @@ WHERE node_id = ?1
     Ok(())
 }
 
+pub(crate) fn require_ready_worker_node(node: &str) -> Result<()> {
+    ensure_fleet_schema()?;
+    let now = now_epoch()?;
+    let stale_cutoff = now.saturating_sub(i64::try_from(env_u64("MOM_NODE_STALE_SECS", 60))?);
+    let db = fleet_db()?;
+    let exists = db.query_row(
+        r#"
+SELECT COUNT(*)
+FROM nodes
+WHERE node_id = ?1
+  AND status = 'ready'
+  AND worker_url IS NOT NULL
+  AND last_seen_at >= ?2
+"#,
+        params![node, stale_cutoff],
+        |row| row.get::<_, i64>(0),
+    )? > 0;
+    if !exists {
+        bail!("node is not ready for recovery: {node}");
+    }
+    Ok(())
+}
+
 pub(crate) fn node_all() -> Result<Vec<NodeRecord>> {
     ensure_fleet_schema()?;
     let db = fleet_db()?;
@@ -1264,7 +1287,7 @@ WHERE id = ?1
     .ok_or_else(|| anyhow!("job not found: {id}"))
 }
 
-pub(crate) fn claim_job(node: &str, capacity_ok: bool) -> Result<Option<JobRecord>> {
+pub(crate) fn claim_job(node: &str, capacity_ok: bool, disk_ok: bool) -> Result<Option<JobRecord>> {
     ensure_fleet_schema()?;
     let now = now_epoch()?;
     let mut db = fleet_db()?;
@@ -1277,10 +1300,21 @@ pub(crate) fn claim_job(node: &str, capacity_ok: bool) -> Result<Option<JobRecor
 	FROM jobs
 	WHERE status = 'queued' AND node_id = ?1
 	  AND (
-	      kind IN ('stop', 'remove')
-	      OR (
-	          ?2
-	          AND EXISTS (
+		      kind IN ('stop', 'remove')
+		      OR (
+		          ?3
+		          AND
+		          kind = 'restore'
+		          AND EXISTS (
+		              SELECT 1
+		              FROM workspaces queued_workspace
+		              WHERE queued_workspace.name = jobs.workspace_name
+		                AND queued_workspace.desired_state != 'running'
+		          )
+		      )
+		      OR (
+		          ?2
+		          AND EXISTS (
 	              SELECT 1
 	              FROM nodes
 	              JOIN workspaces queued_workspace
@@ -1330,9 +1364,9 @@ pub(crate) fn claim_job(node: &str, capacity_ok: bool) -> Result<Option<JobRecor
         AND active.status IN ('claimed', 'running')
   )
 ORDER BY created_at ASC
-LIMIT 1
-"#,
-            params![node, capacity_ok],
+	LIMIT 1
+	"#,
+            params![node, capacity_ok, disk_ok],
             |row| row.get(0),
         )
         .optional()?;

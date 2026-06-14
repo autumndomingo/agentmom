@@ -1,4 +1,9 @@
-use std::{collections::HashMap, env, net::SocketAddr, process::Stdio, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    env,
+    process::Stdio,
+    sync::{Arc, Mutex as StdMutex},
+};
 
 use anyhow::{Context, Result, bail};
 use tokio::{process::Command, sync::Mutex};
@@ -20,6 +25,7 @@ const HERMES_READINESS_ATTEMPTS: u16 = 90;
 #[derive(Clone, Default)]
 pub(crate) struct ServiceState {
     hermes_tunnels: Arc<Mutex<HashMap<String, ServiceTunnel>>>,
+    port_reservations: Arc<StdMutex<HashSet<u16>>>,
 }
 
 pub(crate) async fn open_hermes_dashboard(
@@ -27,13 +33,20 @@ pub(crate) async fn open_hermes_dashboard(
     workspace_name: &str,
     vm_name: &str,
 ) -> Result<String> {
-    ensure_hermes_tunnel(workspace_name, vm_name, &state.hermes_tunnels).await
+    ensure_hermes_tunnel(
+        workspace_name,
+        vm_name,
+        &state.hermes_tunnels,
+        &state.port_reservations,
+    )
+    .await
 }
 
 async fn ensure_hermes_tunnel(
     workspace_name: &str,
     vm_name: &str,
     tunnels: &Arc<Mutex<HashMap<String, ServiceTunnel>>>,
+    port_reservations: &Arc<StdMutex<HashSet<u16>>>,
 ) -> Result<String> {
     {
         let mut active = tunnels.lock().await;
@@ -46,14 +59,23 @@ async fn ensure_hermes_tunnel(
         }
     }
 
-    let host_port = reserve_host_port().await?;
     let tunnel_bind_host = service_tunnel_bind_host();
-    let health_url = format!("http://127.0.0.1:{host_port}");
+    let reservation = reserve_host_port(&tunnel_bind_host, port_reservations).await?;
+    let host_port = reservation.port();
+    let health_url = service_tunnel_health_url(&tunnel_bind_host, host_port);
     let public_url = service_tunnel_public_url(&tunnel_bind_host, host_port)?;
     let vm = running_vm_owned(vm_name).await?;
     ensure_hermes_dashboard(&vm).await?;
     let tunnel = start_hermes_tunnel(workspace_name, &vm, &tunnel_bind_host, host_port).await?;
-    wait_for_hermes_tunnel(workspace_name, tunnel, &health_url, &public_url, tunnels).await
+    wait_for_hermes_tunnel(
+        workspace_name,
+        tunnel,
+        reservation,
+        &health_url,
+        &public_url,
+        tunnels,
+    )
+    .await
 }
 
 async fn start_hermes_tunnel(
@@ -69,7 +91,7 @@ async fn start_hermes_tunnel(
 
     Ok(ServiceTunnel {
         url: service_tunnel_public_url(tunnel_bind_host, host_port)?,
-        health_url: format!("http://127.0.0.1:{host_port}"),
+        health_url: service_tunnel_health_url(tunnel_bind_host, host_port),
         _vm: vm.clone(),
         ssh_child,
     })
@@ -78,12 +100,14 @@ async fn start_hermes_tunnel(
 async fn wait_for_hermes_tunnel(
     workspace_name: &str,
     mut tunnel: ServiceTunnel,
+    reservation: PortReservation,
     health_url: &str,
     public_url: &str,
     tunnels: &Arc<Mutex<HashMap<String, ServiceTunnel>>>,
 ) -> Result<String> {
     for _ in 0..50 {
         if tunnel_is_healthy(health_url, HERMES_HEALTH_PATH).await {
+            reservation.release();
             tunnels
                 .lock()
                 .await
@@ -176,27 +200,92 @@ exit 1
     )
 }
 
-async fn reserve_host_port() -> Result<u16> {
+struct PortReservation {
+    port: u16,
+    reservations: Arc<StdMutex<HashSet<u16>>>,
+}
+
+impl PortReservation {
+    fn port(&self) -> u16 {
+        self.port
+    }
+
+    fn release(self) {}
+}
+
+impl Drop for PortReservation {
+    fn drop(&mut self) {
+        if let Ok(mut reservations) = self.reservations.lock() {
+            reservations.remove(&self.port);
+        }
+    }
+}
+
+async fn reserve_host_port(
+    bind_host: &str,
+    reservations: &Arc<StdMutex<HashSet<u16>>>,
+) -> Result<PortReservation> {
     if let Some((from, to)) = service_tunnel_port_range()? {
         for port in from..=to {
-            if let Ok(listener) =
-                tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).await
-            {
-                drop(listener);
-                return Ok(port);
+            if let Some(reservation) = try_reserve_port(bind_host, port, reservations).await? {
+                return Ok(reservation);
             }
         }
         bail!("no free service tunnel ports in configured range {from}-{to}");
     }
-    let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-        .await
-        .context("reserve local service tunnel port")?;
-    let port = listener
-        .local_addr()
-        .context("read reserved service tunnel port")?
-        .port();
-    drop(listener);
-    Ok(port)
+    for _ in 0..32 {
+        let listener = bind_service_tunnel_listener(bind_host, 0)
+            .await
+            .context("reserve local service tunnel port")?;
+        let port = listener
+            .local_addr()
+            .context("read reserved service tunnel port")?
+            .port();
+        if let Some(reservation) = try_mark_port_reserved(port, reservations)? {
+            drop(listener);
+            return Ok(reservation);
+        }
+    }
+    bail!("failed to reserve an unclaimed ephemeral service tunnel port")
+}
+
+async fn try_reserve_port(
+    bind_host: &str,
+    port: u16,
+    reservations: &Arc<StdMutex<HashSet<u16>>>,
+) -> Result<Option<PortReservation>> {
+    let Some(reservation) = try_mark_port_reserved(port, reservations)? else {
+        return Ok(None);
+    };
+    if bind_service_tunnel_listener(bind_host, port).await.is_ok() {
+        Ok(Some(reservation))
+    } else {
+        drop(reservation);
+        Ok(None)
+    }
+}
+
+fn try_mark_port_reserved(
+    port: u16,
+    reservations: &Arc<StdMutex<HashSet<u16>>>,
+) -> Result<Option<PortReservation>> {
+    let mut reservations_guard = reservations
+        .lock()
+        .map_err(|_| anyhow::anyhow!("service tunnel port reservation lock poisoned"))?;
+    if !reservations_guard.insert(port) {
+        return Ok(None);
+    }
+    Ok(Some(PortReservation {
+        port,
+        reservations: Arc::clone(reservations),
+    }))
+}
+
+async fn bind_service_tunnel_listener(
+    bind_host: &str,
+    port: u16,
+) -> std::io::Result<tokio::net::TcpListener> {
+    tokio::net::TcpListener::bind((bind_host, port)).await
 }
 
 fn service_tunnel_port_range() -> Result<Option<(u16, u16)>> {
@@ -227,6 +316,21 @@ fn service_tunnel_bind_host() -> String {
     env::var("MOM_SERVICE_TUNNEL_BIND_HOST").unwrap_or_else(|_| "127.0.0.1".to_string())
 }
 
+fn service_tunnel_health_url(bind_host: &str, port: u16) -> String {
+    format!(
+        "http://{}:{port}",
+        http_host_for_url(service_tunnel_probe_host(bind_host))
+    )
+}
+
+fn service_tunnel_probe_host(bind_host: &str) -> &str {
+    match bind_host {
+        "0.0.0.0" => "127.0.0.1",
+        "::" => "::1",
+        _ => bind_host,
+    }
+}
+
 fn service_tunnel_public_url(bind_host: &str, port: u16) -> Result<String> {
     if let Ok(base) = env::var("MOM_SERVICE_TUNNEL_BASE_URL") {
         return service_tunnel_public_url_from_base(bind_host, port, Some(&base));
@@ -245,17 +349,26 @@ fn service_tunnel_public_url_from_base(
         }
         bail!("MOM_SERVICE_TUNNEL_BASE_URL must include {{port}}");
     }
-    let host = if bind_host == "0.0.0.0" {
-        "127.0.0.1"
+    Ok(format!(
+        "http://{}:{port}",
+        http_host_for_url(service_tunnel_probe_host(bind_host))
+    ))
+}
+
+fn http_host_for_url(host: &str) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
     } else {
-        bind_host
-    };
-    Ok(format!("http://{host}:{port}"))
+        host.to_string()
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_service_tunnel_port_range, service_tunnel_public_url_from_base};
+    use super::{
+        parse_service_tunnel_port_range, service_tunnel_health_url,
+        service_tunnel_public_url_from_base,
+    };
 
     #[test]
     fn service_tunnel_url_supports_port_template() {
@@ -293,5 +406,18 @@ mod tests {
             (40000, 40010)
         );
         assert!(parse_service_tunnel_port_range("40010-40000").is_err());
+    }
+
+    #[test]
+    fn service_tunnel_health_url_uses_bind_host_except_for_wildcards() {
+        assert_eq!(
+            service_tunnel_health_url("100.81.250.67", 45887),
+            "http://100.81.250.67:45887"
+        );
+        assert_eq!(
+            service_tunnel_health_url("0.0.0.0", 45887),
+            "http://127.0.0.1:45887"
+        );
+        assert_eq!(service_tunnel_health_url("::", 45887), "http://[::1]:45887");
     }
 }

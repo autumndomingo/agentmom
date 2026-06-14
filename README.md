@@ -95,7 +95,7 @@ Relevant environment variables:
 - `MOM_MICROVM_BRIDGE`: bridge used by generated tap devices.
 - `MOM_MICROVM_CIDR`: IPv4 CIDR for deterministic guest addresses, for example `192.168.83.0/24`.
 - `MOM_MICROVM_HOST_IP`: host bridge address used as the guest default gateway.
-- `MOM_MICROVM_NIXPKGS_URL` and `MOM_MICROVM_NIX_URL`: flake inputs used by generated workspace flakes. Production deploys should pass pinned revisions or immutable `path:/nix/store/...` inputs so cached workspace runners cannot drift from their generated input hash.
+- `MOM_MICROVM_NIXPKGS_URL`, `MOM_MICROVM_NIX_URL`, and `MOM_HERMES_AGENT_URL`: flake inputs used by generated workspace flakes. Production deploys should pass pinned revisions or immutable `path:/nix/store/...` inputs so cached workspace runners cannot drift from their generated input hash.
 
 Backups use restic. Set `RESTIC_REPOSITORY` and the usual restic credentials in
 the worker service environment before enabling scheduled backups. Agent Mom
@@ -158,7 +158,7 @@ The flake exports `nixosModules.agentmom`.
       hostAddress = "192.168.83.1";
       externalInterface = "eth0";
       kvmKernelModule = "kvm-amd";
-      hermesAgentUrl = inputs.agentmom.inputs.hermes-agent.outPath;
+      hermesAgentUrl = "path:${inputs.agentmom.inputs.hermes-agent.outPath}";
     };
 
     api = {
@@ -173,8 +173,8 @@ The flake exports `nixosModules.agentmom`.
       url = "http://127.0.0.1:9090";
       intervalSeconds = 5;
       serviceTunnelPortRange = {
-        from = 32768;
-        to = 60999;
+        from = 41000;
+        to = 41999;
       };
     };
     workerUrlAllowlist = [ "http://127.0.0.1:9090" ];
@@ -207,6 +207,9 @@ For multi-host deployments, set `worker.openFirewall = true` and
 `worker.firewallInterface = "tailscale0"` or declare equivalent host firewall
 rules so the API can reach the worker control port and browsers can reach the
 configured service tunnel range.
+When `credentialProxy.enable = true`, the module does not enable direct NAT for
+the guest bridge; guests reach the built-in proxy on the bridge and cannot
+bypass its allowlist through host forwarding.
 
 For multi-host production, give the API a per-node token map instead of a
 single shared worker token:
@@ -244,8 +247,8 @@ just real-fleet-test-prod
 
 Workspace-creating and backup tests are opt-in because they touch real runtime
 state. Treat these as a deploy gate for microVM runtime changes; read-only
-checks alone do not prove that guests boot, SSH is reachable, or Hermes is
-present:
+checks alone do not prove that guests boot, SSH is reachable, Hermes is present,
+or the Hermes service tunnel can open:
 
 ```sh
 export AGENTMOM_REAL_ALLOW_CREATE=1
