@@ -1,946 +1,993 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
-  Edit3,
-  PanelLeft,
+  Bookmark,
+  BriefcaseBusiness,
+  Check,
+  ClipboardList,
+  ExternalLink,
+  FileText,
+  LayoutDashboard,
+  Loader2,
   Plus,
-  RefreshCcw,
-  Send,
-  Sparkles,
-  Users,
+  Search,
+  Trash2,
+  Upload,
+  User,
+  X,
 } from 'lucide-react';
 import './styles.css';
 
-const API_BASE = import.meta.env.VITE_API_BASE ?? '/api';
-const CHAT_STORAGE_KEY = 'agent-mom-chats';
-const USER_SESSION_KEY = 'agent-mom-user-session';
+const STORAGE_KEY = 'opportunity-intake-v1';
+const SUBMITTED_PROFILE_KEY = 'opportunity-search-profile-v1';
+const RESUME_DB = 'opportunity-intake-files';
+const RESUME_STORE = 'files';
+const RESUME_KEY = 'resume';
 
-function Root() {
-  const [userSession, setUserSession] = useState(null);
-  const [checkingSession, setCheckingSession] = useState(true);
+const defaultSources = [
+  { id: 'indeed', label: 'Indeed', url: 'https://www.indeed.com' },
+  { id: 'google-jobs', label: 'Google Jobs', url: 'https://www.google.com/search?q=jobs' },
+  { id: 'linkedin', label: 'LinkedIn', url: 'https://www.linkedin.com/jobs' },
+];
+
+const sourceSuggestions = [
+  ...defaultSources,
+  { id: 'handshake', label: 'Handshake', url: 'https://joinhandshake.com' },
+  { id: 'wellfound', label: 'Wellfound', url: 'https://wellfound.com/jobs' },
+  { id: 'greenhouse', label: 'Greenhouse', url: 'https://boards.greenhouse.io' },
+];
+
+const defaultProfile = {
+  opportunityType: 'Full-time',
+  workStyle: 'Flexible / open to any',
+  location: '',
+  industries: '',
+  roles: '',
+  experienceLevel: 'Entry-level',
+  educationStatus: '',
+  personalDescription: '',
+};
+
+function App() {
+  const [profile, setProfile] = usePersistentState('profile', defaultProfile);
+  const [sources, setSources] = usePersistentState('sources', defaultSources);
+  const [savedOpportunities, setSavedOpportunities] = usePersistentState('savedOpportunities', []);
+  const [applications, setApplications] = usePersistentState('applications', []);
+  const [activeTab, setActiveTab] = useState('search');
+  const [sourceInput, setSourceInput] = useState('');
+  const [resume, setResume] = useState(null);
+  const [savedAt, setSavedAt] = useState('');
+  const [searchSavedAt, setSearchSavedAt] = useState('');
+  const [searchState, setSearchState] = useState('idle');
+  const [jobMatches, setJobMatches] = useState([]);
+  const [sourceNotes, setSourceNotes] = useState([]);
+  const [searchError, setSearchError] = useState('');
+  const fileInputRef = useRef(null);
 
   useEffect(() => {
-    const stored = loadUserSession();
-    if (!stored) {
-      setCheckingSession(false);
-      return;
-    }
-
-    validateSession(stored)
-      .then((session) => {
-        setUserSession(session);
-      })
-      .catch(() => {
-        window.localStorage.removeItem(USER_SESSION_KEY);
-      })
-      .finally(() => {
-        setCheckingSession(false);
-      });
+    let ignore = false;
+    loadResume().then((storedResume) => {
+      if (!ignore && storedResume) setResume(storedResume);
+    });
+    return () => {
+      ignore = true;
+    };
   }, []);
 
   useEffect(() => {
-    if (!userSession?.token) return undefined;
+    setSavedAt(formatSavedAt(new Date()));
+  }, [profile, sources, resume]);
 
-    let cancelled = false;
-    const checkSession = async () => {
-      try {
-        const refreshedSession = await validateSession(userSession);
-        if (!cancelled) {
-          setUserSession((current) =>
-            current?.token === userSession.token
-              ? { ...current, email: refreshedSession.email, role: refreshedSession.role }
-              : current,
-          );
-        }
-      } catch {
-        window.localStorage.removeItem(USER_SESSION_KEY);
-        if (!cancelled) {
-          setUserSession(null);
-        }
-      }
-    };
+  const completion = useMemo(() => {
+    const requiredValues = [
+      sources.length,
+      profile.opportunityType,
+      profile.workStyle,
+      profile.location,
+      profile.industries,
+      profile.roles,
+      profile.experienceLevel,
+      profile.educationStatus,
+      profile.personalDescription,
+      resume?.name,
+    ];
+    return Math.round((requiredValues.filter(Boolean).length / requiredValues.length) * 100);
+  }, [profile, resume, sources.length]);
 
-    const interval = window.setInterval(checkSession, 1000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(interval);
-    };
-  }, [userSession?.token]);
-
-  function enterUserFlow(session) {
-    if (!session) {
-      window.localStorage.removeItem(USER_SESSION_KEY);
-      setUserSession(null);
-      return;
-    }
-    window.localStorage.setItem(USER_SESSION_KEY, JSON.stringify(session));
-    setUserSession(session);
+  function updateProfile(field, value) {
+    setProfile((current) => ({ ...current, [field]: value }));
   }
 
-  if (checkingSession) {
-    return (
-      <main className="landingPage">
-        <section className="landingPanel" aria-label="User access">
-          <BuildersTableBrand />
-        </section>
-      </main>
+  function addSource(event) {
+    event.preventDefault();
+    const source = normalizeSource(sourceInput);
+    if (!source) return;
+    setSources((current) => {
+      const exists = current.some(
+        (item) =>
+          item.label.toLowerCase() === source.label.toLowerCase() ||
+          item.url.toLowerCase() === source.url.toLowerCase(),
+      );
+      return exists ? current : [...current, source];
+    });
+    setSourceInput('');
+  }
+
+  function addSuggestedSource(source) {
+    setSources((current) =>
+      current.some((item) => item.id === source.id || item.url === source.url)
+        ? current
+        : [...current, source],
     );
   }
 
-  if (!userSession) {
-    return <LandingPage onSubmit={enterUserFlow} />;
+  function removeSource(sourceId) {
+    setSources((current) => current.filter((source) => source.id !== sourceId));
   }
 
-  if (window.location.pathname === '/admin') {
-    if (userSession.role !== 'ADMN') {
-      window.history.replaceState({}, '', '/');
-    } else {
-      return <AdminPage userSession={userSession} />;
-    }
+  async function handleResumeUpload(event) {
+    const [file] = event.target.files ?? [];
+    if (!file) return;
+    const nextResume = {
+      file,
+      name: file.name,
+      size: file.size,
+      type: file.type || 'Resume',
+      updatedAt: new Date().toISOString(),
+    };
+    await saveResume(nextResume);
+    setResume(nextResume);
+    event.target.value = '';
   }
 
-  if (!userSession.userName || !userSession.agentName) {
-    return <SetupPage userSession={userSession} onSubmit={enterUserFlow} />;
+  async function removeResume() {
+    await deleteResume();
+    setResume(null);
   }
 
-  return <App userSession={userSession} />;
-}
+  function saveOpportunity(match) {
+    const savedAt = new Date().toISOString();
+    setSavedOpportunities((current) => {
+      if (current.some((item) => item.id === match.id || item.url === match.url)) return current;
+      return [{ ...match, savedAt }, ...current];
+    });
+  }
 
-function LandingPage({ onSubmit }) {
-  const [form, setForm] = useState({ email: '', accessCode: '' });
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
+  function removeSavedOpportunity(opportunityId) {
+    setSavedOpportunities((current) => current.filter((item) => item.id !== opportunityId));
+  }
 
-  async function submitAccess(event) {
-    event.preventDefault();
-    const email = form.email.trim();
-    const accessCode = form.accessCode.trim();
-    if (!email || !accessCode) return;
+  function addApplication(opportunity) {
+    const now = new Date().toISOString();
+    setApplications((current) => {
+      if (current.some((item) => item.id === opportunity.id || item.url === opportunity.url)) {
+        return current;
+      }
+      return [
+        {
+          ...opportunity,
+          status: 'Saved',
+          appliedDate: '',
+          followUpDate: '',
+          contact: '',
+          notes: '',
+          createdAt: now,
+        },
+        ...current,
+      ];
+    });
+  }
 
-    setBusy(true);
-    setError('');
+  function updateApplication(applicationId, field, value) {
+    setApplications((current) =>
+      current.map((item) => (item.id === applicationId ? { ...item, [field]: value } : item)),
+    );
+  }
+
+  function removeApplication(applicationId) {
+    setApplications((current) => current.filter((item) => item.id !== applicationId));
+  }
+
+  async function saveSearchProfile() {
+    if (!readyToSearch) return;
+    const timestamp = new Date();
+    const searchProfile = {
+      sources,
+      profile,
+      resume: resume
+        ? {
+            name: resume.name,
+            size: resume.size,
+            type: resume.type,
+            updatedAt: resume.updatedAt,
+          }
+        : null,
+      savedAt: timestamp.toISOString(),
+    };
+    window.localStorage.setItem(SUBMITTED_PROFILE_KEY, JSON.stringify(searchProfile));
+    setSearchSavedAt(formatSavedAt(timestamp));
+    setSearchState('searching');
+    setSearchError('');
+    setJobMatches([]);
+    setSourceNotes([]);
+
     try {
-      const response = await fetch(`${API_BASE}/auth/login`, {
+      const response = await fetch('/api/opportunity-search', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, access_code: accessCode }),
+        body: JSON.stringify(searchProfile),
       });
-      const data = await response.json();
+      const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
-        throw data;
+        throw new Error(payload.error || 'Search failed before results were returned.');
       }
-      onSubmit({
-        email: data.email,
-        role: data.role,
-        token: data.token,
-        startedAt: Date.now(),
-      });
-    } catch (accessError) {
-      setError(accessError?.error ?? 'Access denied.');
-    } finally {
-      setBusy(false);
+      setJobMatches(payload.matches ?? []);
+      setSourceNotes(payload.sourceNotes ?? []);
+      setSearchState('done');
+    } catch (error) {
+      setSearchError(error.message || 'Search failed before results were returned.');
+      setSearchState('error');
     }
   }
 
-  return (
-    <main className="landingPage">
-      <section className="landingPanel" aria-label="User access">
-        <BuildersTableBrand />
-
-        <form className="landingForm" onSubmit={submitAccess}>
-          <input
-            type="email"
-            value={form.email}
-            onChange={(event) =>
-              setForm((current) => ({ ...current, email: event.target.value }))
-            }
-            placeholder="Email"
-            autoComplete="email"
-            autoFocus
-            required
-          />
-          <input
-            value={form.accessCode}
-            onChange={(event) =>
-              setForm((current) => ({ ...current, accessCode: event.target.value }))
-            }
-            placeholder="Access Code"
-            autoComplete="one-time-code"
-            required
-          />
-          {error && <p className="accessError">{error}</p>}
-          <button
-            className="visuallyHiddenSubmit"
-            aria-hidden="true"
-            tabIndex={-1}
-            disabled={busy}
-          >
-            Continue
-          </button>
-        </form>
-      </section>
-    </main>
-  );
-}
-
-function BuildersTableBrand() {
-  return (
-    <div className="landingHeader">
-      <h1>
-        <span className="terminalPrompt" aria-label="Let's start building with...">
-          <span className="typedPrompt" aria-hidden="true">
-            $ Let's start building with...
-          </span>
-        </span>
-        <strong>Agent Mom</strong>
-      </h1>
-    </div>
-  );
-}
-
-async function validateSession(session) {
-  if (!session.token) {
-    throw new Error('Missing session token.');
-  }
-  const response = await fetch(`${API_BASE}/auth/session`, {
-    headers: authHeaders(session),
-  });
-  const data = await response.json();
-  if (!response.ok) {
-    throw data;
-  }
-  return {
-    ...session,
-    email: data.email,
-    role: data.role,
-  };
-}
-
-function SetupPage({ userSession, onSubmit }) {
-  const [form, setForm] = useState({
-    userName: userSession.userName ?? '',
-    agentName: userSession.agentName ?? '',
-  });
-  const previewSession = {
-    ...userSession,
-    userName: userSession.userName || 'Local workspace',
-    agentName: userSession.agentName || 'Workspace',
-  };
-
-  function completeSetup() {
-    const userName = form.userName.trim();
-    const agentName = form.agentName.trim();
-    if (!userName || !agentName) return;
-
-    onSubmit({
-      ...userSession,
-      userName,
-      agentName,
-      completedSetupAt: Date.now(),
-    });
-  }
-
-  function submitSetup(event) {
-    event.preventDefault();
-    completeSetup();
-  }
-
-  function submitSetupOnEnter(event) {
-    if (event.key !== 'Enter' || event.shiftKey || event.metaKey || event.ctrlKey || event.altKey) {
-      return;
-    }
-    event.preventDefault();
-    completeSetup();
-  }
-
-  function goBack() {
-    window.localStorage.removeItem(USER_SESSION_KEY);
-    onSubmit(null);
-  }
-
-  return (
-    <div className="setupPage">
-      <div className="setupBackground" aria-hidden="true">
-        <App userSession={previewSession} />
-      </div>
-      <div className="setupOverlay" role="presentation">
-        <form
-          className="setupForm"
-          aria-label="Create your workspace"
-          onSubmit={submitSetup}
-          onKeyDown={submitSetupOnEnter}
-        >
-          <h1>You are almost ready to go</h1>
-          <input
-            value={form.userName}
-            onChange={(event) =>
-              setForm((current) => ({ ...current, userName: event.target.value }))
-            }
-            placeholder="Name"
-            autoComplete="name"
-            autoFocus
-            required
-          />
-          <input
-            value={form.agentName}
-            onChange={(event) =>
-              setForm((current) => ({ ...current, agentName: event.target.value }))
-            }
-            placeholder="Agent name"
-            required
-          />
-          <button className="setupBackLink" type="button" onClick={goBack}>
-            <span aria-hidden="true">←</span>
-            Back
-          </button>
-        </form>
-      </div>
-    </div>
-  );
-}
-
-function App({ userSession }) {
-  const currentUserId = userIdentity(userSession.email);
-  const [vms, setVms] = useState(() => [
-    {
-      id: currentUserId,
-      email: userSession.email,
-      name: userSession.agentName,
-      userName: userSession.userName,
-      status: 'running',
-    },
-  ]);
-  const [selectedUserId, setSelectedUserId] = useState(currentUserId);
-  const [busy, setBusy] = useState(false);
-  const [chatInput, setChatInput] = useState('');
-  const [chatsByUser, setChatsByUser] = useState(() => loadStoredChats());
-  const [activeChatByUser, setActiveChatByUser] = useState({});
-  const [now, setNow] = useState(() => Date.now());
-
-  const selectedVm = useMemo(
-    () => vms.find((vm) => vm.id === selectedUserId) ?? vms[0],
-    [selectedUserId, vms],
-  );
-  const selectedKey = selectedVm?.id;
-  const selectedChats = selectedKey ? chatsByUser[selectedKey] ?? [] : [];
-  const activeChatId = selectedKey
-    ? activeChatByUser[selectedKey] ?? selectedChats[0]?.id
-    : undefined;
-  const activeChat = selectedChats.find((chat) => chat.id === activeChatId);
-  const chatGroups = groupChatsByAge(selectedChats, now);
-  const messages = activeChat?.messages ?? [];
-
-  useEffect(() => {
-    const interval = window.setInterval(() => setNow(Date.now()), 30_000);
-    return () => window.clearInterval(interval);
-  }, []);
-
-  useEffect(() => {
-    window.localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(chatsByUser));
-  }, [chatsByUser]);
-
-  async function refresh() {
-    setVms((current) =>
-      current.map((vm) => (vm.id === selectedUserId ? { ...vm, status: 'running' } : vm)),
-    );
-  }
-
-  function openAdminPage() {
-    window.location.href = '/admin';
-  }
-
-  async function sendMessage(event) {
-    event.preventDefault();
-    if (!selectedVm) return;
-
-    const prompt = chatInput.trim();
-    if (!prompt) return;
-
-    setChatInput('');
-    const chatId = ensureChatForPrompt(selectedVm.id, prompt);
-    appendMessage(selectedVm.id, chatId, { role: 'user', content: prompt });
-
-    appendMessage(selectedVm.id, chatId, {
-      role: 'assistant',
-      content: 'This prototype is connected through the local onboarding flow. Backend chat wiring can be added after the screen flow is finalized.',
-    });
-  }
-
-  function startNewChat(id = selectedVm?.id) {
-    if (!id) return;
-    const chat = {
-      id: window.crypto?.randomUUID?.() ?? `${Date.now()}`,
-      title: 'New chat',
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      messages: [],
-    };
-    setChatsByUser((current) => ({
-      ...current,
-      [id]: [chat, ...(current[id] ?? [])],
-    }));
-    setActiveChatByUser((current) => ({ ...current, [id]: chat.id }));
-  }
-
-  function selectChat(chatId) {
-    if (!selectedVm) return;
-    setActiveChatByUser((current) => ({ ...current, [selectedVm.id]: chatId }));
-  }
-
-  function ensureChatForPrompt(id, prompt) {
-    const existing = activeChatByUser[id] ?? chatsByUser[id]?.[0]?.id;
-    if (existing) return existing;
-
-    const chat = {
-      id: window.crypto?.randomUUID?.() ?? `${Date.now()}`,
-      title: chatTitle(prompt),
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      messages: [],
-    };
-    setChatsByUser((current) => ({
-      ...current,
-      [id]: [chat, ...(current[id] ?? [])],
-    }));
-    setActiveChatByUser((current) => ({ ...current, [id]: chat.id }));
-    return chat.id;
-  }
-
-  function appendMessage(id, chatId, message) {
-    setChatsByUser((current) => ({
-      ...current,
-      [id]: (current[id] ?? []).map((chat) =>
-        chat.id === chatId
-          ? {
-              ...chat,
-              title:
-                chat.title === 'New chat' && message.role === 'user'
-                  ? chatTitle(message.content)
-                  : chat.title,
-              updatedAt: Date.now(),
-              messages: [...chat.messages, message],
-            }
-          : chat,
-      ),
-    }));
-  }
-
-  function logOut() {
-    window.localStorage.removeItem(USER_SESSION_KEY);
-    window.location.href = '/';
-  }
+  const readyToSearch =
+    sources.length > 0 &&
+    profile.location.trim() &&
+    profile.industries.trim() &&
+    profile.roles.trim() &&
+    profile.educationStatus.trim();
 
   return (
     <main className="appShell">
-      <aside className="sidebar">
-        <div className="userDropdown">
-          <div className="brandRow">
-            <div className="brandMark">A</div>
-            <div className="brandButton">Agent Mom</div>
-          </div>
+      <section className="heroBand">
+        <div className="brandMark" aria-hidden="true">
+          <BriefcaseBusiness size={26} />
         </div>
-
-        <div className="sidebarQuickActions">
-          <button className="launchButton" onClick={() => startNewChat()} disabled={!selectedVm}>
-            <Edit3 size={24} strokeWidth={2.25} />
-            New chat
-          </button>
+        <div className="heroCopy">
+          <p>Opportunity search builder</p>
+          <h1>Tell the search what to watch for.</h1>
+          <span>
+            Choose job sites, answer the core questions, then add the personal context that
+            makes a match useful.
+          </span>
         </div>
+        <div className="saveStatus" aria-live="polite">
+          <Check size={16} />
+          <span>{savedAt ? `Auto-saved ${savedAt}` : 'Auto-save is on'}</span>
+        </div>
+      </section>
 
-        <div className="chatHistory">
-          {chatGroups.map((group) => (
-            <section className="chatHistoryGroup" key={group.label}>
-              <h2>{group.label}</h2>
-              <div className="chatHistoryList">
-                {group.chats.map((chat) => (
-                  <button
-                    key={chat.id}
-                    className={`chatHistoryItem ${chat.id === activeChatId ? 'active' : ''}`}
-                    onClick={() => selectChat(chat.id)}
-                  >
-                    <span>{chat.title}</span>
-                  </button>
-                ))}
+      <nav className="topTabs" aria-label="Opportunity workspace">
+        <button
+          className={activeTab === 'search' ? 'active' : ''}
+          type="button"
+          onClick={() => setActiveTab('search')}
+        >
+          <Search size={18} />
+          Search
+        </button>
+        <button
+          className={activeTab === 'profile' ? 'active' : ''}
+          type="button"
+          onClick={() => setActiveTab('profile')}
+        >
+          <User size={18} />
+          Profile
+        </button>
+      </nav>
+
+      {activeTab === 'search' && (
+        <>
+      <section className="workspace">
+        <form className="intakePanel" onSubmit={(event) => event.preventDefault()}>
+          <section className="formSection" aria-labelledby="sources-heading">
+            <div className="sectionHeader">
+              <div>
+                <span>Step 1</span>
+                <h2 id="sources-heading">Sites to track</h2>
               </div>
-            </section>
-          ))}
-          {selectedVm && !selectedChats.length && <p className="emptyList">New chats will appear here.</p>}
-        </div>
-
-        <div className="sessionBox">
-          <h2>Session</h2>
-          <strong>Local workspace</strong>
-          <span>{userSession.email}</span>
-          <button className="sessionLogoutButton" type="button" onClick={logOut}>
-            Log out
-          </button>
-        </div>
-      </aside>
-
-      <section className="chatShell">
-        <header className="chatHeader">
-          <button className="squareButton" title="Toggle sidebar">
-            <PanelLeft size={20} />
-          </button>
-          <div>
-            <h1>{selectedVm?.name ?? 'Agent workspace'}</h1>
-            <p>{selectedVm ? friendlyStatus(selectedVm.status) : 'Create a workspace to begin.'}</p>
-          </div>
-          <div className="headerActions">
-            {userSession.role === 'ADMN' && (
-              <button className="refreshButton" type="button" onClick={openAdminPage}>
-                <Users size={17} />
-                Admin
-              </button>
-            )}
-            <button className="refreshButton" onClick={refresh} disabled={busy}>
-              <RefreshCcw size={17} />
-              Refresh
-            </button>
-          </div>
-        </header>
-
-        <div className="chatBody">
-          {messages.length === 0 ? (
-            <div className="emptyChat">
-              <p>Ready when you are.</p>
-              <h2>Ask Agent Mom about your workspace.</h2>
+              <strong>{sources.length} active</strong>
             </div>
-          ) : (
-            <div className="messageList">
-              {messages.map((message, index) => (
-                <article key={`${message.role}-${index}`} className={`message ${message.role}`}>
-                  <span>{message.role === 'user' ? 'You' : 'Agent Mom'}</span>
-                  <p>{message.content}</p>
-                </article>
+
+            <div className="sourceSuggestions" aria-label="Suggested job sites">
+              {sourceSuggestions.map((source) => {
+                const active = sources.some((item) => item.id === source.id || item.url === source.url);
+                return (
+                  <button
+                    className={active ? 'suggestion active' : 'suggestion'}
+                    key={source.id}
+                    type="button"
+                    onClick={() => addSuggestedSource(source)}
+                  >
+                    {active && <Check size={15} />}
+                    {source.label}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="sourceList">
+              {sources.map((source) => (
+                <div className="sourceItem" key={source.id}>
+                  <Search size={17} />
+                  <div>
+                    <strong>{source.label}</strong>
+                    <span>{source.url}</span>
+                  </div>
+                  <button
+                    aria-label={`Remove ${source.label}`}
+                    type="button"
+                    onClick={() => removeSource(source.id)}
+                  >
+                    <X size={17} />
+                  </button>
+                </div>
+              ))}
+            </div>
+
+            <div className="addSourceRow">
+              <input
+                value={sourceInput}
+                onChange={(event) => setSourceInput(event.target.value)}
+                placeholder="Add another job board or company career site"
+                aria-label="Add a job source"
+              />
+              <button type="button" onClick={addSource} disabled={!sourceInput.trim()}>
+                <Plus size={18} />
+                Add
+              </button>
+            </div>
+          </section>
+
+          <section className="formSection" aria-labelledby="questionnaire-heading">
+            <div className="sectionHeader">
+              <div>
+                <span>Step 2</span>
+                <h2 id="questionnaire-heading">Generic questionnaire</h2>
+              </div>
+              <strong>{completion}% complete</strong>
+            </div>
+
+            <div className="questionGrid">
+              <label>
+                What type of opportunity are you looking for?
+                <select
+                  value={profile.opportunityType}
+                  onChange={(event) => updateProfile('opportunityType', event.target.value)}
+                >
+                  <option>Full-time</option>
+                  <option>Part-time</option>
+                  <option>Internship</option>
+                  <option>Contract</option>
+                  <option>Fellowship</option>
+                  <option>Not sure</option>
+                </select>
+              </label>
+
+              <label>
+                Style of work
+                <select
+                  value={profile.workStyle}
+                  onChange={(event) => updateProfile('workStyle', event.target.value)}
+                >
+                  <option>Remote</option>
+                  <option>Hybrid</option>
+                  <option>In-person</option>
+                  <option>Flexible / open to any</option>
+                </select>
+              </label>
+
+              <label>
+                Location
+                <input
+                  value={profile.location}
+                  onChange={(event) => updateProfile('location', event.target.value)}
+                  placeholder="City, state, country, or remote region"
+                />
+              </label>
+
+              <label>
+                What industries or fields are you interested in?
+                <input
+                  value={profile.industries}
+                  onChange={(event) => updateProfile('industries', event.target.value)}
+                  placeholder="Education, climate, health care, finance..."
+                />
+              </label>
+
+              <label>
+                What job titles or roles are you interested in?
+                <input
+                  value={profile.roles}
+                  onChange={(event) => updateProfile('roles', event.target.value)}
+                  placeholder="Analyst, coordinator, designer, software intern..."
+                />
+              </label>
+
+              <label>
+                What experience level are you looking for?
+                <select
+                  value={profile.experienceLevel}
+                  onChange={(event) => updateProfile('experienceLevel', event.target.value)}
+                >
+                  <option>Entry-level</option>
+                  <option>Internship / student</option>
+                  <option>Associate</option>
+                  <option>Mid-level</option>
+                  <option>Senior</option>
+                  <option>Manager</option>
+                  <option>Not sure</option>
+                </select>
+              </label>
+
+              <label className="wideField">
+                What is your education level or current student status?
+                <input
+                  value={profile.educationStatus}
+                  onChange={(event) => updateProfile('educationStatus', event.target.value)}
+                  placeholder="Current student, recent graduate, bachelor's degree, bootcamp..."
+                />
+              </label>
+
+              <div className="wideField resumeBox">
+                <div>
+                  <FileText size={20} />
+                  <div>
+                    <strong>{resume ? resume.name : 'Upload your resume'}</strong>
+                    <span>
+                      {resume
+                        ? `${formatFileSize(resume.size)} saved for this browser`
+                        : 'PDF, DOC, or DOCX. This is saved locally so refreshes do not wipe it.'}
+                    </span>
+                  </div>
+                </div>
+                <div className="resumeActions">
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    onChange={handleResumeUpload}
+                    aria-label="Upload resume"
+                  />
+                  <button type="button" onClick={() => fileInputRef.current?.click()}>
+                    <Upload size={18} />
+                    {resume ? 'Replace' : 'Upload'}
+                  </button>
+                  {resume && (
+                    <button className="ghostButton" type="button" onClick={removeResume}>
+                      <Trash2 size={18} />
+                      Remove
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section className="formSection" aria-labelledby="personal-heading">
+            <div className="sectionHeader">
+              <div>
+                <span>Step 3</span>
+                <h2 id="personal-heading">Personal search details</h2>
+              </div>
+            </div>
+            <label>
+              Describe the tailored things you want this search to care about.
+              <textarea
+                value={profile.personalDescription}
+                onChange={(event) => updateProfile('personalDescription', event.target.value)}
+                placeholder="Skills you want to gain, team environment, values, mentorship, pace, problems you want to work on..."
+                rows={8}
+              />
+            </label>
+          </section>
+        </form>
+
+        <aside className="summaryPanel" aria-label="Search profile summary">
+          <div className="summaryHeader">
+            <span>Search profile</span>
+            <strong>{readyToSearch ? 'Ready' : 'In progress'}</strong>
+          </div>
+          <div className="progressTrack" aria-label={`${completion}% complete`}>
+            <span style={{ width: `${completion}%` }} />
+          </div>
+
+          <dl className="summaryList">
+            <SummaryItem label="Sources" value={sources.map((source) => source.label).join(', ')} />
+            <SummaryItem label="Opportunity" value={profile.opportunityType} />
+            <SummaryItem label="Work style" value={profile.workStyle} />
+            <SummaryItem label="Location" value={profile.location} />
+            <SummaryItem label="Fields" value={profile.industries} />
+            <SummaryItem label="Roles" value={profile.roles} />
+            <SummaryItem label="Experience" value={profile.experienceLevel} />
+            <SummaryItem label="Education" value={profile.educationStatus} />
+            <SummaryItem label="Resume" value={resume?.name} />
+          </dl>
+
+          <div className="searchBrief">
+            <h3>Tailored description</h3>
+            <p>
+              {profile.personalDescription ||
+                'Add what makes your search unique so future matching can prioritize fit, growth, and work environment.'}
+            </p>
+          </div>
+
+          {searchSavedAt && <p className="savedProfileNote">Search profile saved at {searchSavedAt}.</p>}
+
+          <button
+            className="primaryAction"
+            type="button"
+            disabled={!readyToSearch || searchState === 'searching'}
+            onClick={saveSearchProfile}
+          >
+            {searchState === 'searching' ? <Loader2 className="spinIcon" size={18} /> : <Search size={18} />}
+            {searchState === 'searching' ? 'Searching job sites' : 'Save Search Profile'}
+          </button>
+        </aside>
+      </section>
+
+      {(searchState !== 'idle' || jobMatches.length > 0 || sourceNotes.length > 0) && (
+        <section className="resultsPanel" aria-live="polite" aria-labelledby="results-heading">
+          <div className="sectionHeader">
+            <div>
+              <span>Search results</span>
+              <h2 id="results-heading">Matched listings from the last two weeks</h2>
+            </div>
+            <strong>
+              {searchState === 'searching'
+                ? 'Searching'
+                : `${jobMatches.length} match${jobMatches.length === 1 ? '' : 'es'}`}
+            </strong>
+          </div>
+
+          {searchState === 'searching' && (
+            <div className="searchingState">
+              <Loader2 className="spinIcon" size={22} />
+              <div>
+                <strong>Checking selected job sites and reading job descriptions.</strong>
+                <span>Some sources may block automated reading; those will be listed in the source notes.</span>
+              </div>
+            </div>
+          )}
+
+          {searchError && <p className="errorNote">{searchError}</p>}
+
+          {searchState === 'done' && jobMatches.length === 0 && (
+            <p className="emptyResults">
+              No strong matches came back from readable listings. Try adding more specific role titles,
+              a company career page, or a Greenhouse/Lever board URL.
+            </p>
+          )}
+
+          {jobMatches.length > 0 && (
+            <div className="resultsScroller">
+              {jobMatches.map((match) => {
+                const isSaved = savedOpportunities.some(
+                  (item) => item.id === match.id || item.url === match.url,
+                );
+                return (
+                  <article className="jobCard" key={match.id}>
+                    <div className="jobCardTop">
+                      <div>
+                        <span>{match.source}</span>
+                        <h3>{match.title}</h3>
+                        <p>{match.company}</p>
+                      </div>
+                      <div className="jobScoreActions">
+                        <strong>{match.matchPercent}%</strong>
+                        <button type="button" onClick={() => saveOpportunity(match)} disabled={isSaved}>
+                          <Bookmark size={16} />
+                          {isSaved ? 'Saved' : 'Save'}
+                        </button>
+                      </div>
+                    </div>
+                    <div className="jobMeta">
+                      <span>{match.location}</span>
+                      <span>{match.recency}</span>
+                    </div>
+                    <p className="jobSnippet">{match.snippet}</p>
+                    <ul className="matchReasons">
+                      {match.reasons.map((reason) => (
+                        <li key={reason}>{reason}</li>
+                      ))}
+                    </ul>
+                    <a className="applyLink" href={match.url} target="_blank" rel="noreferrer">
+                      <ExternalLink size={16} />
+                      Open listing
+                    </a>
+                  </article>
+                );
+              })}
+            </div>
+          )}
+
+          {sourceNotes.length > 0 && (
+            <div className="sourceNotes">
+              {sourceNotes.map((note) => (
+                <div key={`${note.source}-${note.status}`}>
+                  <strong>{note.source}</strong>
+                  <span>{note.message}</span>
+                </div>
               ))}
             </div>
           )}
+        </section>
+      )}
+        </>
+      )}
+
+      {activeTab === 'profile' && (
+        <ProfileDashboard
+          applications={applications}
+          profile={profile}
+          removeApplication={removeApplication}
+          removeSavedOpportunity={removeSavedOpportunity}
+          savedOpportunities={savedOpportunities}
+          updateApplication={updateApplication}
+          updateProfile={updateProfile}
+          addApplication={addApplication}
+        />
+      )}
+    </main>
+  );
+}
+
+function SummaryItem({ label, value }) {
+  return (
+    <div>
+      <dt>{label}</dt>
+      <dd>{value || 'Not added yet'}</dd>
+    </div>
+  );
+}
+
+function ProfileDashboard({
+  addApplication,
+  applications,
+  profile,
+  removeApplication,
+  removeSavedOpportunity,
+  savedOpportunities,
+  updateApplication,
+  updateProfile,
+}) {
+  return (
+    <section className="profileDashboard" aria-labelledby="profile-heading">
+      <div className="dashboardHeader">
+        <div>
+          <span>Profile dashboard</span>
+          <h2 id="profile-heading">Your search profile and opportunity pipeline</h2>
+        </div>
+        <div className="dashboardStats" aria-label="Profile stats">
+          <strong>{savedOpportunities.length} saved</strong>
+          <strong>{applications.length} tracked</strong>
+        </div>
+      </div>
+
+      <section className="dashboardSection" aria-labelledby="profile-editor-heading">
+        <div className="sectionHeader compactHeader">
+          <div>
+            <span>Edit profile</span>
+            <h2 id="profile-editor-heading">What you are looking for</h2>
+          </div>
+          <LayoutDashboard size={22} />
         </div>
 
-        <form className="composer" onSubmit={sendMessage}>
-          <button type="button" disabled={!selectedVm || busy} title="Add context">
-            <Plus size={20} />
-          </button>
-          <input
-            value={chatInput}
-            onChange={(event) => setChatInput(event.target.value)}
-            placeholder={
-              selectedVm ? 'Ask Agent Mom anything about this workspace' : 'Create a workspace first'
-            }
-            disabled={!selectedVm || busy}
+        <div className="profileEditorGrid">
+          <label>
+            Opportunity type
+            <select
+              value={profile.opportunityType}
+              onChange={(event) => updateProfile('opportunityType', event.target.value)}
+            >
+              <option>Full-time</option>
+              <option>Part-time</option>
+              <option>Internship</option>
+              <option>Contract</option>
+              <option>Fellowship</option>
+              <option>Not sure</option>
+            </select>
+          </label>
+
+          <label>
+            Work style
+            <select
+              value={profile.workStyle}
+              onChange={(event) => updateProfile('workStyle', event.target.value)}
+            >
+              <option>Remote</option>
+              <option>Hybrid</option>
+              <option>In-person</option>
+              <option>Flexible / open to any</option>
+            </select>
+          </label>
+
+          <ProfileTextField label="Location" field="location" profile={profile} updateProfile={updateProfile} />
+          <ProfileTextField label="Fields" field="industries" profile={profile} updateProfile={updateProfile} />
+          <ProfileTextField label="Roles" field="roles" profile={profile} updateProfile={updateProfile} />
+
+          <label>
+            Experience level
+            <select
+              value={profile.experienceLevel}
+              onChange={(event) => updateProfile('experienceLevel', event.target.value)}
+            >
+              <option>Entry-level</option>
+              <option>Internship / student</option>
+              <option>Associate</option>
+              <option>Mid-level</option>
+              <option>Senior</option>
+              <option>Manager</option>
+              <option>Not sure</option>
+            </select>
+          </label>
+
+          <ProfileTextField
+            label="Education"
+            field="educationStatus"
+            profile={profile}
+            updateProfile={updateProfile}
           />
-          <button className="sendButton" disabled={!selectedVm || busy || !chatInput.trim()}>
-            {busy ? <Sparkles size={20} /> : <Send size={20} />}
-          </button>
-        </form>
+
+          <label className="wideField">
+            Tailored description
+            <textarea
+              value={profile.personalDescription}
+              onChange={(event) => updateProfile('personalDescription', event.target.value)}
+              rows={6}
+            />
+          </label>
+        </div>
       </section>
 
-    </main>
-  );
-}
-
-function AdminPage({ userSession }) {
-  const [users, setUsers] = useState([]);
-  const [accessCodeStatus, setAccessCodeStatus] = useState('Generate code');
-  const [adminAccessCode, setAdminAccessCode] = useState('');
-  const [adminError, setAdminError] = useState('');
-  const [busy, setBusy] = useState(false);
-
-  function endAdminSession() {
-    window.localStorage.removeItem(USER_SESSION_KEY);
-    window.location.href = '/';
-  }
-
-  function leaveAdminView(updatedSession = userSession) {
-    window.localStorage.setItem(USER_SESSION_KEY, JSON.stringify(updatedSession));
-    window.location.href = '/';
-  }
-
-  async function loadUsers() {
-    if (!userSession?.token) {
-      endAdminSession();
-      return;
-    }
-
-    setAdminError('');
-    const response = await fetch(`${API_BASE}/users`, {
-      headers: authHeaders(userSession),
-    });
-    const data = await response.json();
-    if (!response.ok) {
-      if (response.status === 401 || response.status === 403) {
-        endAdminSession();
-        return;
-      }
-      throw data;
-    }
-    setUsers(visibleAdminUsers(data.users));
-  }
-
-  useEffect(() => {
-    loadUsers().catch((error) => setAdminError(formatError(error)));
-  }, [userSession?.token]);
-
-  useEffect(() => {
-    fetch(`${API_BASE}/auth/config`, {
-      headers: authHeaders(userSession),
-    })
-      .then((response) => response.json())
-      .then((data) => setAdminAccessCode(data.admin_access_code ?? ''))
-      .catch(() => setAdminAccessCode(''));
-  }, [userSession?.token]);
-
-  useEffect(() => {
-    if (!userSession?.token) {
-      endAdminSession();
-      return undefined;
-    }
-
-    let cancelled = false;
-    const checkAdminSession = async () => {
-      try {
-        const refreshedSession = await validateSession(userSession);
-        if (cancelled) return;
-        if (refreshedSession.role !== 'ADMN') {
-          leaveAdminView(refreshedSession);
-        }
-      } catch {
-        if (!cancelled) {
-          endAdminSession();
-        }
-      }
-    };
-
-    const interval = window.setInterval(checkAdminSession, 1000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(interval);
-    };
-  }, [userSession?.token]);
-
-  async function updateRole(userId, role) {
-    if (!userSession?.token) {
-      setAdminError('Sign in as an admin to update roles.');
-      return;
-    }
-
-    const previousUsers = users;
-    setUsers((current) =>
-      current.map((user) => (user.id === userId ? { ...user, role } : user)),
-    );
-    setAdminError('');
-
-    try {
-      const response = await fetch(`${API_BASE}/users/${userId}/role`, {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          ...authHeaders(userSession),
-        },
-        body: JSON.stringify({ role }),
-      });
-      const data = await response.json();
-      if (!response.ok) {
-        throw data;
-      }
-      const updatedUser = normalizeAdminUser(data);
-      setUsers((current) => {
-        if (updatedUser.status === 'inactive') {
-          return current.filter((user) => user.id !== updatedUser.id);
-        }
-        return current.map((user) => (user.id === updatedUser.id ? updatedUser : user));
-      });
-      if (sameEmail(updatedUser.email, userSession.email)) {
-        const updatedSession = { ...userSession, role: updatedUser.role };
-        if (updatedUser.role !== 'ADMN') {
-          leaveAdminView(updatedSession);
-        } else {
-          window.localStorage.setItem(USER_SESSION_KEY, JSON.stringify(updatedSession));
-        }
-      }
-    } catch (error) {
-      setUsers(previousUsers);
-      setAdminError(formatError(error));
-    }
-  }
-
-  async function refreshAccessCode() {
-    if (!userSession?.token) {
-      setAdminError('Sign in as an admin to generate an access code.');
-      return;
-    }
-
-    setBusy(true);
-    setAdminError('');
-    try {
-      const response = await fetch(`${API_BASE}/access-codes`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...authHeaders(userSession),
-        },
-        body: JSON.stringify({ label: 'Meetup access' }),
-      });
-      const data = await response.json();
-      if (!response.ok) {
-        throw data;
-      }
-      setAccessCodeStatus(data.code);
-    } catch (error) {
-      setAdminError(formatError(error));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function logOutUser(user) {
-    if (!userSession?.token) {
-      setAdminError('Sign in as an admin to log out users.');
-      return;
-    }
-
-    const previousUsers = users;
-    setUsers((current) => current.filter((currentUser) => currentUser.id !== user.id));
-    setAdminError('');
-
-    try {
-      const response = await fetch(`${API_BASE}/users/${user.id}/sessions`, {
-        method: 'DELETE',
-        headers: authHeaders(userSession),
-      });
-      const data = await response.json();
-      if (!response.ok) {
-        throw data;
-      }
-      if (sameEmail(user.email, userSession.email)) {
-        endAdminSession();
-      }
-    } catch (error) {
-      setUsers(previousUsers);
-      setAdminError(formatError(error));
-    }
-  }
-
-  async function logOutAll() {
-    if (!userSession?.token) {
-      setAdminError('Sign in as an admin to log out users.');
-      return;
-    }
-
-    const previousUsers = users;
-    setUsers([]);
-    setAdminError('');
-
-    try {
-      const response = await fetch(`${API_BASE}/sessions`, {
-        method: 'DELETE',
-        headers: authHeaders(userSession),
-      });
-      const data = await response.json();
-      if (!response.ok) {
-        throw data;
-      }
-      window.localStorage.removeItem(USER_SESSION_KEY);
-      window.location.href = '/';
-    } catch (error) {
-      setUsers(previousUsers);
-      setAdminError(formatError(error));
-    }
-  }
-
-  function openWorkspace() {
-    window.location.href = '/';
-  }
-
-  return (
-    <main className="adminPage">
-      <section className="adminPanel" aria-label="Admin user management preview">
-        <header className="adminTopBar">
-          <div className="adminTopActions">
-            <button className="adminNavButton" type="button" onClick={openWorkspace}>
-              Workspace
-            </button>
-            <div className="accessCodeControl" aria-label="Access code">
-              <code>{busy ? 'Generating...' : accessCodeStatus}</code>
-              <button
-                type="button"
-                onClick={refreshAccessCode}
-                title="Generate access code"
-                disabled={busy}
-              >
-                <RefreshCcw size={17} />
-              </button>
-            </div>
-            {adminAccessCode && (
-              <div className="accessCodeControl staticAccessCode" aria-label="Admin access code">
-                <span>Admin</span>
-                <code>{adminAccessCode}</code>
-              </div>
-            )}
+      <section className="dashboardSection" aria-labelledby="saved-heading">
+        <div className="sectionHeader compactHeader">
+          <div>
+            <span>Saved opportunities</span>
+            <h2 id="saved-heading">Jobs to review</h2>
           </div>
-        </header>
+          <Bookmark size={22} />
+        </div>
 
-        {adminError && <p className="adminError">{adminError}</p>}
-
-        <section className="adminTableShell">
-          <div className="adminTableHeader">
-            <span>Name</span>
-            <span>Email</span>
-            <span>Role</span>
-            <span>Status</span>
-            <button type="button" onClick={logOutAll}>
-              Log Out All
-            </button>
-          </div>
-
-          <div className="adminUserList">
-            {users.map((user) => (
-              <article className="adminUserRow" key={user.id}>
-                <strong>{user.name}</strong>
-                <span>{user.email}</span>
-                <select
-                  value={user.role}
-                  onChange={(event) => updateRole(user.id, event.target.value)}
-                  aria-label={`Role for ${user.name}`}
-                >
-                  <option value="ADMN">ADMN</option>
-                  <option value="PAR">PAR</option>
-                </select>
-                <span
-                  className={`adminStatusDot ${user.status}`}
-                  title={adminStatusLabel(user.status)}
-                  aria-label={adminStatusLabel(user.status)}
-                />
-                <button type="button" onClick={() => logOutUser(user)}>
-                  Log Out
-                </button>
+        {savedOpportunities.length === 0 ? (
+          <p className="emptyResults">Saved jobs will show up here when you save a match from search results.</p>
+        ) : (
+          <div className="savedGrid">
+            {savedOpportunities.map((opportunity) => (
+              <article className="savedOpportunity" key={opportunity.id}>
+                <div>
+                  <span>{opportunity.source}</span>
+                  <h3>{opportunity.title}</h3>
+                  <p>{opportunity.company}</p>
+                </div>
+                <div className="jobMeta">
+                  <span>{opportunity.matchPercent}% match</span>
+                  <span>{opportunity.location}</span>
+                </div>
+                <div className="savedActions">
+                  <a href={opportunity.url} target="_blank" rel="noreferrer">
+                    <ExternalLink size={16} />
+                    Open
+                  </a>
+                  <button type="button" onClick={() => addApplication(opportunity)}>
+                    <ClipboardList size={16} />
+                    Track
+                  </button>
+                  <button type="button" onClick={() => removeSavedOpportunity(opportunity.id)}>
+                    <Trash2 size={16} />
+                    Remove
+                  </button>
+                </div>
               </article>
             ))}
-            {!users.length && <p className="emptyList">No users in the database yet.</p>}
           </div>
-        </section>
+        )}
       </section>
-    </main>
+
+      <section className="dashboardSection" aria-labelledby="tracker-heading">
+        <div className="sectionHeader compactHeader">
+          <div>
+            <span>Application tracker</span>
+            <h2 id="tracker-heading">Spreadsheet deck</h2>
+          </div>
+          <ClipboardList size={22} />
+        </div>
+
+        {applications.length === 0 ? (
+          <p className="emptyResults">Track saved opportunities to build your application spreadsheet.</p>
+        ) : (
+          <div className="trackerTableWrap">
+            <table className="trackerTable">
+              <thead>
+                <tr>
+                  <th>Role</th>
+                  <th>Company</th>
+                  <th>Match</th>
+                  <th>Status</th>
+                  <th>Applied</th>
+                  <th>Follow up</th>
+                  <th>Contact</th>
+                  <th>Notes</th>
+                  <th>Link</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {applications.map((application) => (
+                  <tr key={application.id}>
+                    <td>
+                      <strong>{application.title}</strong>
+                      <span>{application.source}</span>
+                    </td>
+                    <td>{application.company}</td>
+                    <td>{application.matchPercent}%</td>
+                    <td>
+                      <select
+                        value={application.status}
+                        onChange={(event) => updateApplication(application.id, 'status', event.target.value)}
+                      >
+                        <option>Saved</option>
+                        <option>Applied</option>
+                        <option>Interviewing</option>
+                        <option>Followed up</option>
+                        <option>Rejected</option>
+                        <option>Offer</option>
+                      </select>
+                    </td>
+                    <td>
+                      <input
+                        type="date"
+                        value={application.appliedDate}
+                        onChange={(event) => updateApplication(application.id, 'appliedDate', event.target.value)}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        type="date"
+                        value={application.followUpDate}
+                        onChange={(event) => updateApplication(application.id, 'followUpDate', event.target.value)}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        value={application.contact}
+                        onChange={(event) => updateApplication(application.id, 'contact', event.target.value)}
+                        placeholder="Name or email"
+                      />
+                    </td>
+                    <td>
+                      <input
+                        value={application.notes}
+                        onChange={(event) => updateApplication(application.id, 'notes', event.target.value)}
+                        placeholder="Next step"
+                      />
+                    </td>
+                    <td>
+                      <a href={application.url} target="_blank" rel="noreferrer">
+                        <ExternalLink size={16} />
+                      </a>
+                    </td>
+                    <td>
+                      <button
+                        aria-label={`Remove ${application.title}`}
+                        type="button"
+                        onClick={() => removeApplication(application.id)}
+                      >
+                        <X size={16} />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+    </section>
   );
 }
 
-function friendlyStatus(status) {
-  const lower = status.toLowerCase();
-  if (lower === 'running' || lower === 'draining') return 'Ready';
-  if (lower === 'stopped') return 'Paused';
-  if (lower === 'paused') return 'Paused';
-  if (lower === 'crashed') return 'Needs attention';
-  return status;
+function ProfileTextField({ field, label, profile, updateProfile }) {
+  return (
+    <label>
+      {label}
+      <input value={profile[field]} onChange={(event) => updateProfile(field, event.target.value)} />
+    </label>
+  );
 }
 
-function adminStatusLabel(status) {
-  if (status === 'active') return 'Active';
-  if (status === 'idle') return 'Idle';
-  if (status === 'stagnant') return 'Stagnant';
-  return 'Inactive';
-}
-
-function normalizeAdminUser(user) {
-  return {
-    ...user,
-    id: String(user.id),
-    status: userDisplayStatus(user),
-  };
-}
-
-function visibleAdminUsers(users) {
-  return (users ?? [])
-    .map(normalizeAdminUser)
-    .filter((user) => user.status !== 'inactive');
-}
-
-function userDisplayStatus(user) {
-  if (user.status === 'inactive' || !user.last_active_at) return 'inactive';
-  const inactiveAfter = 15 * 60;
-  const stagnantAfter = 5 * 60;
-  const ageSeconds = Math.max(0, Math.floor(Date.now() / 1000) - user.last_active_at);
-  if (ageSeconds >= inactiveAfter) return 'inactive';
-  if (ageSeconds >= stagnantAfter) return 'stagnant';
-  return 'active';
-}
-
-function chatTitle(prompt) {
-  const title = prompt.trim().replace(/\s+/g, ' ');
-  return title.length > 34 ? `${title.slice(0, 34)}...` : title || 'New chat';
-}
-
-function groupChatsByAge(chats, now) {
-  const startOfToday = new Date(now);
-  startOfToday.setHours(0, 0, 0, 0);
-
-  const startOfThisWeek = new Date(startOfToday);
-  startOfThisWeek.setDate(startOfThisWeek.getDate() - 6);
-
-  const groups = [
-    { label: 'Today', chats: [] },
-    { label: 'This week', chats: [] },
-    { label: 'Older', chats: [] },
-  ];
-
-  chats.forEach((chat) => {
-    const timestamp = chat.updatedAt ?? chat.createdAt ?? 0;
-    if (timestamp >= startOfToday.getTime()) {
-      groups[0].chats.push(chat);
-    } else if (timestamp >= startOfThisWeek.getTime()) {
-      groups[1].chats.push(chat);
-    } else {
-      groups[2].chats.push(chat);
+function usePersistentState(key, defaultValue) {
+  const [value, setValue] = useState(() => {
+    try {
+      const stored = window.localStorage.getItem(STORAGE_KEY);
+      if (!stored) return defaultValue;
+      const parsed = JSON.parse(stored);
+      return parsed[key] ?? defaultValue;
+    } catch {
+      return defaultValue;
     }
   });
 
-  return groups.filter((group) => group.chats.length);
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(STORAGE_KEY);
+      const parsed = stored ? JSON.parse(stored) : {};
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...parsed, [key]: value }));
+    } catch {
+      // Auto-save should never block form entry.
+    }
+  }, [key, value]);
+
+  return [value, setValue];
 }
 
-function loadStoredChats() {
-  try {
-    const stored = window.localStorage.getItem(CHAT_STORAGE_KEY);
-    if (!stored) return {};
-    const parsed = JSON.parse(stored);
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
-    return {};
-  }
+function normalizeSource(value) {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const hasProtocol = /^https?:\/\//i.test(trimmed);
+  const url = hasProtocol ? trimmed : `https://${trimmed}`;
+  let label = trimmed.replace(/^https?:\/\//i, '').replace(/^www\./i, '').split('/')[0];
+  label = label || trimmed;
+  return {
+    id: `source-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    label,
+    url,
+  };
 }
 
-function loadUserSession() {
+function formatSavedAt(date) {
+  return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
+function formatFileSize(bytes = 0) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function openResumeDb() {
+  return new Promise((resolve, reject) => {
+    const request = window.indexedDB.open(RESUME_DB, 1);
+    request.onupgradeneeded = () => {
+      request.result.createObjectStore(RESUME_STORE);
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function loadResume() {
+  if (!window.indexedDB) return null;
   try {
-    const stored = window.localStorage.getItem(USER_SESSION_KEY);
-    if (!stored) return null;
-    const parsed = JSON.parse(stored);
-    return parsed?.email && parsed?.token ? parsed : null;
+    const db = await openResumeDb();
+    return await new Promise((resolve, reject) => {
+      const request = db.transaction(RESUME_STORE, 'readonly').objectStore(RESUME_STORE).get(RESUME_KEY);
+      request.onsuccess = () => resolve(request.result ?? null);
+      request.onerror = () => reject(request.error);
+    });
   } catch {
     return null;
   }
 }
 
-function userIdentity(email) {
-  return String(email ?? '').trim().toLowerCase();
+async function saveResume(resume) {
+  if (!window.indexedDB) return;
+  const db = await openResumeDb();
+  await new Promise((resolve, reject) => {
+    const request = db.transaction(RESUME_STORE, 'readwrite').objectStore(RESUME_STORE).put(resume, RESUME_KEY);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
 }
 
-function sameEmail(left, right) {
-  return userIdentity(left) === userIdentity(right);
+async function deleteResume() {
+  if (!window.indexedDB) return;
+  const db = await openResumeDb();
+  await new Promise((resolve, reject) => {
+    const request = db.transaction(RESUME_STORE, 'readwrite').objectStore(RESUME_STORE).delete(RESUME_KEY);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
 }
 
-function authHeaders(session = loadUserSession()) {
-  return session?.token ? { Authorization: `Bearer ${session.token}` } : {};
-}
-
-function renderResult(result) {
-  const output = [result.stdout, result.stderr].filter(Boolean).join('\n');
-  return output || `Done.`;
-}
-
-function formatError(error) {
-  if (error?.stdout || error?.stderr) {
-    return renderResult(error);
-  }
-  return error?.error ?? String(error);
-}
-
-createRoot(document.getElementById('root')).render(<Root />);
+createRoot(document.getElementById('root')).render(<App />);

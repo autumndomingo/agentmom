@@ -45,6 +45,7 @@ const BASE_BUILDER_NAME: &str = "mom-base-builder";
 mod api;
 mod backup;
 mod db;
+mod job_search;
 mod sandbox;
 mod service;
 mod ui;

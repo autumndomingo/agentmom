@@ -15,8 +15,10 @@ use tower_http::services::{ServeDir, ServeFile};
 use crate::{
     ApiState, JobResponse, WorkspaceRecord, create_job, default_workspace_backup_interval,
     default_workspace_cpus, default_workspace_idle_timeout, default_workspace_memory,
-    default_workspace_volume_quota, job_get, node_worker_url, sanitize_workspace_name,
-    select_ready_node, worker_token, workspace_all, workspace_get, workspace_upsert_pending,
+    default_workspace_volume_quota,
+    job_search::{JobSearchRequest, JobSearchResponse, search_jobs},
+    job_get, node_worker_url, sanitize_workspace_name, select_ready_node, worker_token,
+    workspace_all, workspace_get, workspace_upsert_pending,
 };
 
 #[derive(Debug, Deserialize)]
@@ -96,6 +98,7 @@ pub(crate) fn api_routes() -> Router<Arc<ApiState>> {
         .route("/api/vms/{name}/hermes", post(hermes_vm))
         .route("/api/vms/{name}/hermes-ui", post(hermes_ui_vm))
         .route("/api/vms/{name}/opencode", post(opencode_vm))
+        .route("/api/opportunity-search", post(opportunity_search))
 }
 
 pub(crate) fn serve_assets(app: Router) -> Router {
@@ -241,6 +244,12 @@ async fn opencode_vm(Path(name): Path<String>) -> Result<Json<CommandResult>, Ui
 
 async fn hermes_ui_vm(Path(name): Path<String>) -> Result<Json<CommandResult>, UiError> {
     open_workspace_service(&name, "hermes").await
+}
+
+async fn opportunity_search(
+    Json(request): Json<JobSearchRequest>,
+) -> Result<Json<JobSearchResponse>, UiError> {
+    Ok(Json(search_jobs(request).await?))
 }
 
 async fn open_workspace_service(name: &str, service: &str) -> Result<Json<CommandResult>, UiError> {
