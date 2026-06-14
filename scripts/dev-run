@@ -152,6 +152,13 @@ set -a
 source .state/dev.env
 set +a
 
+run_step "checking dev host" "${log_dir}/dev-host.log" bash -c '
+  if [ "$(uname -s)" != Linux ]; then
+    echo "just dev uses the real microvm.nix runtime and must run on a Linux host."
+    exit 1
+  fi
+'
+
 if [ -z "${OPENROUTER_API_KEY:-}" ]; then
   cat >&2 <<'EOF_PROXY_WARN'
 OPENROUTER_API_KEY is not set.
@@ -222,6 +229,7 @@ proxy_pid=$!
 write_pid_file
 wait_for_tcp "starting proxy" 1080 "${log_dir}/iron-proxy.log"
 
+run_step "installing UI deps" "${log_dir}/ui-install.log" npm --prefix ui ci
 run_step "building UI" "${log_dir}/ui-build.log" npm --prefix ui run build
 
 run_step "building mom" "${log_dir}/cargo-build.log" cargo build --bin mom

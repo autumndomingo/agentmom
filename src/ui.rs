@@ -1,6 +1,6 @@
 use std::{collections::HashMap, env, path::PathBuf, sync::Arc, time::Duration};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use axum::{
     Json, Router,
     extract::{Path, Query, State, ws::Message},
@@ -39,7 +39,7 @@ struct CommandResult {
     stderr: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct ErrorBody {
     error: String,
 }
@@ -355,10 +355,19 @@ async fn open_hermes_dashboard(name: &str) -> Result<Json<CommandResult>, UiErro
             vm_name,
         })
         .send()
-        .await?
-        .error_for_status()?
-        .json::<OpenWorkerServiceResponse>()
         .await?;
+    let status = response.status();
+    let body = response.text().await?;
+    if !status.is_success() {
+        return Err(UiError::Command(CommandResult {
+            ok: false,
+            code: Some(i32::from(status.as_u16())),
+            stdout: String::new(),
+            stderr: worker_error_body(&body),
+        }));
+    }
+    let response = serde_json::from_str::<OpenWorkerServiceResponse>(&body)
+        .with_context(|| format!("parse Hermes worker service response: {body}"))?;
     service_tunnel_upsert(&workspace_name, node, "hermes", &response.url)?;
     Ok(Json(CommandResult {
         ok: true,
@@ -366,6 +375,16 @@ async fn open_hermes_dashboard(name: &str) -> Result<Json<CommandResult>, UiErro
         stdout: format!("{}\n", response.url),
         stderr: String::new(),
     }))
+}
+
+fn worker_error_body(body: &str) -> String {
+    if body.trim().is_empty() {
+        return "worker returned an empty error response".to_string();
+    }
+    if let Ok(error) = serde_json::from_str::<ErrorBody>(body) {
+        return error.error;
+    }
+    body.to_string()
 }
 
 fn workspace_worker_url(workspace: &WorkspaceRecord) -> Result<String> {
@@ -513,7 +532,7 @@ impl IntoResponse for UiError {
 
 #[cfg(test)]
 mod tests {
-    use super::service_tunnel_domain_allowed;
+    use super::{service_tunnel_domain_allowed, worker_error_body};
 
     #[test]
     fn service_tunnel_domain_allows_known_node_port_hosts() {
@@ -527,5 +546,21 @@ mod tests {
         assert!(!service_tunnel_domain_allowed("mom-3-45887.agentmom.xyz"));
         assert!(!service_tunnel_domain_allowed("mom-1-api.agentmom.xyz"));
         assert!(!service_tunnel_domain_allowed("mom-1-45887.example.com"));
+    }
+
+    #[test]
+    fn worker_error_body_prefers_json_error_field() {
+        assert_eq!(
+            worker_error_body(r#"{"error":"dashboard failed"}"#),
+            "dashboard failed"
+        );
+    }
+
+    #[test]
+    fn worker_error_body_preserves_raw_body() {
+        assert_eq!(
+            worker_error_body("raw dashboard failure"),
+            "raw dashboard failure"
+        );
     }
 }

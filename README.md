@@ -123,7 +123,8 @@ just dev
 
 `just dev` writes `.state/dev.env`, builds the UI, chooses available localhost
 ports, starts iron-proxy on host port `1080`, starts `mom api`, and starts
-`mom worker`. Runtime state stays under `.state/microvms`.
+`mom worker`. It uses the real microvm.nix runtime, so run it on a Linux host
+with KVM and systemd available. Runtime state stays under `.state/microvms`.
 
 With `just dev` running, use `just dev-smoke` in another shell to check the API
 health endpoint and cookie-based admin login. `just dev-reset` stops the dev

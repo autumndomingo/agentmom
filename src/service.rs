@@ -146,17 +146,39 @@ fn hermes_dashboard_script() -> String {
     format!(
         r#"
 set -eu
-if ! command -v hermes >/dev/null 2>&1; then
-  echo "Hermes is not installed in this VM; recreate it with the current runtime" >&2
+mkdir -p {workdir_q} {log_dir_q}
+hermes_bin=""
+if command -v hermes >/dev/null 2>&1; then
+  hermes_path="$(command -v hermes)"
+  echo "hermes path: ${{hermes_path}}" >&2
+  readlink -f "${{hermes_path}}" >&2 || true
+  if "${{hermes_path}}" dashboard --help >/tmp/mom-hermes/dashboard-help.log 2>&1; then
+    hermes_bin="${{hermes_path}}"
+  fi
+fi
+if [ -z "${{hermes_bin}}" ]; then
+  for candidate in /nix/store/*hermes-agent-env*/bin/hermes /run/current-system/sw/bin/hermes /etc/profiles/per-user/root/bin/hermes /root/.nix-profile/bin/hermes; do
+    if [ -x "${{candidate}}" ] && "${{candidate}}" dashboard --help >/tmp/mom-hermes/dashboard-help.log 2>&1; then
+      hermes_bin="${{candidate}}"
+      break
+    fi
+  done
+fi
+if [ -z "${{hermes_bin}}" ]; then
+  echo "Hermes dashboard is not available in this VM; recreate it with the current runtime" >&2
+  echo "PATH=${{PATH:-}}" >&2
+  command -v hermes >&2 || true
+  cat /tmp/mom-hermes/dashboard-help.log >&2 || true
   exit 1
 fi
-mkdir -p {workdir_q} {log_dir_q}
+echo "using hermes: ${{hermes_bin}}" >&2
+echo "HERMES_WEB_DIST=${{HERMES_WEB_DIST:-}}" >&2
 if wget -q -O /dev/null --timeout=2 http://127.0.0.1:{port}{health_path} >/dev/null 2>&1; then
   exit 0
 fi
 cd {workdir_q}
 if ! netstat -ltn 2>/dev/null | grep -q ':{port}[[:space:]]'; then
-  setsid hermes dashboard --host 0.0.0.0 --port {port} --no-open --insecure </dev/null >{log_path_q} 2>&1 &
+  setsid "${{hermes_bin}}" dashboard --host 0.0.0.0 --port {port} --no-open --insecure </dev/null >{log_path_q} 2>&1 &
 fi
 for _ in $(seq 1 {readiness_attempts}); do
   if wget -q -O /dev/null --timeout=2 http://127.0.0.1:{port}{health_path} >/dev/null 2>&1; then

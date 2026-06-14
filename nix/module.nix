@@ -1,4 +1,4 @@
-{ config, lib, pkgs, defaultNixpkgsUrl ? "github:NixOS/nixpkgs/nixpkgs-unstable", defaultMicrovmNixUrl ? "github:microvm-nix/microvm.nix", ... }:
+{ config, lib, pkgs, defaultNixpkgsUrl ? "github:NixOS/nixpkgs/nixpkgs-unstable", defaultMicrovmNixUrl ? "github:microvm-nix/microvm.nix", defaultHermesAgentUrl ? "github:NousResearch/hermes-agent", ... }:
 
 let
   cfg = config.services.agentmom;
@@ -112,6 +112,7 @@ let
     MOM_MICROVM_EXTERNAL_INTERFACE = cfg.microvm.externalInterface;
     MOM_MICROVM_NIXPKGS_URL = cfg.microvm.nixpkgsUrl;
     MOM_MICROVM_NIX_URL = cfg.microvm.microvmNixUrl;
+    MOM_HERMES_AGENT_URL = cfg.microvm.hermesAgentUrl;
     MOM_NODE_ID = cfg.nodeId;
     MOM_LOG_FORMAT = cfg.logFormat;
     MOM_CAPACITY_CPUS = toString cfg.capacity.cpus;
@@ -296,6 +297,13 @@ in
         default = defaultMicrovmNixUrl;
         defaultText = lib.literalExpression ''"path:/nix/store/...-source"'';
         description = "microvm.nix flake URL used by generated workspace flakes.";
+      };
+
+      hermesAgentUrl = lib.mkOption {
+        type = lib.types.str;
+        default = defaultHermesAgentUrl;
+        defaultText = lib.literalExpression ''"path:/nix/store/...-source"'';
+        description = "Hermes Agent flake URL used by generated workspace flakes.";
       };
 
     };
@@ -626,6 +634,8 @@ in
         default = [
           "api.openai.com"
           "openrouter.ai"
+          "models.dev"
+          "hermes-agent.nousresearch.com"
           "dl-cdn.alpinelinux.org"
           "github.com"
           "api.github.com"

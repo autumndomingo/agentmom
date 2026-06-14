@@ -199,6 +199,7 @@ struct MicrovmSpec {
     credential_proxy_ca_file: Option<String>,
     nixpkgs_url: String,
     microvm_input_url: String,
+    hermes_agent_input_url: String,
     ssh_public_key: String,
     labels: HashMap<String, String>,
 }
@@ -237,6 +238,10 @@ pub(crate) async fn create_vm(request: WorkspaceVmRequest) -> Result<()> {
 
     fs::write(dir.join("spec.json"), serde_json::to_vec_pretty(&spec)?)?;
     fs::write(dir.join("microvm-workspace.nix"), microvm_workspace_nix())?;
+    fs::write(
+        dir.join("hermes-agent-package.nix"),
+        hermes_agent_package_nix(),
+    )?;
     fs::write(dir.join("flake.nix"), microvm_flake_nix(&spec)?)?;
     fs::write(dir.join("state"), b"stopped\n")?;
 
@@ -550,6 +555,8 @@ fn microvm_spec(
         .unwrap_or_else(|_| "github:NixOS/nixpkgs/nixpkgs-unstable".to_string());
     let microvm_input_url = env::var("MOM_MICROVM_NIX_URL")
         .unwrap_or_else(|_| "github:microvm-nix/microvm.nix".to_string());
+    let hermes_agent_input_url = env::var("MOM_HERMES_AGENT_URL")
+        .unwrap_or_else(|_| "github:NousResearch/hermes-agent".to_string());
     let ca_file = config
         .credentials
         .proxy_ca_path
@@ -588,6 +595,7 @@ fn microvm_spec(
         credential_proxy_ca_file: ca_file,
         nixpkgs_url,
         microvm_input_url,
+        hermes_agent_input_url,
         ssh_public_key,
         labels,
     })
@@ -713,12 +721,20 @@ fn microvm_flake_nix(spec: &MicrovmSpec) -> Result<String> {
       url = "{microvm_input_url}";
       inputs.nixpkgs.follows = "nixpkgs";
     }};
+    hermes-agent = {{
+      url = "{hermes_agent_input_url}";
+      inputs.nixpkgs.follows = "nixpkgs";
+    }};
   }};
 
-  outputs = {{ self, nixpkgs, microvm }}:
+  outputs = {{ self, nixpkgs, microvm, hermes-agent }}:
     let
       system = "{system}";
       spec = builtins.fromJSON (builtins.readFile ./spec.json);
+      hermesAgentPackage = pkgs: import ./hermes-agent-package.nix {{
+        inherit pkgs;
+        inputs = {{ inherit hermes-agent; }};
+      }};
     in {{
       packages.${{system}} = {{
         runner = self.nixosConfigurations.{name}.config.microvm.declaredRunner;
@@ -728,7 +744,7 @@ fn microvm_flake_nix(spec: &MicrovmSpec) -> Result<String> {
         inherit system;
         modules = [
           microvm.nixosModules.microvm
-          (import ./microvm-workspace.nix {{ inherit spec; }})
+          (import ./microvm-workspace.nix {{ inherit spec hermesAgentPackage; }})
         ];
       }};
     }};
@@ -737,6 +753,7 @@ fn microvm_flake_nix(spec: &MicrovmSpec) -> Result<String> {
         name = spec.name,
         nixpkgs_url = spec.nixpkgs_url,
         microvm_input_url = spec.microvm_input_url,
+        hermes_agent_input_url = spec.hermes_agent_input_url,
         system = system
     ))
 }
@@ -745,14 +762,18 @@ fn microvm_workspace_nix() -> &'static str {
     include_str!("../nix/microvm-workspace.nix")
 }
 
+fn hermes_agent_package_nix() -> &'static str {
+    include_str!("../nix/hermes-agent-package.nix")
+}
+
 async fn ensure_microvm_host_ready(config: &MomConfig) -> Result<()> {
+    if !cfg!(target_os = "linux") {
+        bail!("the microvm.nix runtime requires a Linux host");
+    }
     for command in ["ip", "nix", "ssh", "ssh-keygen", "systemctl"] {
         if !command_exists(command).await {
             bail!("{command} is required for the microvm.nix runtime");
         }
-    }
-    if !cfg!(target_os = "linux") {
-        bail!("the microvm.nix runtime requires a Linux host");
     }
     if !Path::new("/dev/kvm").exists() {
         bail!("/dev/kvm is required for the microvm.nix runtime");

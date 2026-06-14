@@ -12,9 +12,13 @@
       url = "github:microvm-nix/microvm.nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    hermes-agent = {
+      url = "github:NousResearch/hermes-agent";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
-  outputs = { self, nixpkgs, crane, rust-overlay, microvm }:
+  outputs = { self, nixpkgs, crane, rust-overlay, microvm, hermes-agent }:
     let
       systems = [
         "aarch64-darwin"
@@ -41,7 +45,10 @@
               let
                 rel = pkgs.lib.removePrefix "${toString ./.}/" (toString path);
               in
-              (craneLib.filterCargoSources path type || rel == "nix" || rel == "nix/microvm-workspace.nix")
+              (craneLib.filterCargoSources path type
+                || rel == "nix"
+                || rel == "nix/microvm-workspace.nix"
+                || rel == "nix/hermes-agent-package.nix")
               && !(pkgs.lib.hasPrefix "tests/" rel);
           };
           cargoVendorDir = craneLib.vendorCargoDeps {
@@ -114,11 +121,16 @@
               runHook postInstall
             '';
           };
+          hermes-agent-package = import ./nix/hermes-agent-package.nix {
+            inherit pkgs;
+            inputs = { inherit hermes-agent; };
+          };
         in
         {
           default = mom;
           mom = mom;
           iron-proxy = iron-proxy;
+          hermes-agent = hermes-agent-package;
         });
 
       apps = eachSystem (system: {
@@ -132,6 +144,7 @@
         import ./nix/module.nix (moduleArgs // {
           defaultNixpkgsUrl = nixpkgsInputUrl;
           defaultMicrovmNixUrl = microvmInputUrl;
+          defaultHermesAgentUrl = "path:${hermes-agent.outPath}";
         });
       nixosModules.agentmom = self.nixosModules.default;
 
