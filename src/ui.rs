@@ -28,7 +28,7 @@ use crate::{
 };
 
 const UI_JOB_WAIT_TIMEOUT: Duration = Duration::from_secs(360);
-const UI_WORKER_SERVICE_TIMEOUT: Duration = Duration::from_secs(360);
+const UI_WORKER_SERVICE_TIMEOUT: Duration = Duration::from_secs(45);
 
 #[derive(Debug, Deserialize)]
 struct CommandRequest {

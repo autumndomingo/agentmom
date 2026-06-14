@@ -20,7 +20,8 @@ struct ServiceTunnel {
 const HERMES_HEALTH_PATH: &str = "/api/status";
 const HERMES_WORKDIR: &str = "/workspace";
 const HERMES_LOG_PATH: &str = "/tmp/mom-hermes/dashboard.log";
-const HERMES_READINESS_ATTEMPTS: u16 = 90;
+const HERMES_READINESS_ATTEMPTS: u16 = 12;
+const HERMES_WGET_TIMEOUT_SECS: u16 = 1;
 
 #[derive(Clone, Default)]
 pub(crate) struct ServiceState {
@@ -175,7 +176,7 @@ if ! command -v hermes >/dev/null 2>&1; then
   exit 1
 fi
 mkdir -p {workdir_q} {log_dir_q}
-if wget -q -O /dev/null --timeout=2 http://127.0.0.1:{port}{health_path} >/dev/null 2>&1; then
+if wget -q -O /dev/null --timeout={wget_timeout} http://127.0.0.1:{port}{health_path} >/dev/null 2>&1; then
   exit 0
 fi
 cd {workdir_q}
@@ -183,7 +184,7 @@ if ! netstat -ltn 2>/dev/null | grep -q ':{port}[[:space:]]'; then
   setsid hermes dashboard --host 0.0.0.0 --port {port} --no-open --insecure </dev/null >{log_path_q} 2>&1 &
 fi
 for _ in $(seq 1 {readiness_attempts}); do
-  if wget -q -O /dev/null --timeout=2 http://127.0.0.1:{port}{health_path} >/dev/null 2>&1; then
+  if wget -q -O /dev/null --timeout={wget_timeout} http://127.0.0.1:{port}{health_path} >/dev/null 2>&1; then
     exit 0
   fi
   sleep 1
@@ -196,8 +197,14 @@ exit 1
         port = HERMES_GUEST_PORT,
         health_path = HERMES_HEALTH_PATH,
         readiness_attempts = HERMES_READINESS_ATTEMPTS,
+        wget_timeout = HERMES_WGET_TIMEOUT_SECS,
         log_path_q = shell_quote(HERMES_LOG_PATH),
     )
+}
+
+#[cfg(test)]
+fn hermes_dashboard_readiness_budget_secs() -> u16 {
+    HERMES_READINESS_ATTEMPTS * (HERMES_WGET_TIMEOUT_SECS + 1)
 }
 
 struct PortReservation {
@@ -366,6 +373,8 @@ fn http_host_for_url(host: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
+        HERMES_READINESS_ATTEMPTS, HERMES_WGET_TIMEOUT_SECS,
+        hermes_dashboard_readiness_budget_secs, hermes_dashboard_script,
         parse_service_tunnel_port_range, service_tunnel_health_url,
         service_tunnel_public_url_from_base,
     };
@@ -419,5 +428,16 @@ mod tests {
             "http://127.0.0.1:45887"
         );
         assert_eq!(service_tunnel_health_url("::", 45887), "http://[::1]:45887");
+    }
+
+    #[test]
+    fn hermes_dashboard_readiness_loop_stays_below_node_stale_window() {
+        let script = hermes_dashboard_script();
+        assert!(
+            hermes_dashboard_readiness_budget_secs() < 60,
+            "Hermes service-open must not block worker heartbeats past MOM_NODE_STALE_SECS"
+        );
+        assert!(script.contains(&format!("seq 1 {HERMES_READINESS_ATTEMPTS}")));
+        assert!(script.contains(&format!("--timeout={HERMES_WGET_TIMEOUT_SECS}")));
     }
 }
