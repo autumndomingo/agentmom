@@ -1709,6 +1709,111 @@ async fn service_open_routes_to_assigned_worker_url() -> Result<()> {
 }
 
 #[tokio::test]
+async fn preview_register_routes_to_assigned_worker_and_lists() -> Result<()> {
+    let _guard = fleet_test_guard().await;
+    let fleet = TestFleet::start().await?;
+    let node_a =
+        spawn_worker_with_options("node-a", &fleet.api_url, "1", Some("http://node-a.fake"))?;
+    let node_b =
+        spawn_worker_with_options("node-b", &fleet.api_url, "1", Some("http://node-b.fake"))?;
+    wait_for_node(fleet.api_state.path(), "node-a").await?;
+    wait_for_node(fleet.api_state.path(), "node-b").await?;
+
+    let job_id = create_workspace(&fleet.api_url, "preview-svc", "node-b", 0).await?;
+    wait_for_job_status(&fleet.api_url, &job_id, "succeeded").await?;
+    wait_for_workspace_status(&fleet.api_url, "preview-svc", "running").await?;
+    let cookie = admin_cookie(&fleet.api_url).await?;
+
+    let preview = reqwest::Client::new()
+        .post(format!(
+            "{}/api/workspaces/preview-svc/previews",
+            fleet.api_url
+        ))
+        .header(reqwest::header::COOKIE, &cookie)
+        .json(&json!({
+            "name": "Vite Dev",
+            "port": 5173,
+            "path": "app"
+        }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Value>()
+        .await?;
+    assert_eq!(preview["name"], "vite-dev");
+    assert_eq!(
+        preview["url"],
+        "http://node-b.fake/preview-svc/previews/vite-dev-5173/app"
+    );
+    assert!(
+        !node_a
+            .runtime_home
+            .path()
+            .join("fake/preview-svc/service-preview-vite-dev")
+            .exists(),
+        "node-a should not open node-b's preview"
+    );
+    assert!(
+        node_b
+            .runtime_home
+            .path()
+            .join("fake/preview-svc/service-preview-vite-dev")
+            .exists(),
+        "node-b should open its assigned preview"
+    );
+
+    let previews = reqwest::Client::new()
+        .get(format!(
+            "{}/api/workspaces/preview-svc/previews",
+            fleet.api_url
+        ))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Vec<Value>>()
+        .await?;
+    assert_eq!(previews.len(), 1);
+    assert_eq!(previews[0]["name"], "vite-dev");
+
+    let cli_list = run_mom_output_with_env(
+        fleet.api_state.path(),
+        &["workspace", "preview", "list", "preview-svc"],
+        &[],
+    )?;
+    assert!(cli_list.contains("vite-dev"));
+    assert!(cli_list.contains("http://node-b.fake/preview-svc/previews/vite-dev-5173/app"));
+
+    let removed = reqwest::Client::new()
+        .delete(format!(
+            "{}/api/workspaces/preview-svc/previews/vite-dev",
+            fleet.api_url
+        ))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Value>()
+        .await?;
+    assert_eq!(removed["removed"], true);
+
+    let previews = reqwest::Client::new()
+        .get(format!(
+            "{}/api/workspaces/preview-svc/previews",
+            fleet.api_url
+        ))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Vec<Value>>()
+        .await?;
+    assert!(previews.is_empty());
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn hermes_chat_websocket_routes_to_assigned_worker() -> Result<()> {
     let _guard = fleet_test_guard().await;
     let fleet = TestFleet::start().await?;
@@ -1748,6 +1853,60 @@ async fn hermes_chat_websocket_routes_to_assigned_worker() -> Result<()> {
         .await
         .ok_or_else(|| anyhow!("chat websocket closed before echo"))??;
     assert_eq!(ws_text_json(echo)?, ping);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn hermes_tui_routes_use_direct_hermes_dashboard_paths() -> Result<()> {
+    let _guard = fleet_test_guard().await;
+    let fleet = TestFleet::start().await?;
+    let _node = spawn_worker("node-a", &fleet.api_url)?;
+    wait_for_node(fleet.api_state.path(), "node-a").await?;
+
+    let job_id = create_workspace(&fleet.api_url, "tui", "node-a", 0).await?;
+    wait_for_job_status(&fleet.api_url, &job_id, "succeeded").await?;
+    wait_for_workspace_status(&fleet.api_url, "tui", "running").await?;
+    let cookie = admin_cookie(&fleet.api_url).await?;
+
+    let sessions = reqwest::Client::new()
+        .get(format!("{}/api/workspaces/tui/tui/sessions", fleet.api_url))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Value>()
+        .await?;
+    let session_id = sessions["sessions"][0]["id"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing fake Hermes session id"))?;
+    assert_eq!(session_id, "tui-fake-session");
+
+    let mut request = format!(
+        "{}/api/workspaces/tui/tui/pty?resume={}",
+        fleet.api_url.replacen("http://", "ws://", 1),
+        session_id
+    )
+    .into_client_request()?;
+    request
+        .headers_mut()
+        .insert(COOKIE, HeaderValue::from_str(&cookie)?);
+    let (mut socket, _) = connect_async(request).await?;
+
+    let banner = socket
+        .next()
+        .await
+        .ok_or_else(|| anyhow!("TUI websocket closed before banner"))??;
+    let banner = ws_text(banner)?;
+    assert!(banner.contains("Hermes TUI fake runtime"));
+    assert!(banner.contains("session: tui-fake-session"));
+
+    socket.send(WsMessage::Text("hello".into())).await?;
+    let echo = socket
+        .next()
+        .await
+        .ok_or_else(|| anyhow!("TUI websocket closed before echo"))??;
+    assert_eq!(ws_text(echo)?, "hello");
 
     Ok(())
 }
@@ -2563,6 +2722,13 @@ fn session_cookie_from_response(response: &reqwest::Response) -> Result<String> 
 fn ws_text_json(message: WsMessage) -> Result<Value> {
     match message {
         WsMessage::Text(text) => serde_json::from_str(&text).context("parse websocket JSON text"),
+        other => bail!("expected websocket text message, got {other:?}"),
+    }
+}
+
+fn ws_text(message: WsMessage) -> Result<String> {
+    match message {
+        WsMessage::Text(text) => Ok(text.to_string()),
         other => bail!("expected websocket text message, got {other:?}"),
     }
 }

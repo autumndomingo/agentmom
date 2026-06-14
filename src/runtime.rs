@@ -92,44 +92,6 @@ impl GuestVm {
         run_ssh_shell(&self.name, &spec, script, None).await
     }
 
-    pub(crate) async fn write_file(&self, path: &str, bytes: &[u8], mode: u32) -> Result<()> {
-        let spec = load_microvm_spec(&self.name)?;
-        wait_for_ssh(self, &spec, Duration::from_secs(90)).await?;
-        let parent = guest_parent_dir(path)?;
-        let script = format!(
-            "set -eu\ninstall -d -m 0755 {parent}\ncat > {path}\nchmod {mode:o} {path}\n",
-            parent = shell_quote(&parent),
-            path = shell_quote(path),
-            mode = mode
-        );
-        let output = run_ssh_shell(&self.name, &spec, &script, Some(bytes)).await?;
-        if !output.ok {
-            bail!(
-                "write {} in VM {} exited with {}\n{}",
-                path,
-                self.name,
-                output.code,
-                output.stderr
-            );
-        }
-        Ok(())
-    }
-
-    pub(crate) async fn mkdir(&self, path: &str, mode: u32) -> Result<()> {
-        let script = format!("install -d -m {mode:o} {}", shell_quote(path), mode = mode);
-        let output = self.shell(&script).await?;
-        if !output.ok {
-            bail!(
-                "mkdir {} in VM {} exited with {}\n{}",
-                path,
-                self.name,
-                output.code,
-                output.stderr
-            );
-        }
-        Ok(())
-    }
-
     pub(crate) async fn spawn_shell(&self, script: &str) -> Result<tokio::process::Child> {
         let spec = load_microvm_spec(&self.name)?;
         wait_for_ssh(self, &spec, Duration::from_secs(90)).await?;
@@ -152,6 +114,17 @@ impl GuestVm {
         host_port: u16,
         guest_port: u16,
     ) -> Result<tokio::process::Child> {
+        self.forward_tcp_to(bind_host, host_port, "127.0.0.1", guest_port)
+            .await
+    }
+
+    pub(crate) async fn forward_tcp_to(
+        &self,
+        bind_host: &str,
+        host_port: u16,
+        target_host: &str,
+        target_port: u16,
+    ) -> Result<tokio::process::Child> {
         let spec = load_microvm_spec(&self.name)?;
         wait_for_ssh(self, &spec, Duration::from_secs(90)).await?;
         let mut command = TokioCommand::new("ssh");
@@ -162,7 +135,7 @@ impl GuestVm {
                 "-o",
                 "ExitOnForwardFailure=yes",
                 "-L",
-                &format!("{bind_host}:{host_port}:127.0.0.1:{guest_port}"),
+                &format!("{bind_host}:{host_port}:{target_host}:{target_port}"),
             ])
             .arg(ssh_destination(&spec))
             .stdin(Stdio::null())
@@ -371,64 +344,6 @@ pub(crate) async fn vm_status(name: &str) -> Result<VmStatus> {
         "crashed" => VmStatus::Crashed,
         _ => VmStatus::Unknown,
     })
-}
-
-pub(crate) async fn apply_guest_auth_config(vm: &GuestVm, config: &MomConfig) -> Result<()> {
-    println!("writing VM auth/config from host config");
-    config.validate_for_guest_config()?;
-    let hermes_home = format!("{GUEST_HERMES_HOME}/{}", config.hermes_profile());
-
-    vm.mkdir("/workspace", 0o755).await?;
-    vm.mkdir(GUEST_HERMES_HOME, 0o700).await?;
-    vm.mkdir(&hermes_home, 0o700).await?;
-    vm.mkdir(&format!("{hermes_home}/home"), 0o700).await?;
-    vm.write_file(
-        &format!("{hermes_home}/config.yaml"),
-        hermes_config_yaml(config).as_bytes(),
-        0o600,
-    )
-    .await?;
-    vm.write_file(
-        &format!("{hermes_home}/SOUL.md"),
-        hermes_soul_md().as_bytes(),
-        0o600,
-    )
-    .await?;
-    if let Some(proxy_url) = config.credential_proxy_url() {
-        vm.write_file(
-            "/etc/profile.d/agentmom-proxy.sh",
-            proxy_env_sh(proxy_url).as_bytes(),
-            0o644,
-        )
-        .await?;
-    }
-    if let Some(ca_path) = &config.credentials.proxy_ca_path {
-        let ca_path = resolve_required_file(ca_path, "credentials.proxy_ca_path")?;
-        let ca = fs::read(&ca_path).with_context(|| format!("read {}", ca_path.display()))?;
-        vm.write_file(
-            "/usr/local/share/ca-certificates/agentmom-proxy.crt",
-            &ca,
-            0o644,
-        )
-        .await?;
-    }
-
-    let hermes_home_q = shell_quote(&hermes_home);
-    checked_shell(
-        vm,
-        &format!(
-            r#"
-set -eu
-rm -f /root/.hermes/auth.json /root/.hermes-agent/*/auth.json
-chmod 700 /root/.hermes-agent {hermes_home_q}
-chmod 600 {hermes_home_q}/config.yaml {hermes_home_q}/SOUL.md
-if [ -f /usr/local/share/ca-certificates/agentmom-proxy.crt ]; then update-ca-certificates || true; fi
-ln -sfn {hermes_home_q} /root/.hermes
-sync
-"#
-        ),
-    )
-    .await
 }
 
 pub(crate) async fn ensure_runtime(config: &MomConfig) -> Result<()> {
@@ -1377,13 +1292,6 @@ fn ssh_common_args(name: &str, _spec: &MicrovmSpec) -> Result<Vec<String>> {
 
 fn ssh_destination(spec: &MicrovmSpec) -> String {
     format!("root@{}", spec.guest_ip)
-}
-
-fn guest_parent_dir(path: &str) -> Result<String> {
-    path.rsplit_once('/')
-        .map(|(parent, _)| if parent.is_empty() { "/" } else { parent })
-        .map(ToString::to_string)
-        .ok_or_else(|| anyhow!("guest path has no parent: {path}"))
 }
 
 async fn systemctl(args: &[&str]) -> Result<()> {

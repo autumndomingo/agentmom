@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
 use super::*;
+use axum::extract::ws::Message as AxumWsMessage;
+use futures_util::{SinkExt, StreamExt};
+use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
 
 const RECONCILE_RUNNING_VM_SSH_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -63,6 +66,36 @@ impl WorkspaceLocks {
 struct OpenServiceRequest {
     workspace_name: String,
     vm_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenPreviewServiceRequest {
+    workspace_name: String,
+    vm_name: String,
+    #[serde(flatten)]
+    preview: PreviewOpenRequest,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClosePreviewServiceRequest {
+    workspace_name: String,
+    vm_name: String,
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkerHermesSessionsQuery {
+    workspace_name: String,
+    vm_name: String,
+    limit: Option<u16>,
+    offset: Option<u16>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkerHermesTuiPtyQuery {
+    workspace_name: String,
+    vm_name: String,
+    resume: Option<String>,
 }
 
 pub(crate) async fn worker(args: WorkerArgs) -> Result<()> {
@@ -250,7 +283,11 @@ async fn run_worker_http(listener: tokio::net::TcpListener, state: Arc<WorkerSta
     let app = Router::new()
         .route("/worker/health", get(worker_health))
         .route("/worker/hermes-acp/ws", get(worker_hermes_acp_ws))
+        .route("/worker/hermes/sessions", get(worker_hermes_sessions))
+        .route("/worker/hermes/tui/pty", get(worker_hermes_tui_pty_ws))
         .route("/worker/services/hermes/open", post(worker_open_hermes))
+        .route("/worker/services/preview/open", post(worker_open_preview))
+        .route("/worker/services/preview/close", post(worker_close_preview))
         .with_state(state);
     let addr = listener
         .local_addr()
@@ -276,24 +313,14 @@ async fn worker_open_hermes(
     headers: HeaderMap,
     Json(request): Json<OpenServiceRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    require_worker_token(&headers).map_err(ApiError::Unauthorized)?;
-    let workspace = state
-        .api
-        .workspace(&request.workspace_name)
-        .await
-        .map_err(ApiError::Anyhow)?;
-    if workspace.node_id.as_deref() != Some(&state.api.node) {
-        return Err(ApiError::Unauthorized(anyhow!(
-            "workspace {} is not assigned to worker {}",
-            workspace.name,
-            state.api.node
-        )));
-    }
-    if request.vm_name != workspace.vm_name {
-        return Err(ApiError::Unauthorized(anyhow!(
-            "service-open vm does not match workspace assignment"
-        )));
-    }
+    let workspace = worker_workspace_for_request(
+        &state,
+        &headers,
+        &request.workspace_name,
+        &request.vm_name,
+        "service-open",
+    )
+    .await?;
     if state.api.runtime.is_fake() {
         let _workspace_guard = state.api.workspace_locks.lock(&workspace.name).await;
         let url = fake_open_hermes(&workspace.name)
@@ -311,6 +338,266 @@ async fn worker_open_hermes(
         result?
     };
     Ok(Json(json!({ "url": url })))
+}
+
+async fn worker_open_preview(
+    State(state): State<Arc<WorkerState>>,
+    headers: HeaderMap,
+    Json(request): Json<OpenPreviewServiceRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let workspace = worker_workspace_for_request(
+        &state,
+        &headers,
+        &request.workspace_name,
+        &request.vm_name,
+        "preview-open",
+    )
+    .await?;
+    let spec = preview_spec(&request.preview)?;
+    if state.api.runtime.is_fake() {
+        let _workspace_guard = state.api.workspace_locks.lock(&workspace.name).await;
+        let url = fake_open_preview(&workspace.name, &spec).await?;
+        return Ok(Json(json!({ "url": url })));
+    }
+    let url = {
+        let _workspace_guard = state.api.workspace_locks.lock(&workspace.name).await;
+        let heartbeat = spawn_service_open_heartbeat(&state);
+        let result = service::open_preview_app(
+            &state.services,
+            &workspace.name,
+            &workspace.vm_name,
+            &spec.name,
+            &spec.host,
+            spec.port,
+            &spec.path,
+        )
+        .await;
+        heartbeat.abort();
+        result?
+    };
+    Ok(Json(json!({ "url": url })))
+}
+
+async fn worker_close_preview(
+    State(state): State<Arc<WorkerState>>,
+    headers: HeaderMap,
+    Json(request): Json<ClosePreviewServiceRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let workspace = worker_workspace_for_request(
+        &state,
+        &headers,
+        &request.workspace_name,
+        &request.vm_name,
+        "preview-close",
+    )
+    .await?;
+    let name = normalize_preview_name(&request.name)?;
+    let closed = service::close_preview_app(&state.services, &workspace.name, &name).await?;
+    Ok(Json(json!({ "closed": closed })))
+}
+
+async fn worker_hermes_sessions(
+    State(state): State<Arc<WorkerState>>,
+    headers: HeaderMap,
+    Query(query): Query<WorkerHermesSessionsQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let workspace = worker_workspace_for_request(
+        &state,
+        &headers,
+        &query.workspace_name,
+        &query.vm_name,
+        "Hermes sessions",
+    )
+    .await?;
+    if state.api.runtime.is_fake() {
+        return Ok(Json(fake_hermes_sessions(&workspace.name)));
+    }
+
+    let dashboard =
+        service::open_hermes_dashboard_urls(&state.services, &workspace.name, &workspace.vm_name)
+            .await?;
+    let limit = query.limit.unwrap_or(30).clamp(1, 100);
+    let offset = query.offset.unwrap_or(0);
+    let url = format!(
+        "{}/api/sessions?limit={limit}&offset={offset}&order=recent",
+        dashboard.local_url.trim_end_matches('/')
+    );
+    let response = state
+        .api
+        .client
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| ApiError::Anyhow(error.into()))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Ok(Json(json!({
+            "sessions": [],
+            "total": 0,
+            "limit": limit,
+            "offset": offset,
+            "error": format!("Hermes dashboard sessions returned {status}: {body}")
+        })));
+    }
+    let value = response
+        .json::<Value>()
+        .await
+        .map_err(|error| ApiError::Anyhow(error.into()))?;
+    Ok(Json(value))
+}
+
+async fn worker_hermes_tui_pty_ws(
+    State(state): State<Arc<WorkerState>>,
+    headers: HeaderMap,
+    Query(query): Query<WorkerHermesTuiPtyQuery>,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    let workspace = worker_workspace_for_request(
+        &state,
+        &headers,
+        &query.workspace_name,
+        &query.vm_name,
+        "Hermes TUI",
+    )
+    .await?;
+    if state.api.runtime.is_fake() {
+        let workspace_name = workspace.name.clone();
+        let resume = query.resume.clone();
+        return Ok(ws
+            .on_upgrade(move |socket| fake_hermes_tui_socket(workspace_name, resume, socket))
+            .into_response());
+    }
+
+    let dashboard =
+        service::open_hermes_dashboard_urls(&state.services, &workspace.name, &workspace.vm_name)
+            .await?;
+    let hermes_ws_url = hermes_dashboard_pty_ws_url(&dashboard.local_url, query.resume.as_deref())?;
+    Ok(ws
+        .on_upgrade(move |socket| async move {
+            let _ = proxy_hermes_tui_pty_socket(socket, hermes_ws_url).await;
+        })
+        .into_response())
+}
+
+async fn worker_workspace_for_request(
+    state: &WorkerState,
+    headers: &HeaderMap,
+    workspace_name: &str,
+    vm_name: &str,
+    label: &str,
+) -> Result<WorkspaceRecord, ApiError> {
+    require_worker_token(headers).map_err(ApiError::Unauthorized)?;
+    let workspace = state
+        .api
+        .workspace(workspace_name)
+        .await
+        .map_err(ApiError::Anyhow)?;
+    if workspace.node_id.as_deref() != Some(&state.api.node) {
+        return Err(ApiError::Unauthorized(anyhow!(
+            "workspace {} is not assigned to worker {}",
+            workspace.name,
+            state.api.node
+        )));
+    }
+    if vm_name != workspace.vm_name {
+        return Err(ApiError::Unauthorized(anyhow!(
+            "{label} vm does not match workspace assignment"
+        )));
+    }
+    Ok(workspace)
+}
+
+fn hermes_dashboard_pty_ws_url(dashboard_url: &str, resume: Option<&str>) -> Result<String> {
+    let mut url = dashboard_url.trim_end_matches('/').to_string();
+    if let Some(rest) = url.strip_prefix("http://") {
+        url = format!("ws://{rest}");
+    } else if let Some(rest) = url.strip_prefix("https://") {
+        url = format!("wss://{rest}");
+    } else if !url.starts_with("ws://") && !url.starts_with("wss://") {
+        bail!("Hermes dashboard URL must start with http://, https://, ws://, or wss://");
+    }
+    let mut url = format!("{url}/api/pty");
+    if let Some(resume) = resume.map(str::trim).filter(|value| !value.is_empty()) {
+        url.push_str("?resume=");
+        url.push_str(&url_component(resume));
+    }
+    Ok(url)
+}
+
+async fn proxy_hermes_tui_pty_socket(
+    mut browser_socket: axum::extract::ws::WebSocket,
+    hermes_ws_url: String,
+) -> Result<()> {
+    let hermes_socket = match connect_async(&hermes_ws_url).await {
+        Ok((socket, _)) => socket,
+        Err(error) => {
+            let _ = browser_socket
+                .send(AxumWsMessage::Text(
+                    format!("\r\nHermes TUI websocket failed: {error}\r\n").into(),
+                ))
+                .await;
+            return Err(error.into());
+        }
+    };
+    let (mut browser_tx, mut browser_rx) = browser_socket.split();
+    let (mut hermes_tx, mut hermes_rx) = hermes_socket.split();
+
+    let browser_to_hermes = async {
+        while let Some(Ok(message)) = browser_rx.next().await {
+            let message = match message {
+                AxumWsMessage::Text(text) => WsMessage::Text(text.to_string().into()),
+                AxumWsMessage::Binary(bytes) => WsMessage::Binary(bytes),
+                AxumWsMessage::Ping(bytes) => WsMessage::Ping(bytes),
+                AxumWsMessage::Pong(bytes) => WsMessage::Pong(bytes),
+                AxumWsMessage::Close(frame) => {
+                    let close =
+                        frame.map(
+                            |frame| tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                                code: frame.code.into(),
+                                reason: frame.reason.to_string().into(),
+                            },
+                        );
+                    let _ = hermes_tx.send(WsMessage::Close(close)).await;
+                    break;
+                }
+            };
+            if hermes_tx.send(message).await.is_err() {
+                break;
+            }
+        }
+        Ok::<(), anyhow::Error>(())
+    };
+
+    let hermes_to_browser = async {
+        while let Some(Ok(message)) = hermes_rx.next().await {
+            let message = match message {
+                WsMessage::Text(text) => AxumWsMessage::Text(text.to_string().into()),
+                WsMessage::Binary(bytes) => AxumWsMessage::Binary(bytes),
+                WsMessage::Ping(bytes) => AxumWsMessage::Ping(bytes),
+                WsMessage::Pong(bytes) => AxumWsMessage::Pong(bytes),
+                WsMessage::Close(frame) => {
+                    let close = frame.map(|frame| axum::extract::ws::CloseFrame {
+                        code: frame.code.into(),
+                        reason: frame.reason.to_string().into(),
+                    });
+                    let _ = browser_tx.send(AxumWsMessage::Close(close)).await;
+                    break;
+                }
+                WsMessage::Frame(_) => continue,
+            };
+            if browser_tx.send(message).await.is_err() {
+                break;
+            }
+        }
+        Ok::<(), anyhow::Error>(())
+    };
+
+    tokio::select! {
+        result = browser_to_hermes => result?,
+        result = hermes_to_browser => result?,
+    }
+    Ok(())
 }
 
 fn spawn_service_open_heartbeat(state: &Arc<WorkerState>) -> tokio::task::JoinHandle<()> {
@@ -1597,6 +1884,104 @@ async fn fake_open_hermes(workspace_name: &str) -> Result<String> {
         base.trim_end_matches('/'),
         workspace_name
     ))
+}
+
+async fn fake_open_preview(workspace_name: &str, spec: &PreviewSpec) -> Result<String> {
+    let dir = runtime_home()?.join("fake").join(workspace_name);
+    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    fs::write(
+        dir.join(format!("service-preview-{}", spec.name)),
+        format!("{}:{}{}", spec.host, spec.port, spec.path),
+    )?;
+    let base = env::var("MOM_FAKE_SERVICE_BASE_URL")
+        .unwrap_or_else(|_| "http://fake.agentmom.local".to_string());
+    Ok(format!(
+        "{}/{}/previews/{}-{}{}",
+        base.trim_end_matches('/'),
+        workspace_name,
+        spec.name,
+        spec.port,
+        spec.path
+    ))
+}
+
+fn fake_hermes_sessions(workspace_name: &str) -> Value {
+    let now = now_epoch().unwrap_or(0) as f64;
+    json!({
+        "sessions": [
+            {
+                "id": format!("{workspace_name}-fake-session"),
+                "title": "Fake Hermes TUI session",
+                "source": "cli",
+                "model": "fake/openrouter",
+                "message_count": 2,
+                "started_at": now - 600.0,
+                "last_active": now - 60.0,
+                "ended_at": now - 30.0,
+                "archived": false,
+                "is_active": false
+            }
+        ],
+        "total": 1,
+        "limit": 30,
+        "offset": 0
+    })
+}
+
+async fn fake_hermes_tui_socket(
+    workspace_name: String,
+    resume: Option<String>,
+    mut socket: axum::extract::ws::WebSocket,
+) {
+    let session = resume
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("new");
+    let _ = socket
+        .send(AxumWsMessage::Text(
+            format!(
+                "\x1b[32mHermes TUI fake runtime\x1b[0m\r\nworkspace: {workspace_name}\r\nsession: {session}\r\n\r\n> "
+            )
+            .into(),
+        ))
+        .await;
+
+    while let Some(Ok(message)) = socket.recv().await {
+        match message {
+            AxumWsMessage::Text(text) => {
+                if text.starts_with("\x1b[RESIZE:") {
+                    continue;
+                }
+                let reply = if text == "\r" || text == "\n" {
+                    "\r\n> ".to_string()
+                } else {
+                    text.to_string()
+                };
+                if socket
+                    .send(AxumWsMessage::Text(reply.into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            AxumWsMessage::Binary(bytes) => {
+                if socket.send(AxumWsMessage::Binary(bytes)).await.is_err() {
+                    break;
+                }
+            }
+            AxumWsMessage::Ping(bytes) => {
+                if socket.send(AxumWsMessage::Pong(bytes)).await.is_err() {
+                    break;
+                }
+            }
+            AxumWsMessage::Pong(_) => {}
+            AxumWsMessage::Close(frame) => {
+                let _ = socket.send(AxumWsMessage::Close(frame)).await;
+                break;
+            }
+        }
+    }
 }
 
 #[cfg(test)]

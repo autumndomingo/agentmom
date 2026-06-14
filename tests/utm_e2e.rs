@@ -82,6 +82,29 @@ PY
             "Hermes dashboard open should return a URL, got {dashboard_url:?}"
         );
 
+        let preview = e2e.open_preview(&user, &workspace).await?;
+        assert_eq!(preview.get("name").and_then(Value::as_str), Some("hermes"));
+        assert!(
+            preview
+                .get("url")
+                .and_then(Value::as_str)
+                .is_some_and(|url| url.contains("/api/status")),
+            "preview should return a status URL, got {preview}"
+        );
+        let previews = e2e.list_previews(&user, &workspace).await?;
+        assert!(
+            previews
+                .iter()
+                .any(|preview| preview.get("name").and_then(Value::as_str) == Some("hermes")),
+            "preview list should include registered Hermes preview, got {previews:?}"
+        );
+        let sessions = e2e.tui_sessions(&user, &workspace).await?;
+        assert!(
+            sessions.get("sessions").is_some(),
+            "TUI sessions route should return a sessions payload, got {sessions}"
+        );
+        assert!(e2e.remove_preview(&user, &workspace, "hermes").await?);
+
         let model = env::var("AGENTMOM_UTM_HERMES_MODEL")
             .unwrap_or_else(|_| "openai/gpt-4o-mini".to_string());
         let inference = e2e
@@ -340,6 +363,84 @@ impl UtmE2e {
             .filter(|url| !url.is_empty())
             .map(ToString::to_string)
             .ok_or_else(|| anyhow!("Hermes dashboard response missing URL: {response}"))
+    }
+
+    async fn open_preview(&self, session: &Session, workspace: &str) -> Result<Value> {
+        self.request(
+            session,
+            self.client.post(format!(
+                "{}/api/workspaces/{workspace}/previews",
+                self.api_url
+            )),
+        )
+        .json(&json!({
+            "name": "Hermes",
+            "port": 9119,
+            "path": "/api/status"
+        }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Value>()
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn list_previews(&self, session: &Session, workspace: &str) -> Result<Vec<Value>> {
+        self.request(
+            session,
+            self.client.get(format!(
+                "{}/api/workspaces/{workspace}/previews",
+                self.api_url
+            )),
+        )
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Vec<Value>>()
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn remove_preview(
+        &self,
+        session: &Session,
+        workspace: &str,
+        preview: &str,
+    ) -> Result<bool> {
+        let response = self
+            .request(
+                session,
+                self.client.delete(format!(
+                    "{}/api/workspaces/{workspace}/previews/{preview}",
+                    self.api_url
+                )),
+            )
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(response
+            .get("removed")
+            .and_then(Value::as_bool)
+            .unwrap_or(false))
+    }
+
+    async fn tui_sessions(&self, session: &Session, workspace: &str) -> Result<Value> {
+        self.request(
+            session,
+            self.client.get(format!(
+                "{}/api/workspaces/{workspace}/tui/sessions",
+                self.api_url
+            )),
+        )
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Value>()
+        .await
+        .map_err(Into::into)
     }
 
     async fn create_job(

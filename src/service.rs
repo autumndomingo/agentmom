@@ -8,7 +8,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use tokio::{process::Command, sync::Mutex};
 
-use crate::{GuestVm, HERMES_GUEST_PORT, VmStatus, checked_shell, get_vm, shell_quote};
+use crate::{GuestVm, HERMES_GUEST_PORT, VmStatus, checked_shell, get_vm, normalize_preview_path};
 
 struct ServiceTunnel {
     url: String,
@@ -18,16 +18,24 @@ struct ServiceTunnel {
 }
 
 const HERMES_HEALTH_PATH: &str = "/api/status";
-const HERMES_WORKDIR: &str = "/workspace";
-const HERMES_LOG_PATH: &str = "/tmp/mom-hermes/dashboard.log";
-const HERMES_READINESS_ATTEMPTS: u16 = 90;
-const HERMES_PROBE_TIMEOUT_SECS: u16 = 2;
-const HERMES_WGET_TIMEOUT_SECS: u16 = 1;
+
+pub(crate) struct HermesDashboardUrls {
+    pub(crate) public_url: String,
+    pub(crate) local_url: String,
+}
+
+struct PreviewTunnelTarget<'a> {
+    service_name: &'a str,
+    host: &'a str,
+    port: u16,
+    path: &'a str,
+}
 
 #[derive(Clone, Default)]
 pub(crate) struct ServiceState {
     hermes_tunnels: Arc<Mutex<HashMap<String, ServiceTunnel>>>,
     port_reservations: Arc<StdMutex<HashSet<u16>>>,
+    preview_tunnels: Arc<Mutex<HashMap<String, ServiceTunnel>>>,
 }
 
 pub(crate) async fn open_hermes_dashboard(
@@ -35,6 +43,16 @@ pub(crate) async fn open_hermes_dashboard(
     workspace_name: &str,
     vm_name: &str,
 ) -> Result<String> {
+    Ok(open_hermes_dashboard_urls(state, workspace_name, vm_name)
+        .await?
+        .public_url)
+}
+
+pub(crate) async fn open_hermes_dashboard_urls(
+    state: &ServiceState,
+    workspace_name: &str,
+    vm_name: &str,
+) -> Result<HermesDashboardUrls> {
     ensure_hermes_tunnel(
         workspace_name,
         vm_name,
@@ -44,17 +62,58 @@ pub(crate) async fn open_hermes_dashboard(
     .await
 }
 
+pub(crate) async fn open_preview_app(
+    state: &ServiceState,
+    workspace_name: &str,
+    vm_name: &str,
+    service_name: &str,
+    target_host: &str,
+    target_port: u16,
+    path: &str,
+) -> Result<String> {
+    ensure_preview_tunnel(
+        workspace_name,
+        vm_name,
+        PreviewTunnelTarget {
+            service_name,
+            host: target_host,
+            port: target_port,
+            path,
+        },
+        &state.preview_tunnels,
+        &state.port_reservations,
+    )
+    .await
+}
+
+pub(crate) async fn close_preview_app(
+    state: &ServiceState,
+    workspace_name: &str,
+    service_name: &str,
+) -> Result<bool> {
+    let key = preview_key(workspace_name, service_name);
+    let tunnel = state.preview_tunnels.lock().await.remove(&key);
+    if let Some(tunnel) = tunnel {
+        stop_tunnel(tunnel).await;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 async fn ensure_hermes_tunnel(
     workspace_name: &str,
     vm_name: &str,
     tunnels: &Arc<Mutex<HashMap<String, ServiceTunnel>>>,
     port_reservations: &Arc<StdMutex<HashSet<u16>>>,
-) -> Result<String> {
+) -> Result<HermesDashboardUrls> {
     {
         let mut active = tunnels.lock().await;
         if let Some(tunnel) = active.get_mut(workspace_name) {
             if tunnel_is_healthy(&tunnel.health_url, HERMES_HEALTH_PATH).await {
-                return Ok(tunnel.url.clone());
+                return Ok(HermesDashboardUrls {
+                    public_url: tunnel.url.clone(),
+                    local_url: tunnel.health_url.clone(),
+                });
             }
             let _ = tunnel.ssh_child.kill().await;
             active.remove(workspace_name);
@@ -80,6 +139,41 @@ async fn ensure_hermes_tunnel(
     .await
 }
 
+async fn ensure_preview_tunnel(
+    workspace_name: &str,
+    vm_name: &str,
+    target: PreviewTunnelTarget<'_>,
+    tunnels: &Arc<Mutex<HashMap<String, ServiceTunnel>>>,
+    port_reservations: &Arc<StdMutex<HashSet<u16>>>,
+) -> Result<String> {
+    let key = preview_key(workspace_name, target.service_name);
+    let normalized_path = normalize_preview_path(target.path);
+    let stale = {
+        let mut active = tunnels.lock().await;
+        if let Some(tunnel) = active.get_mut(&key)
+            && tunnel_is_running(tunnel)
+        {
+            return Ok(service_url_with_path(&tunnel.url, &normalized_path));
+        }
+        active.remove(&key)
+    };
+    if let Some(tunnel) = stale {
+        stop_tunnel(tunnel).await;
+    }
+
+    let tunnel_bind_host = service_tunnel_bind_host();
+    let reservation = reserve_host_port(&tunnel_bind_host, port_reservations).await?;
+    let host_port = reservation.port();
+    let public_url = service_tunnel_public_url(&tunnel_bind_host, host_port)?;
+    let vm = running_vm_owned(vm_name).await?;
+    let tunnel =
+        start_tcp_tunnel(&vm, &tunnel_bind_host, host_port, target.host, target.port).await?;
+    reservation.release();
+    let url = service_url_with_path(&public_url, &normalized_path);
+    tunnels.lock().await.insert(key, tunnel);
+    Ok(url)
+}
+
 async fn start_hermes_tunnel(
     workspace_name: &str,
     vm: &GuestVm,
@@ -99,6 +193,24 @@ async fn start_hermes_tunnel(
     })
 }
 
+async fn start_tcp_tunnel(
+    vm: &GuestVm,
+    tunnel_bind_host: &str,
+    host_port: u16,
+    target_host: &str,
+    target_port: u16,
+) -> Result<ServiceTunnel> {
+    let ssh_child = vm
+        .forward_tcp_to(tunnel_bind_host, host_port, target_host, target_port)
+        .await?;
+    Ok(ServiceTunnel {
+        url: service_tunnel_public_url(tunnel_bind_host, host_port)?,
+        health_url: service_tunnel_health_url(tunnel_bind_host, host_port),
+        _vm: vm.clone(),
+        ssh_child,
+    })
+}
+
 async fn wait_for_hermes_tunnel(
     workspace_name: &str,
     mut tunnel: ServiceTunnel,
@@ -106,7 +218,7 @@ async fn wait_for_hermes_tunnel(
     health_url: &str,
     public_url: &str,
     tunnels: &Arc<Mutex<HashMap<String, ServiceTunnel>>>,
-) -> Result<String> {
+) -> Result<HermesDashboardUrls> {
     for _ in 0..50 {
         if tunnel_is_healthy(health_url, HERMES_HEALTH_PATH).await {
             reservation.release();
@@ -114,7 +226,10 @@ async fn wait_for_hermes_tunnel(
                 .lock()
                 .await
                 .insert(workspace_name.to_string(), tunnel);
-            return Ok(public_url.to_string());
+            return Ok(HermesDashboardUrls {
+                public_url: public_url.to_string(),
+                local_url: health_url.to_string(),
+            });
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
@@ -142,6 +257,26 @@ async fn tunnel_is_healthy(url: &str, path: &str) -> bool {
     output.status.success()
 }
 
+fn tunnel_is_running(tunnel: &mut ServiceTunnel) -> bool {
+    matches!(tunnel.ssh_child.try_wait(), Ok(None))
+}
+
+async fn stop_tunnel(mut tunnel: ServiceTunnel) {
+    let _ = tunnel.ssh_child.kill().await;
+}
+
+fn preview_key(workspace_name: &str, service_name: &str) -> String {
+    format!("{workspace_name}:{service_name}")
+}
+
+fn service_url_with_path(base: &str, path: &str) -> String {
+    let path = normalize_preview_path(path);
+    if path == "/" {
+        return base.to_string();
+    }
+    format!("{}{}", base.trim_end_matches('/'), path)
+}
+
 async fn running_vm_owned(name: &str) -> Result<GuestVm> {
     let handle = get_vm(name)
         .await
@@ -164,78 +299,15 @@ async fn ensure_hermes_dashboard(vm: &GuestVm) -> Result<()> {
 }
 
 fn hermes_dashboard_script() -> String {
-    let log_dir = HERMES_LOG_PATH
-        .rsplit_once('/')
-        .map(|(dir, _)| dir)
-        .unwrap_or("/tmp");
-
-    format!(
-        r#"
+    r#"
 set -e
 if command -v agentmom-hermes-dashboard-start >/dev/null 2>&1; then
   exec agentmom-hermes-dashboard-start
 fi
-probe_hermes_dashboard() {{
-  timeout {probe_timeout}s wget -q -O /dev/null --timeout={wget_timeout} http://127.0.0.1:{port}{health_path} >/dev/null 2>&1
-}}
-if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files agentmom-hermes-dashboard.service --no-legend | grep -q '^agentmom-hermes-dashboard\.service[[:space:]]'; then
-  if probe_hermes_dashboard; then
-    exit 0
-  fi
-  systemctl start agentmom-hermes-dashboard.service
-  for _ in $(seq 1 {readiness_attempts}); do
-    if probe_hermes_dashboard; then
-      exit 0
-    fi
-    sleep 1
-  done
-  systemctl status --no-pager agentmom-hermes-dashboard.service >&2 || true
-  journalctl -u agentmom-hermes-dashboard.service -n 120 --no-pager >&2 || true
-  exit 1
-fi
-if ! command -v hermes >/dev/null 2>&1; then
-  echo "Hermes is not installed in this VM; recreate it with the current runtime" >&2
-  exit 1
-fi
-if [ -f /etc/profile.d/mom.sh ]; then . /etc/profile.d/mom.sh; fi
-if [ -f /etc/profile.d/agentmom-proxy.sh ]; then . /etc/profile.d/agentmom-proxy.sh; fi
-mkdir -p {workdir_q} {log_dir_q}
-if probe_hermes_dashboard; then
-  exit 0
-fi
-cd {workdir_q}
-hermes_bin="$(readlink -f "$(command -v hermes)")"
-hermes_prefix="$(dirname "$(dirname "$hermes_bin")")"
-hermes_web_dist="$hermes_prefix/share/hermes-agent/web_dist"
-if netstat -ltn 2>/dev/null | grep -q ':{port}[[:space:]]'; then
-  hermes dashboard --stop >/dev/null 2>&1 || true
-  sleep 1
-fi
-if ! netstat -ltn 2>/dev/null | grep -q ':{port}[[:space:]]'; then
-  if [ -d "$hermes_web_dist" ]; then
-    HERMES_WEB_DIST="$hermes_web_dist" setsid hermes dashboard --host 0.0.0.0 --port {port} --no-open --insecure --skip-build </dev/null >{log_path_q} 2>&1 &
-  else
-    setsid hermes dashboard --host 0.0.0.0 --port {port} --no-open --insecure </dev/null >{log_path_q} 2>&1 &
-  fi
-fi
-for _ in $(seq 1 {readiness_attempts}); do
-  if probe_hermes_dashboard; then
-    exit 0
-  fi
-  sleep 1
-done
-cat {log_path_q} >&2 || true
+echo "agentmom-hermes-dashboard-start is missing; recreate this VM with the current Nix guest image" >&2
 exit 1
-"#,
-        workdir_q = shell_quote(HERMES_WORKDIR),
-        log_dir_q = shell_quote(log_dir),
-        port = HERMES_GUEST_PORT,
-        health_path = HERMES_HEALTH_PATH,
-        readiness_attempts = HERMES_READINESS_ATTEMPTS,
-        probe_timeout = HERMES_PROBE_TIMEOUT_SECS,
-        wget_timeout = HERMES_WGET_TIMEOUT_SECS,
-        log_path_q = shell_quote(HERMES_LOG_PATH),
-    )
+"#
+    .to_string()
 }
 
 struct PortReservation {
@@ -404,9 +476,8 @@ fn http_host_for_url(host: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        HERMES_PROBE_TIMEOUT_SECS, HERMES_READINESS_ATTEMPTS, HERMES_WGET_TIMEOUT_SECS,
         hermes_dashboard_script, parse_service_tunnel_port_range, service_tunnel_health_url,
-        service_tunnel_public_url_from_base,
+        service_tunnel_public_url_from_base, service_url_with_path,
     };
 
     #[test]
@@ -461,31 +532,44 @@ mod tests {
     }
 
     #[test]
-    fn hermes_dashboard_readiness_loop_has_bounded_probe_timeout() {
+    fn hermes_dashboard_script_calls_guest_launcher() {
         let script = hermes_dashboard_script();
         assert!(script.contains("set -e\n"));
         assert!(!script.contains("set -eu"));
-        assert!(script.contains(&format!("seq 1 {HERMES_READINESS_ATTEMPTS}")));
-        assert!(script.contains(&format!("timeout {HERMES_PROBE_TIMEOUT_SECS}s wget")));
-        assert!(script.contains(&format!("--timeout={HERMES_WGET_TIMEOUT_SECS}")));
+        assert!(script.contains("exec agentmom-hermes-dashboard-start"));
+        assert!(script.contains("recreate this VM with the current Nix guest image"));
     }
 
     #[test]
-    fn hermes_dashboard_uses_packaged_web_dist_when_available() {
+    fn hermes_dashboard_script_does_not_start_legacy_background_processes() {
         let script = hermes_dashboard_script();
-        assert!(script.contains("share/hermes-agent/web_dist"));
-        assert!(script.contains("HERMES_WEB_DIST=\"$hermes_web_dist\""));
-        assert!(script.contains("--skip-build"));
+        assert!(!script.contains("setsid"));
+        assert!(!script.contains("hermes dashboard --host"));
+        assert!(!script.contains("HERMES_WEB_DIST"));
     }
 
     #[test]
-    fn hermes_dashboard_sources_guest_env() {
+    fn hermes_dashboard_script_does_not_source_legacy_profiles() {
         let script = hermes_dashboard_script();
 
         assert!(script.contains("agentmom-hermes-dashboard-start"));
-        assert!(script.contains("systemctl start agentmom-hermes-dashboard.service"));
-        assert!(script.contains("journalctl -u agentmom-hermes-dashboard.service"));
-        assert!(script.contains(". /etc/profile.d/mom.sh"));
-        assert!(script.contains(". /etc/profile.d/agentmom-proxy.sh"));
+        assert!(!script.contains(". /etc/profile.d/mom.sh"));
+        assert!(!script.contains(". /etc/profile.d/agentmom-proxy.sh"));
+    }
+
+    #[test]
+    fn preview_url_appends_path_to_tunnel_base() {
+        assert_eq!(
+            service_url_with_path("https://mom-1-45887.agentmom.xyz", "dashboard"),
+            "https://mom-1-45887.agentmom.xyz/dashboard"
+        );
+        assert_eq!(
+            service_url_with_path("https://example.test/tunnels/45887/", "/"),
+            "https://example.test/tunnels/45887/"
+        );
+        assert_eq!(
+            service_url_with_path("https://example.test/tunnels/45887/", "/app"),
+            "https://example.test/tunnels/45887/app"
+        );
     }
 }

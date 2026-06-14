@@ -556,12 +556,16 @@ input:disabled {
 }
 
 .chatHeader {
-  height: 64px;
+  min-height: 64px;
   padding: 0 26px;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 14px;
+}
+
+.chatHeader > div:not(.headerActions) {
+  min-width: 0;
 }
 
 .squareButton {
@@ -621,6 +625,24 @@ input:disabled {
   justify-content: flex-end;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.appShell.withPreview .headerActions .refreshButton {
+  width: 44px;
+  padding: 0;
+  justify-content: center;
+  gap: 0;
+  font-size: 0;
+}
+
+.appShell.withPreview .headerActions .refreshButton svg {
+  flex: 0 0 auto;
+}
+
+.appShell.withPreview .headerActions .refreshButton:last-child {
+  width: auto;
+  padding: 0 12px;
+  font-size: 14px;
 }
 
 .sessionSelect,
@@ -1592,6 +1614,10 @@ body {
     auto;
 }
 
+.appShell.withPreview {
+  grid-template-columns: 312px minmax(420px, 1fr) minmax(360px, 42vw);
+}
+
 .sidebar {
   padding: 22px 18px;
   gap: 20px;
@@ -1679,7 +1705,7 @@ body {
 }
 
 .chatHeader {
-  height: 74px;
+  min-height: 74px;
   padding: 0 30px;
   border-bottom: 1px solid rgb(247 243 234 / 8%);
   background: rgb(9 10 11 / 42%);
@@ -1700,6 +1726,282 @@ body {
   background:
     linear-gradient(180deg, transparent, rgb(227 154 77 / 3%)),
     transparent;
+}
+
+.previewPane {
+  min-width: 0;
+  min-height: 100vh;
+  border-left: 1px solid rgb(247 243 234 / 12%);
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 5%), transparent 28%),
+    rgb(7 8 9 / 94%);
+  box-shadow: -18px 0 50px rgb(0 0 0 / 22%);
+}
+
+.previewHeader {
+  min-height: 58px;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgb(247 243 234 / 10%);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.previewTabs {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-x: auto;
+}
+
+.previewTabs button,
+.previewActions button {
+  height: 36px;
+  border: 1px solid rgb(247 243 234 / 12%);
+  border-radius: 8px;
+  background: var(--surface-strong);
+  color: var(--muted);
+  font-weight: 800;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 7%);
+}
+
+.previewTabs button {
+  max-width: 160px;
+  padding: 0 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.previewTabs button.active {
+  border-color: rgb(169 216 207 / 48%);
+  color: var(--text);
+  background: rgb(169 216 207 / 14%);
+}
+
+.previewTabs span {
+  color: var(--dim);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.previewActions {
+  display: flex;
+  gap: 6px;
+}
+
+.previewActions button {
+  width: 36px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+}
+
+.previewAddress {
+  padding: 9px 12px;
+  border-bottom: 1px solid rgb(247 243 234 / 8%);
+  background: rgb(255 255 255 / 3%);
+}
+
+.previewAddress code {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--dim);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.previewFrameShell {
+  min-height: 0;
+  display: grid;
+}
+
+.previewFrameShell iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: white;
+}
+
+.previewEmpty {
+  display: grid;
+  place-content: center;
+  gap: 8px;
+  padding: 24px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.previewEmpty strong {
+  color: var(--text);
+}
+
+.tuiPage {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 312px minmax(0, 1fr);
+  background:
+    linear-gradient(rgb(255 255 255 / 2.4%) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(255 255 255 / 2.4%) 1px, transparent 1px),
+    linear-gradient(140deg, #090a0b, #111211 52%, #070808);
+  background-size:
+    56px 56px,
+    56px 56px,
+    auto;
+}
+
+.tuiSidebar {
+  min-width: 0;
+  padding: 22px 18px;
+  border-right: 1px solid rgb(247 243 234 / 12%);
+  display: grid;
+  align-content: start;
+  gap: 18px;
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 4%), transparent 32%),
+    rgb(8 8 10 / 91%);
+}
+
+.tuiWorkspacePicker {
+  display: grid;
+  gap: 8px;
+}
+
+.tuiWorkspacePicker label,
+.tuiSessionHeader h2 {
+  margin: 0;
+  color: rgb(169 216 207 / 74%);
+  font-size: 11px;
+  font-weight: 850;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.tuiWorkspacePicker select {
+  min-width: 0;
+  height: 42px;
+  border: 1px solid rgb(247 243 234 / 13%);
+  border-radius: 8px;
+  background: var(--surface-strong);
+  color: var(--text);
+  font: inherit;
+  font-weight: 750;
+}
+
+.tuiSessionList {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.tuiSessionHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.tuiSessionHeader button,
+.tuiSessionList > button {
+  border: 1px solid rgb(247 243 234 / 12%);
+  border-radius: 8px;
+  background: rgb(255 255 255 / 4%);
+  color: var(--muted);
+}
+
+.tuiSessionHeader button {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+}
+
+.tuiSessionList > button {
+  min-width: 0;
+  min-height: 38px;
+  padding: 0 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+}
+
+.tuiSessionList > button span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tuiSessionList > button.active {
+  border-color: rgb(169 216 207 / 44%);
+  color: var(--text);
+  background: rgb(169 216 207 / 12%);
+}
+
+.tuiSessionList p {
+  margin: 0;
+  color: var(--dim);
+  font-size: 13px;
+}
+
+.tuiMain {
+  min-width: 0;
+  min-height: 100vh;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
+
+.tuiHeader {
+  min-height: 74px;
+  padding: 0 30px;
+  border-bottom: 1px solid rgb(247 243 234 / 8%);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  background: rgb(9 10 11 / 42%);
+  backdrop-filter: blur(14px);
+}
+
+.tuiHeader h1 {
+  margin: 0;
+  color: var(--text);
+  font-size: 20px;
+  font-weight: 850;
+}
+
+.tuiHeader p {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.tuiError {
+  padding: 10px 30px;
+  border-bottom: 1px solid rgb(228 95 101 / 18%);
+  color: #ffb1a6;
+  background: rgb(228 95 101 / 8%);
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.tuiTerminal {
+  min-width: 0;
+  min-height: 0;
+  padding: 14px;
+  background: #070809;
+}
+
+.tuiTerminal .xterm {
+  height: 100%;
 }
 
 .emptyChat {
@@ -1828,6 +2130,29 @@ body {
 
   .appShell {
     grid-template-columns: 1fr;
+  }
+
+  .tuiPage {
+    grid-template-columns: 1fr;
+  }
+
+  .tuiSidebar {
+    border-right: 0;
+    border-bottom: 1px solid rgb(247 243 234 / 12%);
+  }
+
+  .tuiMain {
+    min-height: 75vh;
+  }
+
+  .appShell.withPreview {
+    grid-template-columns: 1fr;
+  }
+
+  .previewPane {
+    min-height: 70vh;
+    border-left: 0;
+    border-top: 1px solid rgb(247 243 234 / 12%);
   }
 
   .chatHeader {

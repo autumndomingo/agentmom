@@ -500,6 +500,13 @@ pub(crate) fn service_tunnel_upsert(
     let db = fleet_db()?;
     db.execute(
         r#"
+DELETE FROM service_tunnels
+WHERE workspace_name = ?1 AND service = ?2 AND hostname != ?3
+"#,
+        params![workspace_name, service, hostname],
+    )?;
+    db.execute(
+        r#"
 INSERT INTO service_tunnels (hostname, workspace_name, node_id, service, url, updated_at)
 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
 ON CONFLICT(hostname) DO UPDATE SET
@@ -525,6 +532,68 @@ fn service_tunnel_uses_path_route(url: &reqwest::Url) -> bool {
     url.host_str()
         .is_some_and(|host| host.eq_ignore_ascii_case("agentmom.xyz"))
         && url.path().starts_with("/tunnels/")
+}
+
+pub(crate) fn service_tunnel_get(
+    workspace_name: &str,
+    service: &str,
+) -> Result<Option<ServiceTunnelRecord>> {
+    ensure_fleet_schema()?;
+    let db = fleet_db()?;
+    db.query_row(
+        r#"
+SELECT hostname, workspace_name, node_id, service, url, updated_at
+FROM service_tunnels
+WHERE workspace_name = ?1 AND service = ?2
+ORDER BY updated_at DESC
+LIMIT 1
+"#,
+        params![workspace_name, service],
+        service_tunnel_from_row,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub(crate) fn service_tunnels_for_workspace(
+    workspace_name: &str,
+    service_prefix: &str,
+) -> Result<Vec<ServiceTunnelRecord>> {
+    ensure_fleet_schema()?;
+    let db = fleet_db()?;
+    let mut stmt = db.prepare(
+        r#"
+SELECT hostname, workspace_name, node_id, service, url, updated_at
+FROM service_tunnels
+WHERE workspace_name = ?1 AND service LIKE ?2
+ORDER BY updated_at DESC, service ASC
+"#,
+    )?;
+    let like = format!("{service_prefix}%");
+    Ok(stmt
+        .query_map(params![workspace_name, like], service_tunnel_from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+pub(crate) fn service_tunnel_delete(workspace_name: &str, service: &str) -> Result<bool> {
+    ensure_fleet_schema()?;
+    let db = fleet_db()?;
+    let changed = db.execute(
+        "DELETE FROM service_tunnels WHERE workspace_name = ?1 AND service = ?2",
+        params![workspace_name, service],
+    )?;
+    Ok(changed > 0)
+}
+
+fn service_tunnel_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ServiceTunnelRecord> {
+    Ok(ServiceTunnelRecord {
+        hostname: row.get(0)?,
+        workspace_name: row.get(1)?,
+        node_id: row.get(2)?,
+        service: row.get(3)?,
+        url: row.get(4)?,
+        updated_at: row.get(5)?,
+    })
 }
 
 pub(crate) fn service_tunnel_hostname_registered(hostname: &str) -> Result<bool> {

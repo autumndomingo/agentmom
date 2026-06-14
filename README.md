@@ -125,6 +125,23 @@ just dev
 ports, starts iron-proxy on host port `1080`, starts `mom api`, and starts
 `mom worker`. Runtime state stays under `.state/microvms`.
 
+### Web App Previews
+
+A host-side agent or operator can register a web app running inside a workspace
+VM so the browser UI shows it in the Preview pane:
+
+```sh
+mom workspace preview register alice --preview web --port 3000
+mom workspace preview list alice
+mom workspace preview remove alice web
+```
+
+`register` asks the workspace's assigned worker to open an SSH tunnel from the
+host to `127.0.0.1:<port>` inside the VM, stores the returned URL in the
+catalog, and prints that URL. Use `--host` for a different VM-local host and
+`--path` for a non-root preview path. The UI polls the registered preview list
+only while its Preview pane is open.
+
 With `just dev` running, use `just dev-smoke` in another shell to check the API
 health endpoint and cookie-based admin login. `just dev-reset` stops the dev
 stack and deletes `.state/` and `dev/iron-proxy/`; it keeps `.env` and build
