@@ -5,6 +5,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_root}"
 
 pid_file="${repo_root}/.state/dev.pid"
+local_state_dir="${repo_root}/.state"
 utm_name="${MOM_DEV_UTM_NAME:-AgentMom-Dev}"
 utm_guest_host="${MOM_DEV_UTM_HOST:-agentmom-dev-utm.local}"
 utm_guest_user="${MOM_DEV_UTM_USER:-mom}"
@@ -14,6 +15,7 @@ utm_state_dir="${repo_root}/.state/dev-utm"
 utm_fallback_key="${utm_state_dir}/id_ed25519"
 utm_bundle="${HOME}/Library/Containers/com.utmapp.UTM/Data/Documents/${utm_name}.utm"
 utm_ssh_args=()
+preserved_utm_state=""
 
 kill_pid() {
   local pid="${1:-}"
@@ -119,6 +121,24 @@ if command -v sudo >/dev/null 2>&1; then
 else
   rm -rf "${microvm_state_dir}"
 fi
+
+maybe_gc_nix_store() {
+  [ "${MOM_DEV_RESET_GC:-1}" != "0" ] || return 0
+  command -v nix >/dev/null 2>&1 || return 0
+  command -v df >/dev/null 2>&1 || return 0
+
+  local avail_kib min_free_kib
+  avail_kib="$(df -Pk / | awk 'NR == 2 { print $4 }')"
+  min_free_kib="${MOM_DEV_RESET_MIN_FREE_KIB:-5242880}"
+  case "${avail_kib}:${min_free_kib}" in
+    *[!0-9:]* | :* | *:) return 0 ;;
+  esac
+  if [ "${avail_kib}" -lt "${min_free_kib}" ]; then
+    nix store gc >/dev/null
+  fi
+}
+
+maybe_gc_nix_store
 EOF_RESET_UTM
   then
     printf 'ok\n'
@@ -146,6 +166,15 @@ if [ -f "${pid_file}" ]; then
 fi
 
 stop_microvm_units
-rm -rf "${repo_root}/.state" "${repo_root}/dev/iron-proxy"
+if [ -d "${utm_state_dir}" ]; then
+  preserved_utm_state="$(mktemp -d "${TMPDIR:-/tmp}/agentmom-dev-utm-state.XXXXXX")"
+  cp -pR "${utm_state_dir}" "${preserved_utm_state}/dev-utm"
+fi
+rm -rf "${local_state_dir}" "${repo_root}/dev/iron-proxy"
+if [ -n "${preserved_utm_state}" ] && [ -d "${preserved_utm_state}/dev-utm" ]; then
+  mkdir -p "${local_state_dir}"
+  cp -pR "${preserved_utm_state}/dev-utm" "${utm_state_dir}"
+  rm -rf "${preserved_utm_state}"
+fi
 
 printf 'dev state reset\n'
