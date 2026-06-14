@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
+  ArrowLeft,
+  ArrowRight,
   Bookmark,
   BriefcaseBusiness,
   Check,
@@ -11,6 +13,7 @@ import {
   Loader2,
   Plus,
   Search,
+  Sparkles,
   Trash2,
   Upload,
   User,
@@ -53,7 +56,7 @@ function App() {
   const [sources, setSources] = usePersistentState('sources', defaultSources);
   const [savedOpportunities, setSavedOpportunities] = usePersistentState('savedOpportunities', []);
   const [applications, setApplications] = usePersistentState('applications', []);
-  const [activeTab, setActiveTab] = useState('search');
+  const [activeTab, setActiveTab] = useState('sources');
   const [sourceInput, setSourceInput] = useState('');
   const [resume, setResume] = useState(null);
   const [savedAt, setSavedAt] = useState('');
@@ -210,6 +213,7 @@ function App() {
     setSearchError('');
     setJobMatches([]);
     setSourceNotes([]);
+    setActiveTab('listings');
 
     try {
       const response = await fetch('/api/opportunity-search', {
@@ -259,12 +263,36 @@ function App() {
 
       <nav className="topTabs" aria-label="Opportunity workspace">
         <button
-          className={activeTab === 'search' ? 'active' : ''}
+          className={activeTab === 'sources' ? 'active' : ''}
           type="button"
-          onClick={() => setActiveTab('search')}
+          onClick={() => setActiveTab('sources')}
         >
           <Search size={18} />
-          Search
+          Sources
+        </button>
+        <button
+          className={activeTab === 'questionnaire' ? 'active' : ''}
+          type="button"
+          onClick={() => setActiveTab('questionnaire')}
+        >
+          <ClipboardList size={18} />
+          Questionnaire
+        </button>
+        <button
+          className={activeTab === 'details' ? 'active' : ''}
+          type="button"
+          onClick={() => setActiveTab('details')}
+        >
+          <Sparkles size={18} />
+          Details
+        </button>
+        <button
+          className={activeTab === 'listings' ? 'active' : ''}
+          type="button"
+          onClick={() => setActiveTab('listings')}
+        >
+          <LayoutDashboard size={18} />
+          Listings
         </button>
         <button
           className={activeTab === 'profile' ? 'active' : ''}
@@ -276,10 +304,10 @@ function App() {
         </button>
       </nav>
 
-      {activeTab === 'search' && (
-        <>
-      <section className="workspace">
+      {['sources', 'questionnaire', 'details'].includes(activeTab) && (
+      <section className="workspace setupWorkspace">
         <form className="intakePanel" onSubmit={(event) => event.preventDefault()}>
+          {activeTab === 'sources' && (
           <section className="formSection" aria-labelledby="sources-heading">
             <div className="sectionHeader">
               <div>
@@ -338,7 +366,9 @@ function App() {
               </button>
             </div>
           </section>
+          )}
 
+          {activeTab === 'questionnaire' && (
           <section className="formSection" aria-labelledby="questionnaire-heading">
             <div className="sectionHeader">
               <div>
@@ -463,7 +493,9 @@ function App() {
               </div>
             </div>
           </section>
+          )}
 
+          {activeTab === 'details' && (
           <section className="formSection" aria-labelledby="personal-heading">
             <div className="sectionHeader">
               <div>
@@ -481,6 +513,39 @@ function App() {
               />
             </label>
           </section>
+          )}
+
+          <div className="stepControls" aria-label="Search setup navigation">
+            <button
+              type="button"
+              className="secondaryAction"
+              disabled={activeTab === 'sources'}
+              onClick={() => setActiveTab(activeTab === 'details' ? 'questionnaire' : 'sources')}
+            >
+              <ArrowLeft size={18} />
+              Back
+            </button>
+            {activeTab !== 'details' ? (
+              <button
+                type="button"
+                className="primaryAction inlineAction"
+                onClick={() => setActiveTab(activeTab === 'sources' ? 'questionnaire' : 'details')}
+              >
+                Continue
+                <ArrowRight size={18} />
+              </button>
+            ) : (
+              <button
+                className="primaryAction inlineAction"
+                type="button"
+                disabled={!readyToSearch || searchState === 'searching'}
+                onClick={saveSearchProfile}
+              >
+                {searchState === 'searching' ? <Loader2 className="spinIcon" size={18} /> : <Search size={18} />}
+                {searchState === 'searching' ? 'Searching job sites' : 'Save Search Profile'}
+              </button>
+            )}
+          </div>
         </form>
 
         <aside className="summaryPanel" aria-label="Search profile summary">
@@ -525,9 +590,10 @@ function App() {
           </button>
         </aside>
       </section>
+      )}
 
-      {(searchState !== 'idle' || jobMatches.length > 0 || sourceNotes.length > 0) && (
-        <section className="resultsPanel" aria-live="polite" aria-labelledby="results-heading">
+      {activeTab === 'listings' && (
+        <section className="resultsPanel listingsPage" aria-live="polite" aria-labelledby="results-heading">
           <div className="sectionHeader">
             <div>
               <span>Search results</span>
@@ -539,6 +605,20 @@ function App() {
                 : `${jobMatches.length} match${jobMatches.length === 1 ? '' : 'es'}`}
             </strong>
           </div>
+
+          {searchState === 'idle' && jobMatches.length === 0 && (
+            <div className="listingEmptyHero">
+              <div>
+                <Search size={28} />
+              </div>
+              <h3>No listings searched yet</h3>
+              <p>Finish the setup pages and save the search profile to pull matching opportunities here.</p>
+              <button type="button" className="primaryAction inlineAction" onClick={() => setActiveTab('details')}>
+                Go to personal details
+                <ArrowRight size={18} />
+              </button>
+            </div>
+          )}
 
           {searchState === 'searching' && (
             <div className="searchingState">
@@ -612,8 +692,6 @@ function App() {
             </div>
           )}
         </section>
-      )}
-        </>
       )}
 
       {activeTab === 'profile' && (

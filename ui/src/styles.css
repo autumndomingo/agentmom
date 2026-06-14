@@ -33,6 +33,8 @@ body {
   margin: 0;
   min-height: 100vh;
   background:
+    radial-gradient(circle at 12% 8%, rgb(37 93 143 / 12%), transparent 28%),
+    radial-gradient(circle at 88% 12%, rgb(183 121 31 / 13%), transparent 26%),
     linear-gradient(180deg, rgb(31 122 104 / 8%), transparent 360px),
     var(--bg);
 }
@@ -74,9 +76,13 @@ textarea:disabled {
   gap: 22px;
   align-items: start;
   background:
+    linear-gradient(90deg, rgb(31 122 104 / 10%) 0 1px, transparent 1px 100%),
+    linear-gradient(0deg, rgb(37 93 143 / 8%) 0 1px, transparent 1px 100%),
     linear-gradient(135deg, rgb(255 255 255 / 92%), rgb(220 239 233 / 62%)),
     var(--surface);
+  background-size: 34px 34px, 34px 34px, auto, auto;
   box-shadow: var(--shadow);
+  overflow: hidden;
 }
 
 .brandMark {
@@ -85,9 +91,10 @@ textarea:disabled {
   border-radius: 8px;
   display: grid;
   place-items: center;
-  background: var(--accent);
+  background: linear-gradient(135deg, var(--accent), var(--blue));
   color: white;
   flex: 0 0 auto;
+  box-shadow: 0 14px 28px rgb(31 122 104 / 24%);
 }
 
 .heroCopy {
@@ -138,28 +145,35 @@ textarea:disabled {
 
 .topTabs {
   margin-top: 18px;
-  display: flex;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 10px;
-  flex-wrap: wrap;
+  background: rgb(255 255 255 / 62%);
+  box-shadow: 0 10px 30px rgb(27 39 35 / 8%);
 }
 
 .topTabs button {
   min-height: 44px;
   padding: 0 16px;
-  border: 1px solid var(--line);
+  border: 1px solid transparent;
   border-radius: 8px;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 8px;
   color: var(--ink);
-  background: var(--surface-strong);
+  background: transparent;
   font-weight: 800;
 }
 
 .topTabs button.active {
   border-color: rgb(31 122 104 / 38%);
   color: white;
-  background: var(--accent);
+  background: linear-gradient(135deg, var(--accent), var(--accent-dark));
+  box-shadow: 0 10px 22px rgb(31 122 104 / 22%);
 }
 
 .workspace {
@@ -185,6 +199,23 @@ textarea:disabled {
 
 .formSection {
   padding: clamp(18px, 3vw, 28px);
+  min-height: 560px;
+  display: grid;
+  align-content: start;
+  position: relative;
+  overflow: hidden;
+}
+
+.formSection::before {
+  position: absolute;
+  inset: 0 0 auto;
+  height: 5px;
+  content: "";
+  background: linear-gradient(90deg, var(--accent), var(--blue), var(--gold));
+}
+
+.setupWorkspace .formSection {
+  animation: riseIn 220ms ease-out;
 }
 
 .sectionHeader,
@@ -342,7 +373,8 @@ textarea:focus {
 
 .addSourceRow button,
 .resumeActions button,
-.primaryAction {
+.primaryAction,
+.secondaryAction {
   min-height: 46px;
   padding: 0 15px;
   border-radius: 8px;
@@ -498,6 +530,35 @@ textarea:focus {
   margin-top: 14px;
 }
 
+.inlineAction {
+  width: auto;
+  margin-top: 0;
+}
+
+.secondaryAction {
+  border: 1px solid var(--line-strong);
+  color: var(--ink);
+  background: white;
+}
+
+.secondaryAction:hover {
+  border-color: var(--blue);
+  color: var(--blue);
+  background: rgb(37 93 143 / 6%);
+}
+
+.stepControls {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.stepControls .primaryAction,
+.stepControls .secondaryAction {
+  min-width: 150px;
+}
+
 .spinIcon {
   animation: spin 900ms linear infinite;
 }
@@ -509,6 +570,50 @@ textarea:focus {
   border-radius: 8px;
   background: var(--surface-strong);
   box-shadow: 0 12px 34px rgb(27 39 35 / 8%);
+}
+
+.listingsPage {
+  min-height: 640px;
+}
+
+.listingEmptyHero {
+  min-height: 430px;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 12px;
+  text-align: center;
+  background:
+    linear-gradient(90deg, rgb(31 122 104 / 8%) 0 1px, transparent 1px 100%),
+    linear-gradient(0deg, rgb(37 93 143 / 7%) 0 1px, transparent 1px 100%),
+    #fbfbf8;
+  background-size: 32px 32px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+}
+
+.listingEmptyHero > div {
+  width: 64px;
+  height: 64px;
+  border-radius: 18px;
+  display: grid;
+  place-items: center;
+  color: white;
+  background: linear-gradient(135deg, var(--blue), var(--accent));
+  box-shadow: 0 16px 28px rgb(37 93 143 / 22%);
+}
+
+.listingEmptyHero h3 {
+  margin: 0;
+  font-size: clamp(1.45rem, 3vw, 2rem);
+  letter-spacing: 0;
+}
+
+.listingEmptyHero p {
+  max-width: 470px;
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.5;
 }
 
 .searchingState {
@@ -565,7 +670,9 @@ textarea:focus {
   padding: 16px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #fbfbf8;
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 94%), rgb(251 251 248 / 100%));
+  box-shadow: 0 10px 22px rgb(27 39 35 / 7%);
 }
 
 .jobCardTop {
@@ -908,7 +1015,23 @@ textarea:focus {
   }
 }
 
+@keyframes riseIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 @media (max-width: 980px) {
+  .topTabs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .workspace {
     grid-template-columns: 1fr;
   }
@@ -943,6 +1066,10 @@ textarea:focus {
     grid-template-columns: 1fr;
   }
 
+  .formSection {
+    min-height: auto;
+  }
+
   .resumeActions {
     justify-content: stretch;
   }
@@ -969,5 +1096,14 @@ textarea:focus {
     grid-template-columns: auto auto;
     justify-content: start;
     justify-items: start;
+  }
+
+  .topTabs {
+    grid-template-columns: 1fr;
+  }
+
+  .stepControls .primaryAction,
+  .stepControls .secondaryAction {
+    width: 100%;
   }
 }
