@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use super::*;
 
+const RECONCILE_RUNNING_VM_SSH_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[derive(Clone)]
 struct WorkerState {
     api: WorkerApi,
@@ -147,6 +149,9 @@ pub(crate) async fn worker(args: WorkerArgs) -> Result<()> {
             shutdown_task.abort();
             return Ok(());
         }
+        if claimed && !args.once {
+            continue;
+        }
         if let Err(error) = worker_reconcile_once(&worker_api).await {
             log_record(
                 "error",
@@ -173,9 +178,6 @@ pub(crate) async fn worker(args: WorkerArgs) -> Result<()> {
             worker_http.abort();
             shutdown_task.abort();
             return Ok(());
-        }
-        if claimed {
-            continue;
         }
         tokio::select! {
             _ = shutdown_rx.changed() => {
@@ -1057,7 +1059,7 @@ async fn ensure_workspace_running_local(
     match get_vm(&workspace.vm_name).await {
         Ok(handle) if handle.status().is_running() => {
             handle
-                .connect_with_timeout(Duration::from_secs(90))
+                .connect_with_timeout(RECONCILE_RUNNING_VM_SSH_TIMEOUT)
                 .await
                 .with_context(|| format!("connect to running vm '{}'", workspace.vm_name))?;
             api.update_workspace(&workspace.name, Some("running"), None, false, false)

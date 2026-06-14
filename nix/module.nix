@@ -1122,7 +1122,7 @@ in
         Restart = "always";
         RestartSec = "5s";
         TimeoutStartSec = "30min";
-        TimeoutStopSec = "35min";
+        TimeoutStopSec = "90s";
         WorkingDirectory = cfg.stateDir;
       } // lib.optionalAttrs (cfg.worker.resticEnvFile != null) {
         EnvironmentFile = cfg.worker.resticEnvFile;
