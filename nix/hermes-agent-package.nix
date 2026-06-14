@@ -19,5 +19,6 @@ in
 pkgs.callPackage "${inputs.hermes-agent}/nix/hermes-agent.nix" {
   inherit (inputs.hermes-agent.inputs) uv2nix pyproject-nix pyproject-build-systems;
   inherit npm-lockfile-fix;
+  extraDependencyGroups = [ "messaging" ];
   rev = inputs.hermes-agent.rev or null;
 }
