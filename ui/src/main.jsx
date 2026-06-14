@@ -1768,6 +1768,7 @@ function TerminalPane({ workspaceName, sessionId }) {
       terminal.writeln('Connecting to Hermes TUI...');
 
       socket = new WebSocket(tuiWsUrl(workspaceName, sessionId));
+      socket.binaryType = 'arraybuffer';
       dataDisposable = terminal.onData((data) => {
         if (socket?.readyState === WebSocket.OPEN) {
           socket.send(data);
@@ -1786,6 +1787,14 @@ function TerminalPane({ workspaceName, sessionId }) {
       socket.onmessage = (event) => {
         if (typeof event.data === 'string') {
           terminal?.write(event.data);
+        } else if (event.data instanceof ArrayBuffer) {
+          terminal?.write(new Uint8Array(event.data));
+        } else if (event.data instanceof Blob) {
+          event.data.arrayBuffer().then((buffer) => {
+            if (!cancelled) {
+              terminal?.write(new Uint8Array(buffer));
+            }
+          });
         }
       };
       socket.onerror = () => {
