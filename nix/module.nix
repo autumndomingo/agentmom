@@ -1015,6 +1015,7 @@ in
         ExecStart = "${microvmRunner} %i";
         Restart = "on-failure";
         RestartSec = "2s";
+        SuccessExitStatus = "143";
         WorkingDirectory = cfg.microvm.stateDir;
         KillMode = "mixed";
         TimeoutStartSec = "30min";

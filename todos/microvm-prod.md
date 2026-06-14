@@ -59,9 +59,10 @@ Keep the first production runtime narrow: Cloud Hypervisor, `/24` guest network,
 - [x] Require a bootstrap admin code for the first user on wiped catalogs.
 - [x] Add a declarative one-time cutover wipe marker for prod hosts.
 - [x] Update real-fleet tests to authenticate admin requests and clean up mutating workspaces.
-- [~] Re-run prod mutating real-fleet tests on both worker nodes after widening cold-start readiness and fixing guest SSH firewalling.
+- [x] Re-run prod mutating real-fleet tests on both worker nodes after widening cold-start readiness and fixing guest SSH firewalling.
 
 ## Prod Validation Notes
 
 - First prod mutating run reached SSH in the backup-drill VM about two seconds after the 120s fresh-start deadline; this was build/copy latency for the generated microVM store disk, not a guest boot failure.
 - Second prod mutating run proved the guest reached `sshd`, but host TCP/22 was dropped while ICMP worked. Use NixOS `allowedTCPPorts = [ 22 ]` instead of hand-written guest firewall rules.
+- Third prod mutating run passed on `mom-1` and `mom-2`. Intentional VM stops still left failed systemd units because the runner exits 143 on SIGTERM; mark that as a successful exit status in the unit template.
