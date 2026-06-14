@@ -84,12 +84,12 @@ async fn backup_workspace_via_worker(
             workspace.name
         );
     };
-    if !node_allows_worker_claims(node_id)? {
-        bail!(
+    require_claimable_node(node_id).with_context(|| {
+        format!(
             "workspace {} is assigned to node {node_id}, but that node is not accepting jobs",
             workspace.workspace_dir_name,
-        );
-    }
+        )
+    })?;
     let job = create_job(CreateJobRequest {
         workspace_name: workspace.name.clone(),
         node_id: Some(node_id.to_string()),
@@ -248,12 +248,12 @@ async fn restore_workspace_via_worker(
             workspace.name
         );
     };
-    if !node_allows_worker_claims(node_id)? {
-        bail!(
+    require_claimable_node(node_id).with_context(|| {
+        format!(
             "workspace {} is assigned to node {node_id}, but that node is not accepting jobs",
             workspace.name
-        );
-    }
+        )
+    })?;
     let job = create_job(CreateJobRequest {
         workspace_name: workspace.name.clone(),
         node_id: Some(node_id.to_string()),

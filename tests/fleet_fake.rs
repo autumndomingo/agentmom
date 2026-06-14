@@ -353,6 +353,40 @@ async fn workspace_backup_cli_queues_remote_worker_job_when_workspace_dir_is_not
 }
 
 #[tokio::test]
+async fn workspace_backup_restore_cli_rejects_stale_remote_worker() -> Result<()> {
+    let _guard = fleet_test_guard().await;
+    let fleet = TestFleet::start().await?;
+    insert_node(fleet.api_state.path(), "stale-node", now_epoch()? - 3600)?;
+    insert_workspace(fleet.api_state.path(), "stale-remote", "stale-node")?;
+    insert_backup_record(fleet.api_state.path(), "stale-remote", "stale-node")?;
+
+    let backup_status = run_mom_status(
+        fleet.api_state.path(),
+        &["workspace", "backup", "stale-remote", "--leave-stopped"],
+    )?;
+    assert!(
+        !backup_status.success(),
+        "CLI backup should fail before queueing work to a stale node"
+    );
+
+    let restore_status = run_mom_status(
+        fleet.api_state.path(),
+        &["workspace", "restore", "stale-remote"],
+    )?;
+    assert!(
+        !restore_status.success(),
+        "CLI restore should fail before queueing work to a stale node"
+    );
+    assert_eq!(
+        queued_job_count(fleet.api_state.path(), "stale-remote")?,
+        0,
+        "stale-node CLI paths must not leave queued work behind"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn workspace_inspect_labels_remote_runtime_as_not_checked_locally() -> Result<()> {
     let _guard = fleet_test_guard().await;
     let fleet = TestFleet::start().await?;
@@ -649,6 +683,46 @@ async fn create_selects_fresh_worker_over_stale_node() -> Result<()> {
     assert!(
         node.runtime_home.path().join("fake/fresh").exists(),
         "workspace should be placed on the fresh worker"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_create_reserves_the_last_node_slot() -> Result<()> {
+    let _guard = fleet_test_guard().await;
+    let fleet = TestFleet::start().await?;
+    insert_node_with_capacity(fleet.api_state.path(), "node-a", now_epoch()?, 1)?;
+    let cookie = admin_cookie(&fleet.api_url).await?;
+    let client = reqwest::Client::new();
+
+    let create_a = client
+        .post(format!("{}/api/workspaces", fleet.api_url))
+        .header(reqwest::header::COOKIE, cookie.clone())
+        .json(&json!({
+            "name": "slot-a",
+            "node_id": "node-a"
+        }))
+        .send();
+    let create_b = client
+        .post(format!("{}/api/workspaces", fleet.api_url))
+        .header(reqwest::header::COOKIE, cookie)
+        .json(&json!({
+            "name": "slot-b",
+            "node_id": "node-a"
+        }))
+        .send();
+
+    let (response_a, response_b) = tokio::join!(create_a, create_b);
+    let statuses = [response_a?.status(), response_b?.status()];
+    assert_eq!(
+        statuses.iter().filter(|status| status.is_success()).count(),
+        1,
+        "only one concurrent create should reserve the final active-workspace slot"
+    );
+    assert_eq!(
+        workspace_count_for_node(fleet.api_state.path(), "node-a")?,
+        1
     );
 
     Ok(())
@@ -1023,6 +1097,92 @@ async fn worker_claim_skips_workspace_with_active_job() -> Result<()> {
             .and_then(|job| job.get("id"))
             .and_then(Value::as_str),
         Some(second_job.as_str())
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pressured_worker_still_claims_capacity_relieving_jobs() -> Result<()> {
+    let _guard = fleet_test_guard().await;
+    let fleet = TestFleet::start().await?;
+    let client = reqwest::Client::new();
+    insert_node(fleet.api_state.path(), "node-a", now_epoch()?)?;
+    insert_workspace_with_state(
+        fleet.api_state.path(),
+        "blocked-start",
+        "node-a",
+        "stopped",
+        "stopped",
+    )?;
+    insert_workspace(fleet.api_state.path(), "free-capacity", "node-a")?;
+    let start_job = create_job(&fleet.api_url, "blocked-start", "start").await?;
+    let stop_job = create_job(&fleet.api_url, "free-capacity", "stop").await?;
+
+    let claim = claim_worker_job_with_capacity_ok(&client, &fleet.api_url, "node-a", false)
+        .await?
+        .ok_or_else(|| anyhow!("pressured worker did not claim a capacity-relieving job"))?;
+    assert_eq!(
+        claim.get("id").and_then(Value::as_str),
+        Some(stop_job.as_str())
+    );
+    assert_eq!(
+        job_status(&fleet.api_url, &start_job).await?,
+        "queued",
+        "capacity-sensitive jobs should stay queued while the worker reports pressure"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn worker_job_events_refresh_node_freshness_without_changing_status() -> Result<()> {
+    let _guard = fleet_test_guard().await;
+    let fleet = TestFleet::start().await?;
+    let client = reqwest::Client::new();
+    insert_node(fleet.api_state.path(), "node-a", now_epoch()? - 3600)?;
+    insert_workspace(fleet.api_state.path(), "heartbeat", "node-a")?;
+    let running_job = insert_running_job(fleet.api_state.path(), "heartbeat", "node-a")?;
+
+    client
+        .post(format!(
+            "{}/worker/jobs/{}/events",
+            fleet.api_url, running_job
+        ))
+        .bearer_auth(WORKER_TOKEN)
+        .json(&json!({
+            "node_id": "node-a",
+            "event_type": "job_heartbeat",
+            "status": "running",
+            "message": "test heartbeat",
+            "metadata": {}
+        }))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    assert!(node_ready_fresh(fleet.api_state.path(), "node-a")?);
+    run_mom(fleet.api_state.path(), &["node", "cordon", "node-a"])?;
+    client
+        .post(format!(
+            "{}/worker/jobs/{}/events",
+            fleet.api_url, running_job
+        ))
+        .bearer_auth(WORKER_TOKEN)
+        .json(&json!({
+            "node_id": "node-a",
+            "event_type": "job_heartbeat",
+            "status": "running",
+            "message": "test heartbeat",
+            "metadata": {}
+        }))
+        .send()
+        .await?
+        .error_for_status()?;
+    assert_eq!(
+        node_status(fleet.api_state.path(), "node-a")?,
+        "cordoned",
+        "freshness updates must not change node lifecycle status"
     );
 
     Ok(())
@@ -1645,6 +1805,15 @@ async fn claim_worker_job(
     api_url: &str,
     node: &str,
 ) -> Result<Option<Value>> {
+    claim_worker_job_with_capacity_ok(client, api_url, node, true).await
+}
+
+async fn claim_worker_job_with_capacity_ok(
+    client: &reqwest::Client,
+    api_url: &str,
+    node: &str,
+    capacity_ok: bool,
+) -> Result<Option<Value>> {
     Ok(client
         .post(format!("{api_url}/worker/claim"))
         .bearer_auth(WORKER_TOKEN)
@@ -1657,7 +1826,7 @@ async fn claim_worker_job(
                 "active_workspaces": 0,
                 "allocated_memory_mib": 0,
                 "disk_available_mib": 65536,
-                "capacity_ok": true
+                "capacity_ok": capacity_ok
             },
             "worker_url": "http://100.64.0.42:9090"
         }))
@@ -1821,6 +1990,27 @@ INSERT INTO jobs (
     Ok(job_id)
 }
 
+fn insert_backup_record(api_state: &Path, workspace: &str, node: &str) -> Result<String> {
+    let now = now_epoch()?;
+    let backup_id = format!("bak-{workspace}-test");
+    let db = Connection::open(api_state.join("fleet.db"))?;
+    db.execute(
+        r#"
+INSERT INTO workspace_backups (
+    id, workspace_name, node_id, kind, location, status, size_bytes, created_at
+) VALUES (?1, ?2, ?3, 'restic', ?4, 'succeeded', 0, ?5)
+"#,
+        (
+            &backup_id,
+            workspace,
+            node,
+            format!("fake-restic#{backup_id}"),
+            now,
+        ),
+    )?;
+    Ok(backup_id)
+}
+
 fn insert_unassigned_workspace(api_state: &Path, name: &str) -> Result<()> {
     let now = now_epoch()?;
     let workspace_id = test_workspace_id(name);
@@ -1846,6 +2036,24 @@ INSERT INTO workspaces (
 
 fn test_workspace_id(name: &str) -> String {
     format!("ws_test_{}", name.replace('-', "_"))
+}
+
+fn workspace_count_for_node(api_state: &Path, node: &str) -> Result<i64> {
+    let db = Connection::open(api_state.join("fleet.db"))?;
+    Ok(db.query_row(
+        "SELECT COUNT(*) FROM workspaces WHERE node_id = ?1 AND status != 'removed'",
+        [node],
+        |row| row.get(0),
+    )?)
+}
+
+fn queued_job_count(api_state: &Path, workspace: &str) -> Result<i64> {
+    let db = Connection::open(api_state.join("fleet.db"))?;
+    Ok(db.query_row(
+        "SELECT COUNT(*) FROM jobs WHERE workspace_name = ?1 AND status = 'queued'",
+        [workspace],
+        |row| row.get(0),
+    )?)
 }
 
 fn node_status(api_state: &Path, node: &str) -> Result<String> {

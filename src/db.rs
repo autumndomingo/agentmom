@@ -273,9 +273,51 @@ pub(crate) fn workspace_upsert_pending(input: WorkspaceUpsert<'_>) -> Result<()>
     ensure_fleet_schema()?;
     let now = now_epoch()?;
     let db = fleet_db()?;
+    insert_workspace_pending(&db, input.assigned_node_id, &input, now)
+}
+
+pub(crate) fn workspace_upsert_pending_on_ready_node(
+    input: WorkspaceUpsert<'_>,
+    requested_node: Option<&str>,
+) -> Result<String> {
+    ensure_fleet_schema()?;
+    let now = now_epoch()?;
+    let stale_cutoff = now.saturating_sub(i64::try_from(env_u64("MOM_NODE_STALE_SECS", 60))?);
+    let mut db = fleet_db()?;
+    let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let assigned_node = if let Some(node) = requested_node {
+        let exists = tx.query_row(
+            &ready_node_query("COUNT(*)", "AND node_id = ?2", ""),
+            params![stale_cutoff, node],
+            |row| row.get::<_, i64>(0),
+        )? > 0;
+        if !exists {
+            bail!("node is not ready: {node}");
+        }
+        node.to_string()
+    } else {
+        tx.query_row(
+            &ready_node_query("node_id", "", "ORDER BY last_seen_at DESC\nLIMIT 1"),
+            params![stale_cutoff],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| anyhow!("no ready worker nodes are registered"))?
+    };
+    insert_workspace_pending(&tx, Some(&assigned_node), &input, now)?;
+    tx.commit()?;
+    Ok(assigned_node)
+}
+
+fn insert_workspace_pending(
+    db: &Connection,
+    assigned_node_id: Option<&str>,
+    input: &WorkspaceUpsert<'_>,
+    now: i64,
+) -> Result<()> {
     let slug = workspace_slug_from_name(input.name)?;
     let workspace_id = workspace_id_from_slug(&slug);
-    db.execute(
+    let changed = db.execute(
         r#"
 INSERT INTO workspaces (
     name, workspace_id, slug, display_name, user_id, owner_user_id, agent_name, vm_name, workspace_dir_name,
@@ -295,7 +337,7 @@ ON CONFLICT(name) DO NOTHING
             input.agent_name,
             input.vm_name,
             input.workspace_dir_name,
-            input.assigned_node_id,
+            assigned_node_id,
             i64::from(input.cpus),
             i64::from(input.memory_mib),
             i64::from(input.workspace_quota_mib),
@@ -304,7 +346,7 @@ ON CONFLICT(name) DO NOTHING
             now,
         ],
     )?;
-    if db.changes() == 0 {
+    if changed == 0 {
         bail!("workspace already exists: {}", input.name);
     }
     Ok(())
@@ -1012,6 +1054,19 @@ pub(crate) fn node_set_status(node: &str, status: &str) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn node_touch(node: &str) -> Result<()> {
+    ensure_fleet_schema()?;
+    let db = fleet_db()?;
+    let changed = db.execute(
+        "UPDATE nodes SET last_seen_at = ?2 WHERE node_id = ?1",
+        params![node, now_epoch()?],
+    )?;
+    if changed == 0 {
+        bail!("node not found: {node}");
+    }
+    Ok(())
+}
+
 pub(crate) fn node_allows_worker_reports(node: &str) -> Result<bool> {
     node_has_status(node, &["ready", "cordoned", "draining"])
 }
@@ -1067,7 +1122,7 @@ WHERE id = ?1
     .ok_or_else(|| anyhow!("job not found: {id}"))
 }
 
-pub(crate) fn claim_job(node: &str) -> Result<Option<JobRecord>> {
+pub(crate) fn claim_job(node: &str, capacity_ok: bool) -> Result<Option<JobRecord>> {
     ensure_fleet_schema()?;
     let now = now_epoch()?;
     let mut db = fleet_db()?;
@@ -1078,21 +1133,22 @@ pub(crate) fn claim_job(node: &str) -> Result<Option<JobRecord>> {
             r#"
 SELECT id
 FROM jobs
-	WHERE status = 'queued' AND node_id = ?1
-	  AND EXISTS (
-	      SELECT 1 FROM nodes
-	      WHERE nodes.node_id = ?1
-	        AND nodes.status IN ('ready', 'cordoned')
-	  )
-	  AND NOT EXISTS (
-	      SELECT 1 FROM jobs active
-	      WHERE active.workspace_name = jobs.workspace_name
-	        AND active.status IN ('claimed', 'running')
-	  )
-	ORDER BY created_at ASC
-	LIMIT 1
-	"#,
-            params![node],
+WHERE status = 'queued' AND node_id = ?1
+  AND (?2 OR kind IN ('stop', 'remove'))
+  AND EXISTS (
+      SELECT 1 FROM nodes
+      WHERE nodes.node_id = ?1
+        AND nodes.status IN ('ready', 'cordoned')
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM jobs active
+      WHERE active.workspace_name = jobs.workspace_name
+        AND active.status IN ('claimed', 'running')
+  )
+ORDER BY created_at ASC
+LIMIT 1
+"#,
+            params![node, capacity_ok],
             |row| row.get(0),
         )
         .optional()?;

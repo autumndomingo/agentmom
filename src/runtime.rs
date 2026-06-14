@@ -793,6 +793,7 @@ fn acquire_machine_state_lock() -> Result<MachineStateLock> {
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(&lock_path)
         .with_context(|| format!("open {}", lock_path.display()))?;
     for _ in 0..100 {

@@ -259,26 +259,28 @@ async fn api_create_workspace(
             "workspace already exists: {name}"
         )));
     }
-    let assigned_node = select_ready_node(request.node_id.as_deref())?;
     let user_id = request.user.clone().unwrap_or_else(|| name.clone());
     let memory = u32::try_from(request.memory).context("memory must fit in u32 MiB")?;
     let vm_name = format!("mom-{name}");
     let workspace_dir_name = format!("mom-{name}-workspace");
-    workspace_upsert_pending(WorkspaceUpsert {
-        name: &name,
-        display_name: &display_name,
-        user_id: &user_id,
-        owner_user_id: None,
-        agent_name: None,
-        vm_name: &vm_name,
-        workspace_dir_name: &workspace_dir_name,
-        assigned_node_id: Some(&assigned_node),
-        cpus: request.cpus,
-        memory_mib: memory,
-        workspace_quota_mib: request.workspace_quota,
-        idle_timeout_secs: request.idle_timeout,
-        backup_interval_secs: request.backup_interval,
-    })?;
+    let assigned_node = workspace_upsert_pending_on_ready_node(
+        WorkspaceUpsert {
+            name: &name,
+            display_name: &display_name,
+            user_id: &user_id,
+            owner_user_id: None,
+            agent_name: None,
+            vm_name: &vm_name,
+            workspace_dir_name: &workspace_dir_name,
+            assigned_node_id: None,
+            cpus: request.cpus,
+            memory_mib: memory,
+            workspace_quota_mib: request.workspace_quota,
+            idle_timeout_secs: request.idle_timeout,
+            backup_interval_secs: request.backup_interval,
+        },
+        request.node_id.as_deref(),
+    )?;
     let job = create_job(CreateJobRequest {
         workspace_name: name,
         kind: "create".to_string(),
@@ -331,10 +333,10 @@ async fn api_worker_claim(
         require_worker_report_allowed(&request.node_id)?;
         return Ok(Json(None));
     }
-    if !request.pressure.capacity_ok {
-        return Ok(Json(None));
-    }
-    Ok(Json(claim_job(&request.node_id)?))
+    Ok(Json(claim_job(
+        &request.node_id,
+        request.pressure.capacity_ok,
+    )?))
 }
 
 async fn api_worker_job_event(
@@ -351,6 +353,7 @@ async fn api_worker_job_event(
         )));
     }
     require_worker_report_allowed(&request.node_id)?;
+    node_touch(&request.node_id)?;
     if request.event_type == "job_running" {
         mark_job_running(&id, &request.node_id)?;
     }
@@ -376,6 +379,7 @@ async fn api_worker_job_complete(
 ) -> Result<Json<JobResponse>, ApiError> {
     require_worker_node_token(&headers, &request.node_id).map_err(ApiError::Unauthorized)?;
     require_worker_report_allowed(&request.node_id)?;
+    node_touch(&request.node_id)?;
     let job = complete_job(&id, &request.node_id, &request.status, request.output)?;
     Ok(Json(JobResponse { job }))
 }
@@ -388,6 +392,7 @@ async fn api_worker_workspace_state(
     require_worker_node_token(&headers, &request.node_id).map_err(ApiError::Unauthorized)?;
     require_assigned_worker(&name, &request.node_id)?;
     require_worker_report_allowed(&request.node_id)?;
+    node_touch(&request.node_id)?;
     workspace_update_from_worker(
         &name,
         &request.node_id,
@@ -407,6 +412,7 @@ async fn api_worker_workspace_event(
     require_worker_node_token(&headers, &request.node_id).map_err(ApiError::Unauthorized)?;
     require_assigned_worker(&name, &request.node_id)?;
     require_worker_report_allowed(&request.node_id)?;
+    node_touch(&request.node_id)?;
     record_workspace_event_for_node(
         &name,
         &request.node_id,
@@ -426,6 +432,7 @@ async fn api_worker_backup_artifact(
     require_worker_node_token(&headers, &request.node_id).map_err(ApiError::Unauthorized)?;
     require_assigned_worker(&name, &request.node_id)?;
     require_worker_report_allowed(&request.node_id)?;
+    node_touch(&request.node_id)?;
     let artifact = BackupArtifact {
         kind: request.kind,
         location: request.location,
@@ -441,6 +448,7 @@ async fn api_worker_workspaces(
 ) -> Result<Json<Vec<WorkspaceRecord>>, ApiError> {
     require_worker_node_token(&headers, &query.node_id).map_err(ApiError::Unauthorized)?;
     require_worker_report_allowed(&query.node_id)?;
+    node_touch(&query.node_id)?;
     Ok(Json(workspaces_for_node(&query.node_id)?))
 }
 
@@ -477,6 +485,7 @@ async fn api_worker_events(
     require_worker_node_token(&headers, &query.node_id).map_err(ApiError::Unauthorized)?;
     let node_id = query.node_id;
     require_worker_report_allowed(&node_id)?;
+    node_touch(&node_id)?;
     let stream = BroadcastStream::new(state.notifier.subscribe()).filter_map(move |message| {
         let node_id = node_id.clone();
         match message {

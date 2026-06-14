@@ -514,30 +514,33 @@ fn create_owned_workspace(
 ) -> Result<WorkspaceRecord, AuthError> {
     let display_name = agent_name.trim().to_string();
     let name = workspace_slug_from_name(&format!("{} {}", user.email, agent_name))?;
-    let node_id = select_ready_node(None).map_err(|error| {
+    let vm_name = format!("mom-{name}");
+    let workspace_dir_name = format!("mom-{name}-workspace");
+    let node_id = workspace_upsert_pending_on_ready_node(
+        WorkspaceUpsert {
+            name: &name,
+            display_name: &display_name,
+            user_id: &user.email,
+            owner_user_id: Some(user.id),
+            agent_name: Some(agent_name),
+            vm_name: &vm_name,
+            workspace_dir_name: &workspace_dir_name,
+            assigned_node_id: None,
+            cpus: default_workspace_cpus(),
+            memory_mib: u32::try_from(default_workspace_memory())
+                .context("default workspace memory too large")?,
+            workspace_quota_mib: default_workspace_quota(),
+            idle_timeout_secs: default_workspace_idle_timeout(),
+            backup_interval_secs: default_workspace_backup_interval(),
+        },
+        None,
+    )
+    .map_err(|error| {
         if error.to_string().contains("no ready worker nodes") {
             AuthError::Unavailable("no ready worker nodes are registered".to_string())
         } else {
             AuthError::Anyhow(error)
         }
-    })?;
-    let vm_name = format!("mom-{name}");
-    let workspace_dir_name = format!("mom-{name}-workspace");
-    workspace_upsert_pending(WorkspaceUpsert {
-        name: &name,
-        display_name: &display_name,
-        user_id: &user.email,
-        owner_user_id: Some(user.id),
-        agent_name: Some(agent_name),
-        vm_name: &vm_name,
-        workspace_dir_name: &workspace_dir_name,
-        assigned_node_id: Some(&node_id),
-        cpus: default_workspace_cpus(),
-        memory_mib: u32::try_from(default_workspace_memory())
-            .context("default workspace memory too large")?,
-        workspace_quota_mib: default_workspace_quota(),
-        idle_timeout_secs: default_workspace_idle_timeout(),
-        backup_interval_secs: default_workspace_backup_interval(),
     })?;
     create_job(CreateJobRequest {
         workspace_name: name.clone(),
