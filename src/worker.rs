@@ -79,8 +79,24 @@ pub(crate) async fn worker(args: WorkerArgs) -> Result<()> {
     });
 
     log_record("info", "worker_start", None, "Agent Mom worker starting");
-    let mut shutdown = Box::pin(shutdown_signal());
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+    let shutdown_task = tokio::spawn(async move {
+        shutdown_signal().await;
+        let _ = shutdown_tx.send(true);
+    });
     loop {
+        if *shutdown_rx.borrow() {
+            log_record(
+                "info",
+                "worker_shutdown",
+                None,
+                "Agent Mom worker shutting down",
+            );
+            sse_task.abort();
+            worker_http.abort();
+            shutdown_task.abort();
+            return Ok(());
+        }
         let mut claimed = false;
         match worker_claim_once(&worker_api, &worker_url).await {
             Ok(value) => claimed = value,
@@ -94,6 +110,18 @@ pub(crate) async fn worker(args: WorkerArgs) -> Result<()> {
                 eprintln!("worker claim failed: {error:#}");
             }
         }
+        if *shutdown_rx.borrow() {
+            log_record(
+                "info",
+                "worker_shutdown_after_job",
+                None,
+                "Agent Mom worker shutting down after finishing active work",
+            );
+            sse_task.abort();
+            worker_http.abort();
+            shutdown_task.abort();
+            return Ok(());
+        }
         if let Err(error) = worker_reconcile_once(&worker_api).await {
             log_record(
                 "error",
@@ -106,16 +134,30 @@ pub(crate) async fn worker(args: WorkerArgs) -> Result<()> {
         if args.once {
             sse_task.abort();
             worker_http.abort();
+            shutdown_task.abort();
+            return Ok(());
+        }
+        if *shutdown_rx.borrow() {
+            log_record(
+                "info",
+                "worker_shutdown",
+                None,
+                "Agent Mom worker shutting down",
+            );
+            sse_task.abort();
+            worker_http.abort();
+            shutdown_task.abort();
             return Ok(());
         }
         if claimed {
             continue;
         }
         tokio::select! {
-            _ = &mut shutdown => {
+            _ = shutdown_rx.changed() => {
                 log_record("info", "worker_shutdown", None, "Agent Mom worker shutting down");
                 sse_task.abort();
                 worker_http.abort();
+                shutdown_task.abort();
                 return Ok(());
             },
             _ = wake_rx.recv() => {},
@@ -331,37 +373,70 @@ async fn run_claimed_job(api: &WorkerApi, job: JobRecord) -> Result<()> {
     .await?;
     let heartbeat = spawn_job_heartbeat(api.clone(), job.id.clone(), job.kind.clone());
     let result = execute_job(api, &job).await;
-    heartbeat.abort();
     match result {
         Ok(output) => {
-            api.client
-                .post(format!("{}/worker/jobs/{}/complete", api.api_url, job.id))
-                .with_worker_token()
-                .json(&json!({
-                    "node_id": api.node,
-                    "status": "succeeded",
-                    "output": output
-                }))
-                .send()
-                .await?
-                .error_for_status()?;
-            Ok(())
+            let completion = complete_claimed_job(api, &job, "succeeded", output).await;
+            heartbeat.abort();
+            completion
         }
         Err(error) => {
             let message = format!("{error:#}");
-            api.client
-                .post(format!("{}/worker/jobs/{}/complete", api.api_url, job.id))
-                .with_worker_token()
-                .json(&json!({
-                    "node_id": api.node,
-                    "status": "failed",
-                    "output": { "error": message }
-                }))
-                .send()
-                .await?
-                .error_for_status()?;
             log_record("error", "job_failed", Some(&job.workspace_name), &message);
-            Ok(())
+            let completion =
+                complete_claimed_job(api, &job, "failed", json!({ "error": message })).await;
+            heartbeat.abort();
+            completion
+        }
+    }
+}
+
+async fn complete_claimed_job(
+    api: &WorkerApi,
+    job: &JobRecord,
+    status: &str,
+    output: Value,
+) -> Result<()> {
+    let retry_for = Duration::from_secs(env_u64("MOM_JOB_COMPLETION_RETRY_SECS", 600));
+    let deadline = tokio::time::Instant::now() + retry_for;
+    let body = json!({
+        "node_id": api.node,
+        "status": status,
+        "output": output
+    });
+    let mut attempt: u32 = 0;
+    loop {
+        attempt = attempt.saturating_add(1);
+        let result = api
+            .client
+            .post(format!("{}/worker/jobs/{}/complete", api.api_url, job.id))
+            .with_worker_token()
+            .json(&body)
+            .send()
+            .await
+            .and_then(|response| response.error_for_status());
+        match result {
+            Ok(_) => return Ok(()),
+            Err(error) => {
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "complete job {} with status {status} after {attempt} attempts",
+                            job.id
+                        )
+                    });
+                }
+                log_record(
+                    "warn",
+                    "job_completion_retry",
+                    Some(&job.workspace_name),
+                    &format!(
+                        "job {} completion attempt {attempt} failed; retrying: {error:#}",
+                        job.id
+                    ),
+                );
+                let delay = Duration::from_secs(u64::from(attempt.min(10)));
+                tokio::time::sleep(delay).await;
+            }
         }
     }
 }

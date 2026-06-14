@@ -1,5 +1,6 @@
 use std::{collections::HashMap, io::Write};
 
+use fs2::FileExt;
 use tokio::io::AsyncWriteExt;
 
 use super::*;
@@ -787,30 +788,36 @@ async fn generate_ssh_keypair(dir: &Path, name: &str) -> Result<String> {
 }
 
 fn acquire_machine_state_lock() -> Result<MachineStateLock> {
-    let lock_dir = runtime_home()?.join(".machine-state.lock");
+    let lock_path = runtime_home()?.join(".machine-state.flock");
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&lock_path)
+        .with_context(|| format!("open {}", lock_path.display()))?;
     for _ in 0..100 {
-        match fs::create_dir(&lock_dir) {
+        match file.try_lock_exclusive() {
             Ok(()) => {
-                return Ok(MachineStateLock { path: lock_dir });
+                return Ok(MachineStateLock { file });
             }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(Duration::from_millis(50));
             }
             Err(error) => {
-                return Err(error).with_context(|| format!("create {}", lock_dir.display()));
+                return Err(error).with_context(|| format!("lock {}", lock_path.display()));
             }
         }
     }
-    bail!("timed out waiting for {}", lock_dir.display())
+    bail!("timed out waiting for {}", lock_path.display())
 }
 
 struct MachineStateLock {
-    path: PathBuf,
+    file: fs::File,
 }
 
 impl Drop for MachineStateLock {
     fn drop(&mut self) {
-        let _ = fs::remove_dir(&self.path);
+        let _ = self.file.unlock();
     }
 }
 

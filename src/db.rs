@@ -1123,6 +1123,13 @@ WHERE id = ?1 AND claimed_by = ?2 AND status IN ('claimed', 'running')
         params![id, node, status, output_json, now],
     )?;
     if changed == 0 {
+        let job = job_get(id)?;
+        if job.claimed_by.as_deref() == Some(node)
+            && job.status == status
+            && job.output_json.as_deref() == Some(output_json.as_str())
+        {
+            return Ok(job);
+        }
         bail!("job {id} is not claimed by node {node}");
     }
     job_get(id)

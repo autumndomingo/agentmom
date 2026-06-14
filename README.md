@@ -256,12 +256,24 @@ do not leave it at a test address.
 marker name for each planned wipe; reusing a marker that already exists in
 `stateDir` is a no-op. The service archives `fleet.db`, legacy microsandbox
 state, and microVM machine/workspace directories before the API or worker starts.
+The cutover unit stops Agent Mom API, worker, backup, and monitor services before
+moving state, then restarts enabled backup/monitor timers after the marker is
+written.
+
+For non-destructive deploys, cordon or otherwise drain workers before switching
+if you need predictable rollout latency. Workers stop claiming after SIGTERM and
+let active jobs finish, so systemd can intentionally wait for long VM, backup, or
+restore work rather than killing it mid-side-effect.
 
 Rolling back after this branch has started workspaces is not just a NixOS
 generation switch. Generated machine directories are durable and may still
 contain fast-start definitions that use the read-only host `/nix/store` virtiofs
 share. If that path is the rollback reason, stop workspace VMs and archive or
 regenerate those machine directories as part of the rollback.
+
+After switching roles, run the strict monitor check, not just `/health/ready`.
+The ready endpoint only proves the API can open the catalog; `mom monitor check`
+also verifies fresh workers, queue age, failed jobs, and backup health.
 
 Fast-start guests can read the host Nix store through a read-only virtiofs
 mount. Keep secrets in runtime secret files such as agenix outputs, never baked

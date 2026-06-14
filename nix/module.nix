@@ -121,6 +121,9 @@ let
     MOM_CAPACITY_ACTIVE_WORKSPACES = toString cfg.capacity.activeWorkspaces;
     MOM_CAPACITY_DISK_RESERVE_MIB = toString cfg.capacity.diskReserveMib;
   }
+  // lib.optionalAttrs (cfg.cutoverWipeMarker != null) {
+    MOM_CUTOVER_WIPE_MARKER = cfg.cutoverWipeMarker;
+  }
   // {
     MOM_CONFIG = toString effectiveConfigFile;
   }
@@ -169,7 +172,12 @@ let
       status="$?"
       trap - EXIT INT TERM
       if [ -n "$vm_pid" ]; then
-        kill "$vm_pid" >/dev/null 2>&1 || true
+        if kill -0 "$vm_pid" >/dev/null 2>&1 && [ -x result/bin/microvm-shutdown ]; then
+          ${pkgs.coreutils}/bin/timeout 15s result/bin/microvm-shutdown >/dev/null 2>&1 || true
+        fi
+        if kill -0 "$vm_pid" >/dev/null 2>&1; then
+          kill "$vm_pid" >/dev/null 2>&1 || true
+        fi
         wait "$vm_pid" >/dev/null 2>&1 || true
       fi
       if [ -n "$virtiofsd_pid" ]; then
@@ -830,6 +838,36 @@ in
         if [ -e "$marker" ]; then
           exit 0
         fi
+        stop_units=(
+          agentmom-monitor-check.timer
+          agentmom-catalog-backup.timer
+          agentmom-monitor-check.service
+          agentmom-catalog-backup.service
+          agentmom-worker.service
+          agentmom-api.service
+        )
+        for unit in "''${stop_units[@]}"
+        do
+          systemctl stop "$unit" >/dev/null 2>&1 || true
+        done
+        for attempt in $(seq 1 60)
+        do
+          still_active=""
+          for unit in "''${stop_units[@]}"
+          do
+            if systemctl is-active --quiet "$unit"; then
+              still_active="''${still_active} $unit"
+            fi
+          done
+          if [ -z "$still_active" ]; then
+            break
+          fi
+          if [ "$attempt" = 60 ]; then
+            echo "refusing Agent Mom cutover wipe while units are still active:$still_active" >&2
+            exit 1
+          fi
+          sleep 1
+        done
         systemctl list-units --all --plain --no-legend 'agentmom-microvm@*.service' | while read -r unit _rest
         do
           [ -n "$unit" ] || continue
@@ -853,6 +891,8 @@ in
           paths+=(
             ${lib.escapeShellArg "${cfg.microvm.stateDir}/machines"}
             ${lib.escapeShellArg "${cfg.microvm.workspaceDir}"}
+            ${lib.escapeShellArg "${cfg.microvm.stateDir}/.machine-state.lock"}
+            ${lib.escapeShellArg "${cfg.microvm.stateDir}/.machine-state.flock"}
           )
         ''}
         for path in "''${paths[@]}"
@@ -868,6 +908,12 @@ in
         ''}
         touch "$marker"
         chown ${lib.escapeShellArg cfg.user}:${lib.escapeShellArg cfg.group} "$marker"
+        ${lib.optionalString cfg.catalogBackup.enable ''
+          systemctl start agentmom-catalog-backup.timer >/dev/null 2>&1 || true
+        ''}
+        ${lib.optionalString cfg.monitorCheck.enable ''
+          systemctl start agentmom-monitor-check.timer >/dev/null 2>&1 || true
+        ''}
       '';
     };
 
@@ -991,7 +1037,7 @@ in
         Restart = "always";
         RestartSec = "5s";
         TimeoutStartSec = "30min";
-        TimeoutStopSec = "10s";
+        TimeoutStopSec = "35min";
         WorkingDirectory = cfg.stateDir;
       } // lib.optionalAttrs (cfg.worker.resticEnvFile != null) {
         EnvironmentFile = cfg.worker.resticEnvFile;
@@ -1051,7 +1097,7 @@ in
         WorkingDirectory = cfg.microvm.stateDir;
         KillMode = "mixed";
         TimeoutStartSec = "30min";
-        TimeoutStopSec = "20s";
+        TimeoutStopSec = "90s";
       };
     };
 

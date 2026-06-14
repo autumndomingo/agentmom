@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::process::Command as TokioCommand;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 
 const LABEL_MANAGED: &str = "mom.managed";

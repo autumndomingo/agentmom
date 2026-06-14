@@ -855,6 +855,66 @@ async fn node_lifecycle_controls_placement_and_claims() -> Result<()> {
 }
 
 #[tokio::test]
+async fn worker_job_completion_is_idempotent_for_retried_terminal_results() -> Result<()> {
+    let _guard = fleet_test_guard().await;
+    let fleet = TestFleet::start().await?;
+    let client = reqwest::Client::new();
+    insert_node(fleet.api_state.path(), "node-a", now_epoch()?)?;
+    insert_workspace(fleet.api_state.path(), "retry-complete", "node-a")?;
+    let job_id = create_job(&fleet.api_url, "retry-complete", "start").await?;
+
+    let claimed = client
+        .post(format!("{}/worker/claim", fleet.api_url))
+        .bearer_auth(WORKER_TOKEN)
+        .json(&json!({
+            "node_id": "node-a",
+            "capacity": test_capacity(),
+            "pressure": {
+                "managed_vms": 0,
+                "running_vms": 0,
+                "active_workspaces": 0,
+                "allocated_memory_mib": 0,
+                "disk_available_mib": 65536,
+                "capacity_ok": true
+            },
+            "worker_url": "http://100.64.0.42:9090"
+        }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Option<Value>>()
+        .await?
+        .ok_or_else(|| anyhow!("worker did not claim queued job"))?;
+    assert_eq!(
+        claimed.pointer("/id").and_then(Value::as_str),
+        Some(job_id.as_str())
+    );
+
+    let completion = json!({
+        "node_id": "node-a",
+        "status": "succeeded",
+        "output": { "started": true }
+    });
+    for _ in 0..2 {
+        let response = client
+            .post(format!("{}/worker/jobs/{job_id}/complete", fleet.api_url))
+            .bearer_auth(WORKER_TOKEN)
+            .json(&completion)
+            .send()
+            .await?;
+        assert!(
+            response.status().is_success(),
+            "completion retry failed with {}: {}",
+            response.status(),
+            response.text().await.unwrap_or_default()
+        );
+    }
+
+    assert_eq!(job_status(&fleet.api_url, &job_id).await?, "succeeded");
+    Ok(())
+}
+
+#[tokio::test]
 async fn catalog_backup_and_monitor_check_cover_deployed_catalog() -> Result<()> {
     let _guard = fleet_test_guard().await;
     let fleet = TestFleet::start().await?;
