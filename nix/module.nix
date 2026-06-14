@@ -741,6 +741,8 @@ in
         default = [
           "api.openai.com"
           "openrouter.ai"
+          "models.dev"
+          "hermes-agent.nousresearch.com"
           "dl-cdn.alpinelinux.org"
           "github.com"
           "api.github.com"

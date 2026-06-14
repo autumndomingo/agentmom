@@ -59,6 +59,11 @@ struct OpenWorkerServiceResponse {
     url: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct WorkerErrorResponse {
+    error: String,
+}
+
 pub(crate) fn api_routes() -> Router<Arc<ApiState>> {
     Router::new()
         .route("/api/ui/health", get(health))
@@ -366,10 +371,19 @@ async fn open_hermes_dashboard(name: &str) -> Result<Json<CommandResult>, UiErro
             vm_name,
         })
         .send()
-        .await?
-        .error_for_status()?
-        .json::<OpenWorkerServiceResponse>()
         .await?;
+    let status = response.status();
+    let body = response.text().await?;
+    if !status.is_success() {
+        return Err(UiError::Command(CommandResult {
+            ok: false,
+            code: Some(status.as_u16().into()),
+            stdout: String::new(),
+            stderr: worker_error_text(&body),
+        }));
+    }
+    let response = serde_json::from_str::<OpenWorkerServiceResponse>(&body)
+        .map_err(|error| anyhow!("parse worker Hermes service-open response: {error}: {body}"))?;
     service_tunnel_upsert(&workspace_name, node, "hermes", &response.url)?;
     Ok(Json(CommandResult {
         ok: true,
@@ -377,6 +391,16 @@ async fn open_hermes_dashboard(name: &str) -> Result<Json<CommandResult>, UiErro
         stdout: format!("{}\n", response.url),
         stderr: String::new(),
     }))
+}
+
+fn worker_error_text(body: &str) -> String {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return "worker returned an empty error response".to_string();
+    }
+    serde_json::from_str::<WorkerErrorResponse>(trimmed)
+        .map(|response| response.error)
+        .unwrap_or_else(|_| trimmed.to_string())
 }
 
 fn workspace_worker_url(workspace: &WorkspaceRecord) -> Result<String> {
@@ -512,7 +536,8 @@ impl IntoResponse for UiError {
                 let status = if result.ok {
                     StatusCode::OK
                 } else {
-                    StatusCode::INTERNAL_SERVER_ERROR
+                    StatusCode::from_u16(result.code.unwrap_or(500).try_into().unwrap_or(500))
+                        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
                 };
                 (status, Json(result)).into_response()
             }
@@ -522,7 +547,7 @@ impl IntoResponse for UiError {
 
 #[cfg(test)]
 mod tests {
-    use super::service_tunnel_domain_allowed;
+    use super::{service_tunnel_domain_allowed, worker_error_text};
 
     #[test]
     fn service_tunnel_domain_allows_known_node_port_hosts() {
@@ -536,5 +561,21 @@ mod tests {
         assert!(!service_tunnel_domain_allowed("mom-3-45887.agentmom.xyz"));
         assert!(!service_tunnel_domain_allowed("mom-1-api.agentmom.xyz"));
         assert!(!service_tunnel_domain_allowed("mom-1-45887.example.com"));
+    }
+
+    #[test]
+    fn worker_error_text_preserves_json_error_field() {
+        assert_eq!(
+            worker_error_text(r#"{"error":"dashboard failed: missing module"}"#),
+            "dashboard failed: missing module"
+        );
+    }
+
+    #[test]
+    fn worker_error_text_preserves_raw_body() {
+        assert_eq!(
+            worker_error_text("proxy rejected host"),
+            "proxy rejected host"
+        );
     }
 }
