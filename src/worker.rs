@@ -639,7 +639,7 @@ async fn worker_reconcile_once(api: &WorkerApi) -> Result<()> {
                 "error",
                 "workspace_reconcile_failed",
                 Some(&record.name),
-                "workspace reconciliation failed",
+                &format!("workspace reconciliation failed: {error:#}"),
             );
             if let Err(report_error) = api
                 .update_workspace(&record.name, Some("error"), None, false, false)
@@ -711,6 +711,42 @@ async fn worker_reconcile_workspace(
         }
     }
 
+    if record.desired_state == "stopped"
+        && !matches!(record.status.as_str(), "stopped" | "idle-stopped")
+    {
+        if let Ok(handle) = get_vm(&record.vm_name).await
+            && handle.status().is_running()
+        {
+            handle.stop_with_timeout(Duration::from_secs(20)).await?;
+        }
+        api.update_workspace(&record.name, Some("stopped"), None, false, false)
+            .await?;
+        api.event(
+            &record.name,
+            "workspace_stop_reconciled",
+            "succeeded",
+            "workspace desired-stopped state reconciled",
+            json!({ "vm": record.vm_name }),
+        )
+        .await?;
+    }
+
+    if record.desired_state == "removed" && record.status != "removed" {
+        remove_vm(&record.vm_name)
+            .await
+            .with_context(|| format!("remove VM {}", record.vm_name))?;
+        api.update_workspace(&record.name, Some("removed"), None, false, false)
+            .await?;
+        api.event(
+            &record.name,
+            "workspace_remove_reconciled",
+            "succeeded",
+            "workspace desired-removed VM state reconciled",
+            json!({ "vm": record.vm_name, "workspace_dir_removed": false }),
+        )
+        .await?;
+    }
+
     if backup_due(record, now)
         && let Err(error) = backup_workspace_local(api, record, false).await
     {
@@ -718,7 +754,7 @@ async fn worker_reconcile_workspace(
             "error",
             "workspace_backup_failed",
             Some(&record.name),
-            "workspace backup failed",
+            &format!("workspace backup failed: {error:#}"),
         );
         api.event(
             &record.name,
@@ -979,6 +1015,10 @@ async fn ensure_workspace_running_local(
     }
     match get_vm(&workspace.vm_name).await {
         Ok(handle) if handle.status().is_running() => {
+            handle
+                .connect_with_timeout(Duration::from_secs(90))
+                .await
+                .with_context(|| format!("connect to running vm '{}'", workspace.vm_name))?;
             api.update_workspace(&workspace.name, Some("running"), None, false, false)
                 .await
         }

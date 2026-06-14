@@ -177,6 +177,17 @@ exit 1
 }
 
 async fn reserve_host_port() -> Result<u16> {
+    if let Some((from, to)) = service_tunnel_port_range()? {
+        for port in from..=to {
+            if let Ok(listener) =
+                tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).await
+            {
+                drop(listener);
+                return Ok(port);
+            }
+        }
+        bail!("no free service tunnel ports in configured range {from}-{to}");
+    }
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
         .context("reserve local service tunnel port")?;
@@ -186,6 +197,30 @@ async fn reserve_host_port() -> Result<u16> {
         .port();
     drop(listener);
     Ok(port)
+}
+
+fn service_tunnel_port_range() -> Result<Option<(u16, u16)>> {
+    let Ok(raw) = env::var("MOM_SERVICE_TUNNEL_PORT_RANGE") else {
+        return Ok(None);
+    };
+    parse_service_tunnel_port_range(&raw).map(Some)
+}
+
+fn parse_service_tunnel_port_range(raw: &str) -> Result<(u16, u16)> {
+    let (from, to) = raw
+        .split_once('-')
+        .or_else(|| raw.split_once(':'))
+        .ok_or_else(|| anyhow::anyhow!("MOM_SERVICE_TUNNEL_PORT_RANGE must look like from-to"))?;
+    let from = from
+        .parse::<u16>()
+        .with_context(|| format!("parse service tunnel range start {from:?}"))?;
+    let to = to
+        .parse::<u16>()
+        .with_context(|| format!("parse service tunnel range end {to:?}"))?;
+    if from > to {
+        bail!("MOM_SERVICE_TUNNEL_PORT_RANGE start must be <= end: {raw}");
+    }
+    Ok((from, to))
 }
 
 fn service_tunnel_bind_host() -> String {
@@ -220,7 +255,7 @@ fn service_tunnel_public_url_from_base(
 
 #[cfg(test)]
 mod tests {
-    use super::service_tunnel_public_url_from_base;
+    use super::{parse_service_tunnel_port_range, service_tunnel_public_url_from_base};
 
     #[test]
     fn service_tunnel_url_supports_port_template() {
@@ -249,5 +284,14 @@ mod tests {
         let url =
             service_tunnel_public_url_from_base("0.0.0.0", 45887, Some("http://100.81.250.67"));
         assert!(url.is_err());
+    }
+
+    #[test]
+    fn service_tunnel_port_range_parses_bounded_range() {
+        assert_eq!(
+            parse_service_tunnel_port_range("40000-40010").unwrap(),
+            (40000, 40010)
+        );
+        assert!(parse_service_tunnel_port_range("40010-40000").is_err());
     }
 }

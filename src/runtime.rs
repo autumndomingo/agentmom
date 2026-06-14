@@ -202,6 +202,7 @@ struct MicrovmSpec {
     credential_proxy_ca_file: Option<String>,
     nixpkgs_url: String,
     microvm_input_url: String,
+    hermes_agent_input_url: String,
     ssh_public_key: String,
     labels: HashMap<String, String>,
 }
@@ -555,6 +556,10 @@ fn write_vm_definition(dir: &Path, spec: &MicrovmSpec, config: &MomConfig) -> Re
         dir.join("microvm-workspace.nix").as_path(),
         microvm_workspace_nix().as_bytes(),
     )?;
+    write_file_if_changed(
+        dir.join("hermes-agent-package.nix").as_path(),
+        hermes_agent_package_nix().as_bytes(),
+    )?;
     write_file_if_changed(&dir.join("flake.nix"), microvm_flake_nix(spec)?.as_bytes())?;
     if config.credentials.proxy_ca_path.is_none() {
         remove_file_if_exists(&dir.join("agentmom-proxy.crt"))?;
@@ -705,6 +710,7 @@ fn microvm_spec(
         credential_proxy_ca_file: None,
         nixpkgs_url: String::new(),
         microvm_input_url: String::new(),
+        hermes_agent_input_url: String::new(),
         ssh_public_key,
         labels,
     };
@@ -746,6 +752,8 @@ fn apply_current_microvm_config(spec: &mut MicrovmSpec, config: &MomConfig) -> R
         .unwrap_or_else(|_| "github:NixOS/nixpkgs/nixpkgs-unstable".to_string());
     spec.microvm_input_url = env::var("MOM_MICROVM_NIX_URL")
         .unwrap_or_else(|_| "github:microvm-nix/microvm.nix".to_string());
+    spec.hermes_agent_input_url = env::var("MOM_HERMES_AGENT_URL")
+        .unwrap_or_else(|_| "github:NousResearch/hermes-agent".to_string());
     spec.labels
         .insert(LABEL_MANAGED.to_string(), "true".to_string());
     spec.labels.insert(
@@ -878,18 +886,26 @@ fn microvm_flake_nix(spec: &MicrovmSpec) -> Result<String> {
         r#"{{
   description = "Agent Mom microvm.nix workspace {name}";
 
-  inputs = {{
+    inputs = {{
     nixpkgs.url = "{nixpkgs_url}";
     microvm = {{
       url = "{microvm_input_url}";
       inputs.nixpkgs.follows = "nixpkgs";
     }};
+    hermes-agent = {{
+      url = "{hermes_agent_input_url}";
+      inputs.nixpkgs.follows = "nixpkgs";
+    }};
   }};
 
-  outputs = {{ self, nixpkgs, microvm }}:
+  outputs = {{ self, nixpkgs, microvm, hermes-agent }}:
     let
       system = "{system}";
       spec = builtins.fromJSON (builtins.readFile ./spec.json);
+      hermesAgentPackage = pkgs: import ./hermes-agent-package.nix {{
+        inherit pkgs;
+        inputs = {{ inherit hermes-agent; }};
+      }};
     in {{
       packages.${{system}} = {{
         runner = self.nixosConfigurations.{name}.config.microvm.declaredRunner;
@@ -899,7 +915,7 @@ fn microvm_flake_nix(spec: &MicrovmSpec) -> Result<String> {
         inherit system;
         modules = [
           microvm.nixosModules.microvm
-          (import ./microvm-workspace.nix {{ inherit spec; }})
+          (import ./microvm-workspace.nix {{ inherit spec hermesAgentPackage; }})
         ];
       }};
     }};
@@ -908,12 +924,17 @@ fn microvm_flake_nix(spec: &MicrovmSpec) -> Result<String> {
         name = spec.name,
         nixpkgs_url = spec.nixpkgs_url,
         microvm_input_url = spec.microvm_input_url,
+        hermes_agent_input_url = spec.hermes_agent_input_url,
         system = system
     ))
 }
 
 fn microvm_workspace_nix() -> &'static str {
     include_str!("../nix/microvm-workspace.nix")
+}
+
+fn hermes_agent_package_nix() -> &'static str {
+    include_str!("../nix/hermes-agent-package.nix")
 }
 
 async fn ensure_microvm_host_ready(config: &MomConfig) -> Result<()> {
@@ -1248,6 +1269,7 @@ mod tests {
             credential_proxy_ca_file: Some("agentmom-proxy.crt".to_string()),
             nixpkgs_url: "path:/nix/store/nixpkgs-source".to_string(),
             microvm_input_url: "path:/nix/store/microvm-source".to_string(),
+            hermes_agent_input_url: "path:/nix/store/hermes-agent-source".to_string(),
             ssh_public_key: "ssh-ed25519 test".to_string(),
             labels: HashMap::new(),
         }

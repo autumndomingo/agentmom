@@ -27,6 +27,9 @@ use crate::{
     workspace_get,
 };
 
+const UI_JOB_WAIT_TIMEOUT: Duration = Duration::from_secs(360);
+const UI_WORKER_SERVICE_TIMEOUT: Duration = Duration::from_secs(360);
+
 #[derive(Debug, Deserialize)]
 struct CommandRequest {
     command: Vec<String>,
@@ -351,7 +354,7 @@ async fn open_hermes_dashboard(name: &str) -> Result<Json<CommandResult>, UiErro
     })?;
     let token = worker_token_for_node(node)?;
     let response = reqwest::Client::builder()
-        .timeout(Duration::from_secs(120))
+        .timeout(UI_WORKER_SERVICE_TIMEOUT)
         .build()?
         .post(format!(
             "{}/worker/services/hermes/open",
@@ -411,7 +414,8 @@ async fn create_and_wait_for_job(
 }
 
 async fn wait_for_job(job_id: &str) -> Result<Json<CommandResult>, UiError> {
-    for _ in 0..180 {
+    let deadline = tokio::time::Instant::now() + UI_JOB_WAIT_TIMEOUT;
+    loop {
         let response = JobResponse {
             job: job_get(job_id)?,
         };
@@ -432,7 +436,10 @@ async fn wait_for_job(job_id: &str) -> Result<Json<CommandResult>, UiError> {
                     stderr: job_output_text(response.job.output_json.as_deref()),
                 }));
             }
-            _ => tokio::time::sleep(Duration::from_secs(1)).await,
+            _ if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            _ => break,
         }
     }
 

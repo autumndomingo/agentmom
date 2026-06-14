@@ -320,6 +320,13 @@ pub(crate) async fn run_restic_restore(
             )
         })?;
     let restore_tmp = parent.join(format!(".restore-{backup_id}"));
+    let previous_workspace_dir = parent.join(format!(".pre-restore-{backup_id}"));
+    recover_interrupted_restore(
+        workspace_dir_path,
+        &restore_tmp,
+        &previous_workspace_dir,
+        workspace_dir_name,
+    )?;
     if restore_tmp.exists() {
         fs::remove_dir_all(&restore_tmp)
             .with_context(|| format!("remove stale restore dir {}", restore_tmp.display()))?;
@@ -341,7 +348,6 @@ pub(crate) async fn run_restic_restore(
     }
     let restored_workspace_dir =
         restored_workspace_dir_path(&restore_tmp, workspace_dir_path, workspace_dir_name)?;
-    let previous_workspace_dir = parent.join(format!(".pre-restore-{backup_id}"));
     if previous_workspace_dir.exists() {
         fs::remove_dir_all(&previous_workspace_dir).with_context(|| {
             format!(
@@ -350,8 +356,66 @@ pub(crate) async fn run_restic_restore(
             )
         })?;
     }
+    commit_restored_workspace_dir(
+        workspace_dir_path,
+        &restored_workspace_dir,
+        &previous_workspace_dir,
+    )?;
+    fs::remove_dir_all(&restore_tmp)
+        .with_context(|| format!("remove restore dir {}", restore_tmp.display()))?;
+    Ok(())
+}
+
+fn recover_interrupted_restore(
+    workspace_dir_path: &Path,
+    restore_tmp: &Path,
+    previous_workspace_dir: &Path,
+    workspace_dir_name: &str,
+) -> Result<()> {
     if workspace_dir_path.exists() {
-        fs::rename(workspace_dir_path, &previous_workspace_dir).with_context(|| {
+        return Ok(());
+    }
+    if restore_tmp.exists()
+        && let Ok(restored_workspace_dir) =
+            restored_workspace_dir_path(restore_tmp, workspace_dir_path, workspace_dir_name)
+        && restored_workspace_dir.exists()
+    {
+        fs::rename(&restored_workspace_dir, workspace_dir_path).with_context(|| {
+            format!(
+                "complete interrupted restore by moving {} to {}",
+                restored_workspace_dir.display(),
+                workspace_dir_path.display()
+            )
+        })?;
+        if previous_workspace_dir.exists() {
+            fs::remove_dir_all(previous_workspace_dir).with_context(|| {
+                format!(
+                    "remove previous workspace dir {} after interrupted restore recovery",
+                    previous_workspace_dir.display()
+                )
+            })?;
+        }
+        return Ok(());
+    }
+    if previous_workspace_dir.exists() {
+        fs::rename(previous_workspace_dir, workspace_dir_path).with_context(|| {
+            format!(
+                "recover interrupted restore by moving {} back to {}",
+                previous_workspace_dir.display(),
+                workspace_dir_path.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn commit_restored_workspace_dir(
+    workspace_dir_path: &Path,
+    restored_workspace_dir: &Path,
+    previous_workspace_dir: &Path,
+) -> Result<()> {
+    if workspace_dir_path.exists() {
+        fs::rename(workspace_dir_path, previous_workspace_dir).with_context(|| {
             format!(
                 "move current workspace directory {} aside to {}",
                 workspace_dir_path.display(),
@@ -359,9 +423,9 @@ pub(crate) async fn run_restic_restore(
             )
         })?;
     }
-    fs::rename(&restored_workspace_dir, workspace_dir_path).with_context(|| {
+    fs::rename(restored_workspace_dir, workspace_dir_path).with_context(|| {
         if previous_workspace_dir.exists() && !workspace_dir_path.exists() {
-            let _ = fs::rename(&previous_workspace_dir, workspace_dir_path);
+            let _ = fs::rename(previous_workspace_dir, workspace_dir_path);
         }
         format!(
             "move restored workspace directory {} to {}",
@@ -370,15 +434,13 @@ pub(crate) async fn run_restic_restore(
         )
     })?;
     if previous_workspace_dir.exists() {
-        fs::remove_dir_all(&previous_workspace_dir).with_context(|| {
+        fs::remove_dir_all(previous_workspace_dir).with_context(|| {
             format!(
                 "remove previous restored workspace directory {}",
                 previous_workspace_dir.display()
             )
         })?;
     }
-    fs::remove_dir_all(&restore_tmp)
-        .with_context(|| format!("remove restore dir {}", restore_tmp.display()))?;
     Ok(())
 }
 
@@ -444,4 +506,61 @@ async fn command_exists(name: &str) -> bool {
         .status()
         .await
         .is_ok_and(|status| status.success())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interrupted_restore_with_restored_dir_finishes_commit() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let workspace = dir.path().join("workspace");
+        let previous = dir.path().join(".pre-restore-bak_test");
+        let restore_tmp = dir.path().join(".restore-bak_test");
+        let restored = restore_tmp.join("workspace");
+        fs::create_dir_all(&previous)?;
+        fs::write(previous.join("marker"), b"old")?;
+        fs::create_dir_all(&restored)?;
+        fs::write(restored.join("marker"), b"new")?;
+
+        recover_interrupted_restore(&workspace, &restore_tmp, &previous, "workspace")?;
+
+        assert_eq!(fs::read_to_string(workspace.join("marker"))?, "new");
+        assert!(!previous.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn interrupted_restore_without_restored_dir_rolls_back_previous() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let workspace = dir.path().join("workspace");
+        let previous = dir.path().join(".pre-restore-bak_test");
+        let restore_tmp = dir.path().join(".restore-bak_test");
+        fs::create_dir_all(&previous)?;
+        fs::write(previous.join("marker"), b"old")?;
+
+        recover_interrupted_restore(&workspace, &restore_tmp, &previous, "workspace")?;
+
+        assert_eq!(fs::read_to_string(workspace.join("marker"))?, "old");
+        assert!(!previous.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn commit_restored_workspace_rolls_back_if_final_rename_fails() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let workspace = dir.path().join("workspace");
+        let previous = dir.path().join(".pre-restore-bak_test");
+        let missing_restored = dir.path().join("missing-restored");
+        fs::create_dir_all(&workspace)?;
+        fs::write(workspace.join("marker"), b"old")?;
+
+        let result = commit_restored_workspace_dir(&workspace, &missing_restored, &previous);
+
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(workspace.join("marker"))?, "old");
+        assert!(!previous.exists());
+        Ok(())
+    }
 }

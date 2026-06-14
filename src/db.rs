@@ -10,6 +10,7 @@ max_active_workspaces = 0 OR (
     FROM workspaces
     WHERE workspaces.node_id = nodes.node_id
       AND workspaces.desired_state = 'running'
+      AND workspaces.status != 'removed'
 ) < max_active_workspaces
 "#;
 
@@ -23,6 +24,43 @@ WHERE status = 'ready'
   AND last_seen_at >= ?1
   {extra_where}
   AND ({NODE_HAS_CAPACITY_SQL})
+{order_limit}
+"#
+    )
+}
+
+fn ready_node_for_workspace_query(
+    select_clause: &str,
+    extra_where: &str,
+    order_limit: &str,
+) -> String {
+    format!(
+        r#"
+SELECT {select_clause}
+FROM nodes
+WHERE status = 'ready'
+  AND worker_url IS NOT NULL
+  AND last_seen_at >= ?1
+  {extra_where}
+  AND ({NODE_HAS_CAPACITY_SQL})
+  AND (
+      cpus = 0 OR (
+          SELECT COALESCE(SUM(workspaces.cpus), 0)
+          FROM workspaces
+          WHERE workspaces.node_id = nodes.node_id
+            AND workspaces.desired_state = 'running'
+            AND workspaces.status != 'removed'
+      ) + ?2 <= cpus
+  )
+  AND (
+      memory_mib = 0 OR (
+          SELECT COALESCE(SUM(workspaces.memory_mib), 0)
+          FROM workspaces
+          WHERE workspaces.node_id = nodes.node_id
+            AND workspaces.desired_state = 'running'
+            AND workspaces.status != 'removed'
+      ) + ?3 <= memory_mib
+  )
 {order_limit}
 "#
     )
@@ -287,22 +325,31 @@ pub(crate) fn workspace_upsert_pending_on_ready_node(
     let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let assigned_node = if let Some(node) = requested_node {
         let exists = tx.query_row(
-            &ready_node_query("COUNT(*)", "AND node_id = ?2", ""),
-            params![stale_cutoff, node],
+            &ready_node_for_workspace_query("COUNT(*)", "AND node_id = ?4", ""),
+            params![
+                stale_cutoff,
+                i64::from(input.cpus),
+                i64::from(input.memory_mib),
+                node
+            ],
             |row| row.get::<_, i64>(0),
         )? > 0;
         if !exists {
-            bail!("node is not ready: {node}");
+            bail!("node is not ready or does not have capacity: {node}");
         }
         node.to_string()
     } else {
         tx.query_row(
-            &ready_node_query("node_id", "", "ORDER BY last_seen_at DESC\nLIMIT 1"),
-            params![stale_cutoff],
+            &ready_node_for_workspace_query("node_id", "", "ORDER BY last_seen_at DESC\nLIMIT 1"),
+            params![
+                stale_cutoff,
+                i64::from(input.cpus),
+                i64::from(input.memory_mib)
+            ],
             |row| row.get(0),
         )
         .optional()?
-        .ok_or_else(|| anyhow!("no ready worker nodes are registered"))?
+        .ok_or_else(|| anyhow!("no ready worker nodes with capacity are registered"))?
     };
     insert_workspace_pending(&tx, Some(&assigned_node), &input, now)?;
     tx.commit()?;
@@ -559,6 +606,8 @@ pub(crate) fn recover_host_with_backups(
 
     let mut current_items = Vec::with_capacity(items.len());
     let mut incoming_running: i64 = 0;
+    let mut incoming_cpus: i64 = 0;
+    let mut incoming_memory_mib: i64 = 0;
     for (workspace, backup) in items {
         let current: Option<(Option<String>, String)> = tx
             .query_row(
@@ -581,6 +630,12 @@ pub(crate) fn recover_host_with_backups(
             incoming_running = incoming_running
                 .checked_add(1)
                 .ok_or_else(|| anyhow!("incoming workspace count overflowed"))?;
+            incoming_cpus = incoming_cpus
+                .checked_add(i64::from(workspace.cpus))
+                .ok_or_else(|| anyhow!("incoming CPU count overflowed"))?;
+            incoming_memory_mib = incoming_memory_mib
+                .checked_add(i64::from(workspace.memory_mib))
+                .ok_or_else(|| anyhow!("incoming memory count overflowed"))?;
         }
         current_items.push((workspace, backup, current_desired_state));
     }
@@ -595,7 +650,23 @@ SELECT max_active_workspaces,
            WHERE node_id = nodes.node_id
              AND desired_state = 'running'
              AND status != 'removed'
-       ) AS active_running
+       ) AS active_running,
+       cpus,
+       (
+           SELECT COALESCE(SUM(cpus), 0)
+           FROM workspaces
+           WHERE node_id = nodes.node_id
+             AND desired_state = 'running'
+             AND status != 'removed'
+       ) AS active_cpus,
+       memory_mib,
+       (
+           SELECT COALESCE(SUM(memory_mib), 0)
+           FROM workspaces
+           WHERE node_id = nodes.node_id
+             AND desired_state = 'running'
+             AND status != 'removed'
+       ) AS active_memory_mib
 FROM nodes
 WHERE node_id = ?1
   AND status = 'ready'
@@ -603,10 +674,27 @@ WHERE node_id = ?1
   AND last_seen_at >= ?2
 "#,
             params![to, stale_cutoff],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            },
         )
         .optional()?;
-    let Some((max_active, active_running)) = target_capacity else {
+    let Some((
+        max_active,
+        active_running,
+        capacity_cpus,
+        active_cpus,
+        capacity_memory_mib,
+        active_memory_mib,
+    )) = target_capacity
+    else {
         bail!("target node is not ready: {to}");
     };
     let projected_running = active_running
@@ -615,6 +703,22 @@ WHERE node_id = ?1
     if max_active > 0 && projected_running > max_active {
         bail!(
             "target node {to} does not have capacity for {incoming_running} recovered running workspace(s): {active_running}/{max_active} active"
+        );
+    }
+    let projected_cpus = active_cpus
+        .checked_add(incoming_cpus)
+        .ok_or_else(|| anyhow!("target node CPU projection overflowed"))?;
+    if capacity_cpus > 0 && projected_cpus > capacity_cpus {
+        bail!(
+            "target node {to} does not have CPU capacity for recovered running workspace(s): {projected_cpus}/{capacity_cpus} CPU"
+        );
+    }
+    let projected_memory_mib = active_memory_mib
+        .checked_add(incoming_memory_mib)
+        .ok_or_else(|| anyhow!("target node memory projection overflowed"))?;
+    if capacity_memory_mib > 0 && projected_memory_mib > capacity_memory_mib {
+        bail!(
+            "target node {to} does not have memory capacity for recovered running workspace(s): {projected_memory_mib}/{capacity_memory_mib} MiB"
         );
     }
 
@@ -1169,13 +1273,55 @@ pub(crate) fn claim_job(node: &str, capacity_ok: bool) -> Result<Option<JobRecor
     let job_id: Option<String> = tx
         .query_row(
             r#"
-SELECT id
-FROM jobs
-WHERE status = 'queued' AND node_id = ?1
-  AND (?2 OR kind IN ('stop', 'remove'))
-  AND EXISTS (
-      SELECT 1 FROM nodes
-      WHERE nodes.node_id = ?1
+	SELECT id
+	FROM jobs
+	WHERE status = 'queued' AND node_id = ?1
+	  AND (
+	      kind IN ('stop', 'remove')
+	      OR (
+	          ?2
+	          AND EXISTS (
+	              SELECT 1
+	              FROM nodes
+	              JOIN workspaces queued_workspace
+	                ON queued_workspace.name = jobs.workspace_name
+	              WHERE nodes.node_id = ?1
+	                AND (
+	                    nodes.max_active_workspaces = 0 OR (
+	                        SELECT COUNT(*)
+	                        FROM workspaces active
+	                        WHERE active.node_id = nodes.node_id
+	                          AND active.desired_state = 'running'
+	                          AND active.status != 'removed'
+	                          AND active.name != queued_workspace.name
+	                    ) + 1 <= nodes.max_active_workspaces
+	                )
+	                AND (
+	                    nodes.cpus = 0 OR (
+	                        SELECT COALESCE(SUM(active.cpus), 0)
+	                        FROM workspaces active
+	                        WHERE active.node_id = nodes.node_id
+	                          AND active.desired_state = 'running'
+	                          AND active.status != 'removed'
+	                          AND active.name != queued_workspace.name
+	                    ) + queued_workspace.cpus <= nodes.cpus
+	                )
+	                AND (
+	                    nodes.memory_mib = 0 OR (
+	                        SELECT COALESCE(SUM(active.memory_mib), 0)
+	                        FROM workspaces active
+	                        WHERE active.node_id = nodes.node_id
+	                          AND active.desired_state = 'running'
+	                          AND active.status != 'removed'
+	                          AND active.name != queued_workspace.name
+	                    ) + queued_workspace.memory_mib <= nodes.memory_mib
+	                )
+	          )
+	      )
+	  )
+	  AND EXISTS (
+	      SELECT 1 FROM nodes
+	      WHERE nodes.node_id = ?1
         AND nodes.status IN ('ready', 'cordoned')
   )
   AND NOT EXISTS (

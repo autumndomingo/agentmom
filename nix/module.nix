@@ -1,4 +1,4 @@
-{ config, lib, pkgs, defaultNixpkgsUrl ? "github:NixOS/nixpkgs/nixpkgs-unstable", defaultMicrovmNixUrl ? "github:microvm-nix/microvm.nix", ... }:
+{ config, lib, pkgs, defaultNixpkgsUrl ? "github:NixOS/nixpkgs/nixpkgs-unstable", defaultMicrovmNixUrl ? "github:microvm-nix/microvm.nix", defaultHermesAgentUrl ? "github:NousResearch/hermes-agent", ... }:
 
 let
   cfg = config.services.agentmom;
@@ -113,6 +113,8 @@ let
     MOM_MICROVM_EXTERNAL_INTERFACE = cfg.microvm.externalInterface;
     MOM_MICROVM_NIXPKGS_URL = cfg.microvm.nixpkgsUrl;
     MOM_MICROVM_NIX_URL = cfg.microvm.microvmNixUrl;
+    MOM_HERMES_AGENT_URL = cfg.microvm.hermesAgentUrl;
+    MOM_MICROVM_SYSTEM = pkgs.stdenv.hostPlatform.system;
     MOM_NODE_ID = cfg.nodeId;
     MOM_LOG_FORMAT = cfg.logFormat;
     MOM_SESSION_COOKIE_SECURE = if cfg.auth.secureCookies then "1" else "0";
@@ -161,6 +163,8 @@ let
   microvmCidrOctets = lib.splitString "." microvmCidrAddress;
   microvmCidrPrefix = lib.concatStringsSep "." (lib.take 3 microvmCidrOctets);
   microvmBridgePrefixLength = "24";
+  workerBindParts = lib.splitString ":" cfg.worker.bind;
+  workerBindPort = builtins.fromJSON (lib.last workerBindParts);
   microvmRunner = pkgs.writeShellScript "agentmom-microvm-runner" ''
     set -eu
     name="$1"
@@ -191,14 +195,14 @@ let
     }
     trap cleanup EXIT INT TERM
     runner_input_hash() {
-      for input in flake.nix spec.json microvm-workspace.nix; do
+      for input in flake.nix spec.json microvm-workspace.nix hermes-agent-package.nix; do
         if [ ! -f "$input" ]; then
           echo "missing required microVM runner input $state_dir/$input" >&2
           return 1
         fi
       done
       {
-        for input in flake.nix flake.lock spec.json microvm-workspace.nix agentmom-proxy.crt; do
+        for input in flake.nix flake.lock spec.json microvm-workspace.nix hermes-agent-package.nix agentmom-proxy.crt; do
           if [ -e "$input" ]; then
             ${pkgs.coreutils}/bin/sha256sum "$input"
           else
@@ -350,6 +354,13 @@ in
         default = defaultMicrovmNixUrl;
         defaultText = lib.literalExpression ''"path:/nix/store/...-source"'';
         description = "microvm.nix flake URL used by generated workspace flakes.";
+      };
+
+      hermesAgentUrl = lib.mkOption {
+        type = lib.types.str;
+        default = defaultHermesAgentUrl;
+        defaultText = lib.literalExpression ''"path:/nix/store/...-source"'';
+        description = "Hermes Agent flake URL used by generated workspace flakes.";
       };
 
     };
@@ -611,6 +622,38 @@ in
         description = "Browser-visible base URL for worker service tunnels, without the port.";
       };
 
+      serviceTunnelPortRange = lib.mkOption {
+        type = lib.types.nullOr (lib.types.submodule {
+          options = {
+            from = lib.mkOption {
+              type = lib.types.port;
+              default = 32768;
+              description = "First TCP port Agent Mom may use for worker service tunnels.";
+            };
+            to = lib.mkOption {
+              type = lib.types.port;
+              default = 60999;
+              description = "Last TCP port Agent Mom may use for worker service tunnels.";
+            };
+          };
+        });
+        default = null;
+        description = "Optional bounded TCP port range for worker service tunnels.";
+      };
+
+      openFirewall = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = "Open the worker control port and configured service tunnel range in the NixOS firewall.";
+      };
+
+      firewallInterface = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "tailscale0";
+        description = "Optional interface whose firewall should be opened for worker control and service tunnel traffic.";
+      };
+
       resticEnvFile = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
@@ -795,9 +838,26 @@ in
       "d ${cfg.credentialProxy.stateDir} 0755 root root - -"
     ];
 
-    networking.firewall.interfaces = lib.mkIf (cfg.microvm.enable && cfg.credentialProxy.enable) {
-      ${cfg.microvm.bridge}.allowedTCPPorts = [ 1080 ];
-    };
+    networking.firewall.allowedTCPPorts =
+      lib.mkIf (cfg.worker.enable && cfg.worker.openFirewall && cfg.worker.firewallInterface == null) [
+        workerBindPort
+      ];
+    networking.firewall.allowedTCPPortRanges =
+      lib.mkIf (cfg.worker.enable && cfg.worker.openFirewall && cfg.worker.firewallInterface == null && cfg.worker.serviceTunnelPortRange != null) [
+        cfg.worker.serviceTunnelPortRange
+      ];
+    networking.firewall.interfaces = lib.mkMerge [
+      (lib.mkIf (cfg.microvm.enable && cfg.credentialProxy.enable) {
+        ${cfg.microvm.bridge}.allowedTCPPorts = [ 1080 ];
+      })
+      (lib.mkIf (cfg.worker.enable && cfg.worker.openFirewall && cfg.worker.firewallInterface != null) {
+        ${cfg.worker.firewallInterface}.allowedTCPPorts = [ workerBindPort ];
+        ${cfg.worker.firewallInterface}.allowedTCPPortRanges =
+          lib.optionals (cfg.worker.serviceTunnelPortRange != null) [
+            cfg.worker.serviceTunnelPortRange
+          ];
+      })
+    ];
 
     networking.nat = lib.mkIf cfg.microvm.enable {
       enable = true;
@@ -987,6 +1047,10 @@ in
         message = "services.agentmom.api.enable is required when services.agentmom.catalogBackup.enable is true.";
       }
       {
+        assertion = cfg.worker.serviceTunnelPortRange == null || cfg.worker.serviceTunnelPortRange.from <= cfg.worker.serviceTunnelPortRange.to;
+        message = "services.agentmom.worker.serviceTunnelPortRange.from must be <= to.";
+      }
+      {
         assertion = !cfg.monitorCheck.enable || cfg.api.enable;
         message = "services.agentmom.api.enable is required when services.agentmom.monitorCheck.enable is true.";
       }
@@ -1038,6 +1102,8 @@ in
         MOM_WORKER_URL = cfg.worker.url;
       } // lib.optionalAttrs (cfg.worker.serviceTunnelBaseUrl != null) {
         MOM_SERVICE_TUNNEL_BASE_URL = cfg.worker.serviceTunnelBaseUrl;
+      } // lib.optionalAttrs (cfg.worker.serviceTunnelPortRange != null) {
+        MOM_SERVICE_TUNNEL_PORT_RANGE = "${toString cfg.worker.serviceTunnelPortRange.from}-${toString cfg.worker.serviceTunnelPortRange.to}";
       };
       serviceConfig = {
         Type = "simple";

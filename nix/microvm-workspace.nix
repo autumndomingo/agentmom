@@ -1,8 +1,13 @@
-{ spec }:
+{ spec, hermesAgentPackage ? null }:
 { lib, modulesPath, pkgs, ... }:
 
 let
   hermesHome = "/root/.hermes-agent/${spec.hermes_profile}";
+  hermesPackage =
+    if hermesAgentPackage != null then
+      hermesAgentPackage pkgs
+    else
+      pkgs.hermes-agent or (throw "Agent Mom guests require a hermes-agent package");
   proxyScript = lib.optionalString (spec.credential_proxy_url != null) ''
     export HTTP_PROXY=${spec.credential_proxy_url}
     export HTTPS_PROXY=${spec.credential_proxy_url}
@@ -131,7 +136,7 @@ in
   ]
   ++ optionalPackage "codex"
   ++ optionalPackage "opencode"
-  ++ optionalPackage "hermes-agent";
+  ++ [ hermesPackage ];
 
   environment.etc."profile.d/agentmom-proxy.sh".text = proxyScript;
   environment.etc."profile.d/mom.sh".text = ''

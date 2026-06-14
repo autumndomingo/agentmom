@@ -879,6 +879,35 @@ async fn explicit_create_rejects_full_node() -> Result<()> {
 }
 
 #[tokio::test]
+async fn explicit_create_rejects_node_without_memory_capacity() -> Result<()> {
+    let _guard = fleet_test_guard().await;
+    let fleet = TestFleet::start().await?;
+    insert_node_with_resources(
+        fleet.api_state.path(),
+        "small-node",
+        now_epoch()?,
+        8,
+        1024,
+        48,
+    )?;
+    let cookie = admin_cookie(&fleet.api_url).await?;
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/api/workspaces", fleet.api_url))
+        .header(reqwest::header::COOKIE, &cookie)
+        .json(&json!({
+            "name": "too-large",
+            "node_id": "small-node",
+            "memory": 2048
+        }))
+        .send()
+        .await?;
+    assert!(!response.status().is_success());
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn idle_stopped_workspace_does_not_count_against_capacity() -> Result<()> {
     let _guard = fleet_test_guard().await;
     let fleet = TestFleet::start().await?;
@@ -1226,6 +1255,56 @@ async fn pressured_worker_still_claims_capacity_relieving_jobs() -> Result<()> {
         job_status(&fleet.api_url, &start_job).await?,
         "queued",
         "capacity-sensitive jobs should stay queued while the worker reports pressure"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn worker_claim_skips_start_that_would_exceed_memory_capacity() -> Result<()> {
+    let _guard = fleet_test_guard().await;
+    let fleet = TestFleet::start().await?;
+    let client = reqwest::Client::new();
+    insert_node_with_resources(fleet.api_state.path(), "node-a", now_epoch()?, 8, 3072, 48)?;
+    insert_workspace_with_state(
+        fleet.api_state.path(),
+        "running-big",
+        "node-a",
+        "running",
+        "running",
+    )?;
+    insert_workspace_with_memory(
+        fleet.api_state.path(),
+        "stopped-big",
+        "node-a",
+        "stopped",
+        "stopped",
+        2048,
+    )?;
+
+    let start_job = create_job(&fleet.api_url, "stopped-big", "start").await?;
+    let claim = claim_worker_job_with_capacity(
+        &client,
+        &fleet.api_url,
+        "node-a",
+        true,
+        json!({
+            "cpus": 8,
+            "memory_mib": 3072,
+            "max_active_workspaces": 48,
+            "disk_reserve_mib": 1024
+        }),
+    )
+    .await?;
+
+    assert!(
+        claim.is_none(),
+        "worker should not claim start job that would exceed memory capacity"
+    );
+    assert_eq!(
+        job_status(&fleet.api_url, &start_job).await?,
+        "queued",
+        "capacity-sensitive job should remain queued"
     );
 
     Ok(())
@@ -1910,12 +1989,22 @@ async fn claim_worker_job_with_capacity_ok(
     node: &str,
     capacity_ok: bool,
 ) -> Result<Option<Value>> {
+    claim_worker_job_with_capacity(client, api_url, node, capacity_ok, test_capacity()).await
+}
+
+async fn claim_worker_job_with_capacity(
+    client: &reqwest::Client,
+    api_url: &str,
+    node: &str,
+    capacity_ok: bool,
+    capacity: Value,
+) -> Result<Option<Value>> {
     Ok(client
         .post(format!("{api_url}/worker/claim"))
         .bearer_auth(WORKER_TOKEN)
         .json(&json!({
             "node_id": node,
-            "capacity": test_capacity(),
+            "capacity": capacity,
             "pressure": {
                 "managed_vms": 0,
                 "running_vms": 0,
@@ -2008,6 +2097,25 @@ fn insert_node_with_capacity(
     )
 }
 
+fn insert_node_with_resources(
+    api_state: &Path,
+    node: &str,
+    last_seen_at: i64,
+    cpus: i64,
+    memory_mib: i64,
+    max_active_workspaces: i64,
+) -> Result<()> {
+    insert_node_with_resources_and_status(
+        api_state,
+        node,
+        last_seen_at,
+        cpus,
+        memory_mib,
+        max_active_workspaces,
+        "ready",
+    )
+}
+
 fn insert_node_with_status(
     api_state: &Path,
     node: &str,
@@ -2015,17 +2123,39 @@ fn insert_node_with_status(
     max_active_workspaces: i64,
     status: &str,
 ) -> Result<()> {
+    insert_node_with_resources_and_status(
+        api_state,
+        node,
+        last_seen_at,
+        16,
+        65536,
+        max_active_workspaces,
+        status,
+    )
+}
+
+fn insert_node_with_resources_and_status(
+    api_state: &Path,
+    node: &str,
+    last_seen_at: i64,
+    cpus: i64,
+    memory_mib: i64,
+    max_active_workspaces: i64,
+    status: &str,
+) -> Result<()> {
     let db = Connection::open(api_state.join("fleet.db"))?;
     db.execute(
         r#"
-INSERT INTO nodes (
-    node_id, worker_url, cpus, memory_mib, max_active_workspaces, disk_reserve_mib,
-    last_seen_at, status
-) VALUES (?1, ?2, 16, 65536, ?3, 1024, ?4, ?5)
-"#,
+	INSERT INTO nodes (
+	    node_id, worker_url, cpus, memory_mib, max_active_workspaces, disk_reserve_mib,
+	    last_seen_at, status
+) VALUES (?1, ?2, ?3, ?4, ?5, 1024, ?6, ?7)
+	"#,
         (
             node,
             format!("http://{node}.invalid:9090"),
+            cpus,
+            memory_mib,
             max_active_workspaces,
             last_seen_at,
             status,
@@ -2045,17 +2175,28 @@ fn insert_workspace_with_state(
     desired_state: &str,
     status: &str,
 ) -> Result<()> {
+    insert_workspace_with_memory(api_state, name, node, desired_state, status, 2048)
+}
+
+fn insert_workspace_with_memory(
+    api_state: &Path,
+    name: &str,
+    node: &str,
+    desired_state: &str,
+    status: &str,
+    memory_mib: i64,
+) -> Result<()> {
     let now = now_epoch()?;
     let workspace_id = test_workspace_id(name);
     let db = Connection::open(api_state.join("fleet.db"))?;
     db.execute(
         r#"
-INSERT INTO workspaces (
-    name, workspace_id, slug, display_name, user_id, vm_name, workspace_dir_name, node_id, desired_state, cpus, memory_mib,
-    workspace_quota_mib, status, idle_timeout_secs, backup_interval_secs,
-    last_used_at, last_backup_at, created_at, updated_at
-) VALUES (?1, ?2, ?1, ?1, ?1, ?3, ?4, ?5, ?6, 1, 2048, 10240, ?7, 1800, 0, ?8, NULL, ?8, ?8)
-"#,
+	INSERT INTO workspaces (
+	    name, workspace_id, slug, display_name, user_id, vm_name, workspace_dir_name, node_id, desired_state, cpus, memory_mib,
+	    workspace_quota_mib, status, idle_timeout_secs, backup_interval_secs,
+	    last_used_at, last_backup_at, created_at, updated_at
+) VALUES (?1, ?2, ?1, ?1, ?1, ?3, ?4, ?5, ?6, 1, ?7, 10240, ?8, 1800, 0, ?9, NULL, ?9, ?9)
+	"#,
         (
             name,
             workspace_id,
@@ -2063,6 +2204,7 @@ INSERT INTO workspaces (
             format!("mom-{name}-workspace"),
             node,
             desired_state,
+            memory_mib,
             status,
             now,
         ),

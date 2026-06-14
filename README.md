@@ -158,6 +158,7 @@ The flake exports `nixosModules.agentmom`.
       hostAddress = "192.168.83.1";
       externalInterface = "eth0";
       kvmKernelModule = "kvm-amd";
+      hermesAgentUrl = inputs.agentmom.inputs.hermes-agent.outPath;
     };
 
     api = {
@@ -171,6 +172,10 @@ The flake exports `nixosModules.agentmom`.
       bind = "127.0.0.1:9090";
       url = "http://127.0.0.1:9090";
       intervalSeconds = 5;
+      serviceTunnelPortRange = {
+        from = 32768;
+        to = 60999;
+      };
     };
     workerUrlAllowlist = [ "http://127.0.0.1:9090" ];
 
@@ -198,6 +203,10 @@ Workers expose private control endpoints such as
 on the host that owns a workspace. Bind these endpoints to localhost for
 single-host deployments or to a Tailscale/private address for multi-host
 deployments.
+For multi-host deployments, set `worker.openFirewall = true` and
+`worker.firewallInterface = "tailscale0"` or declare equivalent host firewall
+rules so the API can reach the worker control port and browsers can reach the
+configured service tunnel range.
 
 For multi-host production, give the API a per-node token map instead of a
 single shared worker token:
@@ -234,7 +243,9 @@ just real-fleet-test-prod
 ```
 
 Workspace-creating and backup tests are opt-in because they touch real runtime
-state:
+state. Treat these as a deploy gate for microVM runtime changes; read-only
+checks alone do not prove that guests boot, SSH is reachable, or Hermes is
+present:
 
 ```sh
 export AGENTMOM_REAL_ALLOW_CREATE=1
