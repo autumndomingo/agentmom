@@ -5,6 +5,15 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_root}"
 
 pid_file="${repo_root}/.state/dev.pid"
+utm_name="${MOM_DEV_UTM_NAME:-AgentMom-Dev}"
+utm_guest_host="${MOM_DEV_UTM_HOST:-agentmom-dev-utm.local}"
+utm_guest_user="${MOM_DEV_UTM_USER:-mom}"
+utm_guest_dir="${MOM_DEV_UTM_GUEST_DIR:-/home/mom/agentmom}"
+utm_microvm_state_dir="${MOM_DEV_UTM_MICROVM_STATE_DIR:-/home/mom/.local/state/agentmom/microvms}"
+utm_state_dir="${repo_root}/.state/dev-utm"
+utm_fallback_key="${utm_state_dir}/id_ed25519"
+utm_bundle="${HOME}/Library/Containers/com.utmapp.UTM/Data/Documents/${utm_name}.utm"
+utm_ssh_args=()
 
 kill_pid() {
   local pid="${1:-}"
@@ -42,6 +51,84 @@ stop_microvm_units() {
     systemctl stop "${unit}" >/dev/null 2>&1 || true
   done
 }
+
+select_utm_ssh_args() {
+  utm_ssh_args=(
+    -o BatchMode=yes
+    -o ConnectTimeout=5
+    -o ControlMaster=no
+    -o ControlPath=none
+    -o StrictHostKeyChecking=accept-new
+    -o UserKnownHostsFile="${utm_state_dir}/known_hosts"
+  )
+
+  if [ ! -f "${HOME}/.ssh/id_ed25519.pub" ] &&
+    [ ! -f "${HOME}/.ssh/id_ecdsa.pub" ] &&
+    [ ! -f "${HOME}/.ssh/id_rsa.pub" ] &&
+    [ -f "${utm_fallback_key}" ]; then
+    utm_ssh_args=(-i "${utm_fallback_key}" "${utm_ssh_args[@]}")
+  fi
+}
+
+reset_utm_guest_state() {
+  [ "${MOM_DEV_RESET_SKIP_UTM:-0}" != "1" ] || return 0
+  [ "${MOM_DEV_RESET_UTM:-1}" != "0" ] || return 0
+  [ -e "${utm_bundle}" ] || return 0
+  command -v ssh >/dev/null 2>&1 || return 0
+
+  mkdir -p "${utm_state_dir}"
+  select_utm_ssh_args
+  if ! ssh "${utm_ssh_args[@]}" "${utm_guest_user}@${utm_guest_host}" true >/dev/null 2>&1; then
+    printf 'UTM guest not reachable; skipped UTM guest state reset\n'
+    return 0
+  fi
+
+  printf 'resetting UTM dev state...'
+  if ssh "${utm_ssh_args[@]}" \
+    "${utm_guest_user}@${utm_guest_host}" \
+    env \
+    MOM_DEV_RESET_SKIP_UTM=1 \
+    AGENTMOM_RESET_GUEST_DIR="${utm_guest_dir}" \
+    AGENTMOM_RESET_MICROVM_STATE_DIR="${utm_microvm_state_dir}" \
+    bash -s <<'EOF_RESET_UTM'
+set -euo pipefail
+
+guest_dir="${AGENTMOM_RESET_GUEST_DIR}"
+microvm_state_dir="${AGENTMOM_RESET_MICROVM_STATE_DIR}"
+
+if [ -d "${guest_dir}" ]; then
+  cd "${guest_dir}"
+  if [ -x ./scripts/dev-reset ]; then
+    MOM_DEV_RESET_SKIP_UTM=1 ./scripts/dev-reset >/dev/null
+  else
+    rm -rf .state dev/iron-proxy
+  fi
+fi
+
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl list-units --all --plain --no-legend 'agentmom-microvm@*.service' 2>/dev/null |
+    awk '{ print $1 }' |
+    while read -r unit; do
+      [ -n "${unit}" ] || continue
+      sudo -n systemctl stop "${unit}" >/dev/null 2>&1 || systemctl stop "${unit}" >/dev/null 2>&1 || true
+    done
+fi
+
+if command -v sudo >/dev/null 2>&1; then
+  sudo -n rm -rf "${microvm_state_dir}" || rm -rf "${microvm_state_dir}"
+else
+  rm -rf "${microvm_state_dir}"
+fi
+EOF_RESET_UTM
+  then
+    printf 'ok\n'
+  else
+    printf 'failed\n'
+    exit 1
+  fi
+}
+
+reset_utm_guest_state
 
 if [ -f "${pid_file}" ]; then
   # shellcheck disable=SC1090
