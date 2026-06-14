@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, io::Write};
 
 use tokio::io::AsyncWriteExt;
 
@@ -279,8 +279,18 @@ pub(crate) async fn start_vm(name: &str) -> Result<GuestVm> {
     systemctl(&["start", &format!("agentmom-microvm@{name}.service")]).await?;
     let vm = GuestVm::new(name);
     let spec = load_microvm_spec(name)?;
-    wait_for_systemd_active(name, FRESH_VM_SYSTEMD_ACTIVE_TIMEOUT).await?;
-    wait_for_ssh(&vm, &spec, FRESH_VM_SSH_READY_TIMEOUT).await?;
+    if let Err(error) = wait_for_systemd_active(name, FRESH_VM_SYSTEMD_ACTIVE_TIMEOUT).await {
+        let diagnostics = microvm_unit_diagnostics(name).await;
+        return Err(error.context(format!(
+            "microVM unit diagnostics for {name}:\n{diagnostics}"
+        )));
+    }
+    if let Err(error) = wait_for_ssh(&vm, &spec, FRESH_VM_SSH_READY_TIMEOUT).await {
+        let diagnostics = microvm_unit_diagnostics(name).await;
+        return Err(error.context(format!(
+            "microVM unit diagnostics for {name}:\n{diagnostics}"
+        )));
+    }
     fs::write(machine_dir(name)?.join("state"), b"running\n")?;
     Ok(vm)
 }
@@ -530,45 +540,133 @@ fn refresh_vm_definition(name: &str) -> Result<()> {
     config.validate_for_node()?;
     let dir = machine_dir(name)?;
     let mut spec = load_microvm_spec(name)?;
+    validate_workspace_source(name, &spec)?;
     apply_current_microvm_config(&mut spec, &config)?;
     write_vm_definition(&dir, &spec, &config)
 }
 
 fn write_vm_definition(dir: &Path, spec: &MicrovmSpec, config: &MomConfig) -> Result<()> {
-    sync_proxy_ca_file(dir, config)?;
-    write_if_changed(&dir.join("spec.json"), &serde_json::to_vec_pretty(spec)?)?;
-    write_if_changed(
+    if let Some(ca_path) = &config.credentials.proxy_ca_path {
+        sync_proxy_ca_file(dir, ca_path)?;
+    }
+    write_file_if_changed(&dir.join("spec.json"), &serde_json::to_vec_pretty(spec)?)?;
+    write_file_if_changed(
         dir.join("microvm-workspace.nix").as_path(),
         microvm_workspace_nix().as_bytes(),
     )?;
-    write_if_changed(&dir.join("flake.nix"), microvm_flake_nix(spec)?.as_bytes())
-}
-
-fn sync_proxy_ca_file(dir: &Path, config: &MomConfig) -> Result<()> {
-    let ca_dest = dir.join("agentmom-proxy.crt");
-    if let Some(ca_path) = &config.credentials.proxy_ca_path {
-        let ca_path = resolve_required_file(ca_path, "credentials.proxy_ca_path")?;
-        fs::copy(&ca_path, &ca_dest).with_context(|| {
-            format!(
-                "copy proxy CA {} to {}",
-                ca_path.display(),
-                ca_dest.display()
-            )
-        })?;
-    } else if ca_dest.exists() {
-        fs::remove_file(&ca_dest)
-            .with_context(|| format!("remove stale proxy CA {}", ca_dest.display()))?;
+    write_file_if_changed(&dir.join("flake.nix"), microvm_flake_nix(spec)?.as_bytes())?;
+    if config.credentials.proxy_ca_path.is_none() {
+        remove_file_if_exists(&dir.join("agentmom-proxy.crt"))?;
     }
     Ok(())
 }
 
-fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<()> {
+fn validate_workspace_source(name: &str, spec: &MicrovmSpec) -> Result<()> {
+    let stored = PathBuf::from(&spec.workspace_dir);
+    let current = workspace_dir_path(&spec.workspace_dir_name)?;
+    if stored != current {
+        bail!(
+            "refusing to rewrite workspace source for VM {name}: stored path {} resolves to {} under current config",
+            stored.display(),
+            current.display()
+        );
+    }
+    if !stored.exists() {
+        bail!(
+            "workspace source for VM {name} is missing: {}",
+            stored.display()
+        );
+    }
+    if !stored.is_dir() {
+        bail!(
+            "workspace source for VM {name} is not a directory: {}",
+            stored.display()
+        );
+    }
+    Ok(())
+}
+
+fn sync_proxy_ca_file(dir: &Path, ca_path: &Path) -> Result<()> {
+    let ca_dest = dir.join("agentmom-proxy.crt");
+    let ca_path = resolve_required_file(ca_path, "credentials.proxy_ca_path")?;
+    let bytes =
+        fs::read(&ca_path).with_context(|| format!("read proxy CA {}", ca_path.display()))?;
+    write_file_if_changed(&ca_dest, &bytes).with_context(|| {
+        format!(
+            "copy proxy CA {} to {}",
+            ca_path.display(),
+            ca_dest.display()
+        )
+    })
+}
+
+fn write_file_if_changed(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Ok(existing) = fs::read(path)
         && existing == bytes
     {
         return Ok(());
     }
-    fs::write(path, bytes).with_context(|| format!("write {}", path.display()))
+    atomic_write_file(path, bytes)
+}
+
+fn atomic_write_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("path has no parent: {}", path.display()))?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| anyhow!("path has no file name: {}", path.display()))?
+        .to_string_lossy();
+    let temp = parent.join(format!(
+        ".{file_name}.tmp.{}.{}",
+        std::process::id(),
+        unique_suffix()?
+    ));
+
+    let write_result = (|| -> Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .with_context(|| format!("create temp file {}", temp.display()))?;
+        file.write_all(bytes)
+            .with_context(|| format!("write temp file {}", temp.display()))?;
+        file.sync_all()
+            .with_context(|| format!("sync temp file {}", temp.display()))?;
+        drop(file);
+        fs::rename(&temp, path)
+            .with_context(|| format!("rename {} to {}", temp.display(), path.display()))?;
+        sync_parent_dir(path)
+    })();
+
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    write_result.with_context(|| format!("write {}", path.display()))
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => sync_parent_dir(path).with_context(|| format!("remove {}", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
+    }
+}
+
+fn sync_parent_dir(path: &Path) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("path has no parent: {}", path.display()))?;
+    let dir = fs::File::open(parent).with_context(|| format!("open {}", parent.display()))?;
+    dir.sync_all()
+        .with_context(|| format!("sync {}", parent.display()))
+}
+
+fn unique_suffix() -> Result<u128> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before UNIX epoch")?
+        .as_nanos())
 }
 
 fn microvm_spec(
@@ -900,18 +998,7 @@ async fn ensure_probe_runner_builds(config: &MomConfig) -> Result<()> {
     )?;
     fs::create_dir_all(&spec.workspace_dir)
         .with_context(|| format!("create host-check workspace dir {}", spec.workspace_dir))?;
-    fs::write(dir.join("spec.json"), serde_json::to_vec_pretty(&spec)?)?;
-    fs::write(dir.join("microvm-workspace.nix"), microvm_workspace_nix())?;
-    fs::write(dir.join("flake.nix"), microvm_flake_nix(&spec)?)?;
-    if let Some(ca_path) = &config.credentials.proxy_ca_path {
-        let ca_path = resolve_required_file(ca_path, "credentials.proxy_ca_path")?;
-        fs::copy(&ca_path, dir.join("agentmom-proxy.crt")).with_context(|| {
-            format!(
-                "copy proxy CA {} for host-check runner build",
-                ca_path.display()
-            )
-        })?;
-    }
+    write_vm_definition(&dir, &spec, config)?;
     require_success(
         TokioCommand::new("nix")
             .args([
@@ -966,6 +1053,31 @@ async fn wait_for_systemd_inactive(name: &str, timeout: Duration) -> Result<()> 
             bail!("timed out waiting for VM {name} systemd unit to stop");
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+async fn microvm_unit_diagnostics(name: &str) -> String {
+    let unit = format!("agentmom-microvm@{name}.service");
+    let mut status_cmd = TokioCommand::new("systemctl");
+    status_cmd.args(["status", "--no-pager", "--full", &unit]);
+    let status = diagnostic_command_output(status_cmd).await;
+
+    let mut journal_cmd = TokioCommand::new("journalctl");
+    journal_cmd.args(["-u", &unit, "-n", "80", "--no-pager"]);
+    let journal = diagnostic_command_output(journal_cmd).await;
+
+    format!("systemctl status {unit}\n{status}\n\njournalctl -u {unit} -n 80\n{journal}")
+}
+
+async fn diagnostic_command_output(mut command: TokioCommand) -> String {
+    match command.stdin(Stdio::null()).output().await {
+        Ok(output) => format!(
+            "status: {}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
+        Err(error) => format!("failed to run diagnostic command: {error}"),
     }
 }
 
@@ -1100,4 +1212,44 @@ async fn command_exists(name: &str) -> bool {
         .status()
         .await
         .is_ok_and(|status| status.success())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generated_file_write_replaces_content_atomically() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("spec.json");
+
+        write_file_if_changed(&path, b"old")?;
+        write_file_if_changed(&path, b"new")?;
+
+        assert_eq!(fs::read(&path)?, b"new");
+        let leftover_temp_files = fs::read_dir(dir.path())?
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".spec.json.tmp.")
+            })
+            .count();
+        assert_eq!(leftover_temp_files, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn stale_generated_file_removal_is_idempotent() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("agentmom-proxy.crt");
+
+        write_file_if_changed(&path, b"cert")?;
+        remove_file_if_exists(&path)?;
+        remove_file_if_exists(&path)?;
+
+        assert!(!path.exists());
+        Ok(())
+    }
 }

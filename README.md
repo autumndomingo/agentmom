@@ -95,7 +95,7 @@ Relevant environment variables:
 - `MOM_MICROVM_BRIDGE`: bridge used by generated tap devices.
 - `MOM_MICROVM_CIDR`: IPv4 CIDR for deterministic guest addresses, for example `192.168.83.0/24`.
 - `MOM_MICROVM_HOST_IP`: host bridge address used as the guest default gateway.
-- `MOM_MICROVM_NIXPKGS_URL` and `MOM_MICROVM_NIX_URL`: flake inputs used by generated workspace flakes.
+- `MOM_MICROVM_NIXPKGS_URL` and `MOM_MICROVM_NIX_URL`: flake inputs used by generated workspace flakes. Production deploys should pass pinned revisions or immutable `path:/nix/store/...` inputs so cached workspace runners cannot drift from their generated input hash.
 
 Backups use restic. Set `RESTIC_REPOSITORY` and the usual restic credentials in
 the worker service environment before enabling scheduled backups. Agent Mom
