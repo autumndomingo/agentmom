@@ -171,7 +171,7 @@ fn hermes_dashboard_script() -> String {
 
     format!(
         r#"
-set -eu
+set -e
 if ! command -v hermes >/dev/null 2>&1; then
   echo "Hermes is not installed in this VM; recreate it with the current runtime" >&2
   exit 1
@@ -443,6 +443,8 @@ mod tests {
     #[test]
     fn hermes_dashboard_readiness_loop_has_bounded_probe_timeout() {
         let script = hermes_dashboard_script();
+        assert!(script.contains("set -e\n"));
+        assert!(!script.contains("set -eu"));
         assert!(script.contains(&format!("seq 1 {HERMES_READINESS_ATTEMPTS}")));
         assert!(script.contains(&format!("timeout {HERMES_PROBE_TIMEOUT_SECS}s wget")));
         assert!(script.contains(&format!("--timeout={HERMES_WGET_TIMEOUT_SECS}")));
