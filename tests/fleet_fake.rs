@@ -91,35 +91,41 @@ impl Drop for TestFleet {
 }
 
 #[tokio::test]
-async fn first_user_becomes_admin_and_existing_users_need_their_own_code() -> Result<()> {
+async fn first_signup_becomes_admin_and_users_login_with_passwords() -> Result<()> {
     let fleet = TestFleet::start().await?;
     let client = reqwest::Client::new();
 
     let first_response = client
-        .post(format!("{}/api/auth/login", fleet.api_url))
-        .json(&json!({ "email": "admin@example.com" }))
+        .post(format!("{}/api/auth/signup", fleet.api_url))
+        .json(&json!({
+            "full_name": "Admin User",
+            "email": "admin@example.com",
+            "password": "correct horse battery staple"
+        }))
         .send()
         .await?
         .error_for_status()?;
     let admin_cookie = session_cookie_from_response(&first_response)?;
     let first = first_response.json::<Value>().await?;
-    let admin_code = first["user"]["code"]
-        .as_str()
-        .ok_or_else(|| anyhow!("first login did not return user code"))?
-        .to_string();
     assert_eq!(first["user"]["role"], "admin");
-    assert!(!admin_code.is_empty());
+    assert!(first["user"].get("code").is_none());
 
-    let missing_code = client
+    let wrong_password = client
         .post(format!("{}/api/auth/login", fleet.api_url))
-        .json(&json!({ "email": "admin@example.com" }))
+        .json(&json!({
+            "email": "admin@example.com",
+            "password": "wrong password"
+        }))
         .send()
         .await?;
-    assert_eq!(missing_code.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(wrong_password.status(), StatusCode::UNAUTHORIZED);
 
     client
         .post(format!("{}/api/auth/login", fleet.api_url))
-        .json(&json!({ "email": "admin@example.com", "access_code": admin_code }))
+        .json(&json!({
+            "email": "admin@example.com",
+            "password": "correct horse battery staple"
+        }))
         .send()
         .await?
         .error_for_status()?;
@@ -136,38 +142,39 @@ async fn first_user_becomes_admin_and_existing_users_need_their_own_code() -> Re
     let invite_code = invite["code"]
         .as_str()
         .ok_or_else(|| anyhow!("invite response did not return code"))?;
+    assert_eq!(invite_code.len(), 8);
 
     let participant = client
-        .post(format!("{}/api/auth/login", fleet.api_url))
+        .post(format!("{}/api/auth/signup", fleet.api_url))
         .json(&json!({
+            "full_name": "Participant User",
             "email": "participant@example.com",
-            "access_code": invite_code
+            "code": invite_code,
+            "password": "participant password"
         }))
         .send()
         .await?
         .error_for_status()?
         .json::<Value>()
         .await?;
-    let participant_code = participant["user"]["code"]
-        .as_str()
-        .ok_or_else(|| anyhow!("participant login did not return user code"))?;
-    assert_ne!(participant_code, invite_code);
+    assert_eq!(participant["user"]["role"], "user");
+    assert!(participant["user"].get("code").is_none());
 
-    let invite_reuse_as_login = client
+    let invite_code_as_password = client
         .post(format!("{}/api/auth/login", fleet.api_url))
         .json(&json!({
             "email": "participant@example.com",
-            "access_code": invite_code
+            "password": invite_code
         }))
         .send()
         .await?;
-    assert_eq!(invite_reuse_as_login.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(invite_code_as_password.status(), StatusCode::UNAUTHORIZED);
 
     client
         .post(format!("{}/api/auth/login", fleet.api_url))
         .json(&json!({
             "email": "participant@example.com",
-            "access_code": participant_code
+            "password": "participant password"
         }))
         .send()
         .await?
@@ -2695,18 +2702,40 @@ async fn admin_cookie(api_url: &str) -> Result<String> {
 }
 
 async fn admin_login(client: &reqwest::Client, api_url: &str) -> Result<String> {
-    let response = client
+    const ADMIN_PASSWORD: &str = "agentmom test admin password";
+
+    let login_response = client
         .post(format!("{api_url}/api/auth/login"))
-        .json(&json!({ "email": "admin@example.com" }))
+        .json(&json!({
+            "email": "admin@example.com",
+            "password": ADMIN_PASSWORD
+        }))
         .send()
         .await?;
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
+    if login_response.status().is_success() {
+        return session_cookie_from_response(&login_response);
+    }
+    if login_response.status() != StatusCode::UNAUTHORIZED {
+        let status = login_response.status();
+        let body = login_response.text().await.unwrap_or_default();
         bail!("admin login failed with {status}: {body}");
     }
-    let cookie = session_cookie_from_response(&response)?;
-    Ok(cookie)
+
+    let signup_response = client
+        .post(format!("{api_url}/api/auth/signup"))
+        .json(&json!({
+            "full_name": "Admin User",
+            "email": "admin@example.com",
+            "password": ADMIN_PASSWORD
+        }))
+        .send()
+        .await?;
+    let status = signup_response.status();
+    if !status.is_success() {
+        let body = signup_response.text().await.unwrap_or_default();
+        bail!("admin signup failed with {status}: {body}");
+    }
+    session_cookie_from_response(&signup_response)
 }
 
 fn session_cookie_from_response(response: &reqwest::Response) -> Result<String> {

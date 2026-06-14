@@ -90,53 +90,104 @@ function Root() {
     return <TuiPage userSession={userSession} />;
   }
 
-  if (!userSession.userName || !userSession.agentName || !userSession.workspaceName) {
-    return <SetupPage userSession={userSession} onSubmit={enterUserFlow} />;
+  if (!userSession.workspaceName) {
+    return <WorkspaceSetupPage userSession={userSession} onSubmit={enterUserFlow} />;
   }
 
   return <App userSession={userSession} />;
 }
 
 function LandingPage({ onSubmit }) {
-  const [form, setForm] = useState({ email: '', accessCode: '' });
+  const [mode, setMode] = useState('signup');
+  const [form, setForm] = useState({ fullName: '', email: '', code: '', password: '' });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
-  async function submitAccess(event) {
+  async function submitAuth(event) {
     event.preventDefault();
+    const fullName = form.fullName.trim();
     const email = form.email.trim();
-    const accessCode = form.accessCode.trim();
-    if (!email) return;
+    const code = form.code.trim();
+    const password = form.password;
+    if (!email || !password || (mode === 'signup' && !fullName)) return;
 
     setBusy(true);
     setError('');
     try {
-      const response = await fetch(`${API_BASE}/auth/login`, {
+      const response = await fetch(`${API_BASE}/auth/${mode}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          email,
-          ...(accessCode ? { access_code: accessCode } : {}),
-        }),
+        body: JSON.stringify(
+          mode === 'signup'
+            ? { full_name: fullName, email, ...(code ? { code } : {}), password }
+            : { email, password },
+        ),
       });
       const data = await response.json();
       if (!response.ok) {
         throw data;
       }
-      onSubmit(sessionFromMe(data));
-    } catch (accessError) {
-      setError(accessError?.error ?? 'Access denied.');
+      let session = sessionFromMe(data);
+      if (mode === 'signup' && !session.workspaceName) {
+        try {
+          session = await createWorkspaceFromOnboarding(fullName, fullName);
+        } catch (setupError) {
+          setMode('login');
+          throw {
+            error: `${formatError(setupError)} Account created. Log in to retry workspace setup.`,
+          };
+        }
+      }
+      onSubmit(session);
+    } catch (authError) {
+      setError(authError?.error ?? 'Access denied.');
     } finally {
       setBusy(false);
     }
   }
+
+  function switchMode(nextMode) {
+    setMode(nextMode);
+    setError('');
+  }
+
+  const submitDisabled =
+    busy || !form.email.trim() || !form.password || (mode === 'signup' && !form.fullName.trim());
 
   return (
     <main className="landingPage">
       <section className="landingPanel" aria-label="User access">
         <BuildersTableBrand />
 
-        <form className="landingForm" onSubmit={submitAccess}>
+        <form className="landingForm" onSubmit={submitAuth}>
+          <div className="authModeSwitch" role="tablist" aria-label="Access mode">
+            <button
+              type="button"
+              className={mode === 'signup' ? 'active' : ''}
+              onClick={() => switchMode('signup')}
+            >
+              Sign up
+            </button>
+            <button
+              type="button"
+              className={mode === 'login' ? 'active' : ''}
+              onClick={() => switchMode('login')}
+            >
+              Log in
+            </button>
+          </div>
+          {mode === 'signup' && (
+            <input
+              value={form.fullName}
+              onChange={(event) =>
+                setForm((current) => ({ ...current, fullName: event.target.value }))
+              }
+              placeholder="Name"
+              autoComplete="name"
+              autoFocus
+              required
+            />
+          )}
           <input
             type="email"
             value={form.email}
@@ -145,20 +196,32 @@ function LandingPage({ onSubmit }) {
             }
             placeholder="Email"
             autoComplete="email"
-            autoFocus
+            autoFocus={mode === 'login'}
             required
           />
+          {mode === 'signup' && (
+            <input
+              value={form.code}
+              onChange={(event) =>
+                setForm((current) => ({ ...current, code: event.target.value }))
+              }
+              placeholder="Invite code"
+              autoComplete="one-time-code"
+            />
+          )}
           <input
-            value={form.accessCode}
+            type="password"
+            value={form.password}
             onChange={(event) =>
-              setForm((current) => ({ ...current, accessCode: event.target.value }))
+              setForm((current) => ({ ...current, password: event.target.value }))
             }
-            placeholder="Access Code"
-            autoComplete="one-time-code"
+            placeholder="Password"
+            autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
+            required
           />
           {error && <p className="accessError">{error}</p>}
-          <button disabled={busy || !form.email.trim()}>
-            {busy ? 'Checking...' : 'Continue'}
+          <button disabled={submitDisabled}>
+            {busy ? 'Checking...' : mode === 'signup' ? 'Create account' : 'Log in'}
           </button>
         </form>
       </section>
@@ -194,61 +257,36 @@ async function fetchMe() {
   return sessionFromMe(data);
 }
 
-function SetupPage({ userSession, onSubmit }) {
-  const [form, setForm] = useState({
-    userName: userSession.userName ?? '',
-    agentName: userSession.agentName ?? '',
-  });
-  const [busy, setBusy] = useState(false);
+function WorkspaceSetupPage({ userSession, onSubmit }) {
   const [error, setError] = useState('');
 
-  async function submitSetup(event) {
-    event.preventDefault();
-    const userName = form.userName.trim();
-    const agentName = form.agentName.trim();
-    if (!userName || !agentName) return;
+  useEffect(() => {
+    let cancelled = false;
+    const userName = (userSession.userName || userSession.email || '').trim();
+    if (!userName) return undefined;
 
-    setBusy(true);
     setError('');
-    try {
-      const session = await createWorkspaceFromOnboarding(userName, agentName);
-      onSubmit(session);
-    } catch (setupError) {
-      setError(formatError(setupError));
-    } finally {
-      setBusy(false);
-    }
-  }
+    createWorkspaceFromOnboarding(userName, userName)
+      .then((session) => {
+        if (!cancelled) onSubmit(session);
+      })
+      .catch((setupError) => {
+        if (!cancelled) setError(formatError(setupError));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [userSession.id]);
 
   return (
     <main className="landingPage">
       <section className="landingPanel setupPanel" aria-label="Create your workspace">
         <BuildersTableBrand />
 
-        <form className="landingForm setupForm" onSubmit={submitSetup}>
-          <input
-            value={form.userName}
-            onChange={(event) =>
-              setForm((current) => ({ ...current, userName: event.target.value }))
-            }
-            placeholder="Name"
-            autoComplete="name"
-            autoFocus
-            required
-          />
-          <input
-            value={form.agentName}
-            onChange={(event) =>
-              setForm((current) => ({ ...current, agentName: event.target.value }))
-            }
-            placeholder="Agent name"
-            required
-          />
+        <div className="landingForm setupForm">
+          <p className="setupStatus">Creating workspace...</p>
           {error && <p className="accessError">{error}</p>}
-          <button disabled={busy || !form.userName.trim() || !form.agentName.trim()}>
-            {busy ? 'Creating workspace...' : 'Continue'}
-          </button>
-        </form>
+        </div>
       </section>
     </main>
   );
@@ -1282,7 +1320,7 @@ function App({ userSession }) {
           <h2>Session</h2>
           <strong>Local workspace</strong>
           <span>{userSession.email}</span>
-          <code>{userSession.code}</code>
+          <code>{userSession.role}</code>
         </div>
       </aside>
 
@@ -2031,12 +2069,12 @@ function AdminPage({ userSession }) {
             <button className="adminNavButton" type="button" onClick={openWorkspace}>
               Workspace
             </button>
-            <div className="accessCodeControl" aria-label="Access code">
+            <div className="accessCodeControl" aria-label="Invite code">
               <code>{busy ? 'Generating...' : accessCodeStatus}</code>
               <button
                 type="button"
                 onClick={refreshAccessCode}
-                title="Generate access code"
+                title="Generate invite code"
                 disabled={busy}
               >
                 <RefreshCcw size={17} />
@@ -2048,7 +2086,7 @@ function AdminPage({ userSession }) {
         {adminError && <p className="adminError">{adminError}</p>}
 
         <section className="adminTableShell">
-          <div className="adminTableHeader">
+          <div className="adminTableHeader adminInviteGrid">
             <span>Invite</span>
             <span>Uses</span>
             <span>Status</span>
@@ -2057,7 +2095,7 @@ function AdminPage({ userSession }) {
           </div>
           <div className="adminUserList">
             {invites.map((invite) => (
-              <article className="adminUserRow" key={invite.id}>
+              <article className="adminUserRow adminInviteGrid" key={invite.id}>
                 <strong>{invite.label}</strong>
                 <span>{invite.used_count}{invite.max_uses ? ` / ${invite.max_uses}` : ''}</span>
                 <span>{invite.active ? 'active' : 'disabled'}</span>
@@ -2070,10 +2108,9 @@ function AdminPage({ userSession }) {
         </section>
 
         <section className="adminTableShell">
-          <div className="adminTableHeader">
+          <div className="adminTableHeader adminUserGrid">
             <span>Name</span>
             <span>Email</span>
-            <span>Code</span>
             <span>Role</span>
             <span>Status</span>
             <span></span>
@@ -2081,10 +2118,9 @@ function AdminPage({ userSession }) {
 
           <div className="adminUserList">
             {users.map((user) => (
-              <article className="adminUserRow" key={user.id}>
+              <article className="adminUserRow adminUserGrid" key={user.id}>
                 <strong>{user.full_name || user.email}</strong>
                 <span>{user.email}</span>
-                <span>{user.code}</span>
                 <span>{user.role}</span>
                 <span
                   className={`adminStatusDot ${user.status}`}
@@ -2413,7 +2449,6 @@ function sessionFromMe(data) {
   return {
     id: user.id,
     email: user.email,
-    code: user.code,
     role: user.role,
     userName: user.full_name ?? '',
     agentName: workspace?.agent_name ?? workspace?.agentName ?? '',

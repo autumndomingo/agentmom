@@ -1,4 +1,8 @@
 use super::*;
+use argon2::{
+    Argon2, PasswordHash, PasswordHasher, PasswordVerifier,
+    password_hash::{SaltString, rand_core::OsRng},
+};
 use axum::{
     http::header::{COOKIE, SET_COOKIE},
     routing::delete,
@@ -14,7 +18,6 @@ const SESSION_COOKIE: &str = "agentmom_session";
 pub(crate) struct AuthUser {
     pub(crate) id: i64,
     pub(crate) email: String,
-    pub(crate) code: String,
     pub(crate) full_name: String,
     pub(crate) role: String,
     pub(crate) invite_id: Option<i64>,
@@ -38,8 +41,16 @@ struct InviteRecord {
 #[derive(Debug, Deserialize)]
 struct LoginRequest {
     email: String,
+    password: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SignupRequest {
+    full_name: String,
+    email: String,
     #[serde(default)]
-    access_code: Option<String>,
+    code: Option<String>,
+    password: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -106,6 +117,7 @@ struct AuthErrorBody {
 pub(crate) fn api_routes() -> Router<Arc<ApiState>> {
     Router::new()
         .route("/api/auth/login", post(login))
+        .route("/api/auth/signup", post(signup))
         .route("/api/auth/logout", post(logout))
         .route("/api/me", get(me))
         .route("/api/me/setup", post(setup_me))
@@ -137,7 +149,7 @@ pub(crate) fn current_user(headers: &HeaderMap) -> Result<AuthUser, AuthError> {
     let user = db
         .query_row(
             r#"
-SELECT users.id, users.email, users.code, users.full_name, users.role, users.invite_id, users.last_seen_at
+SELECT users.id, users.email, users.full_name, users.role, users.invite_id, users.last_seen_at
 FROM sessions
 JOIN users ON users.id = sessions.user_id
 WHERE sessions.token_hash = ?1
@@ -198,8 +210,27 @@ pub(crate) fn visible_workspaces(headers: &HeaderMap) -> Result<Vec<WorkspaceRec
 }
 
 async fn login(Json(request): Json<LoginRequest>) -> Result<Response, AuthError> {
-    let (user, token) =
-        authenticate_or_create_session(&request.email, request.access_code.as_deref())?;
+    let (user, token) = authenticate_session(&request.email, &request.password)?;
+    let workspace = workspace_for_user(user.id)?;
+    let cookie = session_cookie(&token);
+    Ok((
+        [(SET_COOKIE, cookie)],
+        Json(LoginResponse {
+            ok: true,
+            user,
+            workspace,
+        }),
+    )
+        .into_response())
+}
+
+async fn signup(Json(request): Json<SignupRequest>) -> Result<Response, AuthError> {
+    let (user, token) = create_user_session(
+        &request.full_name,
+        &request.email,
+        request.code.as_deref(),
+        &request.password,
+    )?;
     let workspace = workspace_for_user(user.id)?;
     let cookie = session_cookie(&token);
     Ok((
@@ -364,36 +395,74 @@ async fn admin_delete_user(
     Ok(Json(OkResponse { ok: true }))
 }
 
-fn authenticate_or_create_session(
-    email: &str,
-    access_code: Option<&str>,
-) -> Result<(AuthUser, String), AuthError> {
+fn authenticate_session(email: &str, password: &str) -> Result<(AuthUser, String), AuthError> {
     let email = normalize_email(email)?;
-    let code = access_code
+    let now = now_epoch()?;
+    let mut db = fleet_db()?;
+    let tx = db.transaction()?;
+    let password_hash = tx
+        .query_row(
+            "SELECT password_hash FROM users WHERE email = ?1",
+            params![email],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let Some(password_hash) = password_hash else {
+        return Err(AuthError::Unauthorized);
+    };
+    if !verify_password(password, &password_hash)? {
+        return Err(AuthError::Unauthorized);
+    }
+    let user = tx.query_row(
+        "SELECT id, email, full_name, role, invite_id, last_seen_at FROM users WHERE email = ?1",
+        params![email],
+        user_from_row,
+    )?;
+    tx.execute(
+        "UPDATE users SET last_seen_at = ?2, updated_at = ?2 WHERE id = ?1",
+        params![user.id, now],
+    )?;
+    let token = create_session_in_tx(&tx, user.id)?;
+    tx.commit()?;
+    Ok((
+        AuthUser {
+            last_seen_at: Some(now),
+            ..user
+        },
+        token,
+    ))
+}
+
+fn create_user_session(
+    full_name: &str,
+    email: &str,
+    invite_code: Option<&str>,
+    password: &str,
+) -> Result<(AuthUser, String), AuthError> {
+    let full_name = normalize_full_name(full_name)?;
+    let email = normalize_email(email)?;
+    validate_password(password)?;
+    let password_hash = hash_password(password)?;
+    let code = invite_code
         .map(normalize_access_code)
         .filter(|value| !value.is_empty());
     let now = now_epoch()?;
     let mut db = fleet_db()?;
     let tx = db.transaction()?;
-    let existing_user = tx
-        .query_row(
-            "SELECT id, email, code, full_name, role, invite_id, last_seen_at FROM users WHERE email = ?1",
-            params![email],
-            user_from_row,
-        )
-        .optional()?;
-    if let Some(user) = existing_user {
-        if code.as_deref() != Some(user.code.as_str()) {
-            return Err(AuthError::Unauthorized);
-        }
-        tx.execute(
-            "UPDATE users SET last_seen_at = ?2, updated_at = ?2 WHERE id = ?1",
-            params![user.id, now],
-        )?;
-    } else if user_count(&tx)? == 0 {
-        insert_user_with_generated_code(&tx, &email, "", "admin", None, now)?;
+    let email_exists: bool = tx.query_row(
+        "SELECT COUNT(*) > 0 FROM users WHERE email = ?1",
+        params![email],
+        |row| row.get(0),
+    )?;
+    if email_exists {
+        return Err(AuthError::BadRequest(
+            "email is already registered".to_string(),
+        ));
+    }
+    let (role, invite_id) = if user_count(&tx)? == 0 {
+        ("admin".to_string(), None)
     } else {
-        let code = code.ok_or(AuthError::Unauthorized)?;
+        let code = code.ok_or(AuthError::InvalidSignupCode)?;
         let invite = tx
             .query_row(
                 r#"
@@ -405,23 +474,33 @@ WHERE code = ?1 AND active = 1
                 invite_from_row,
             )
             .optional()?
-            .ok_or(AuthError::Unauthorized)?;
+            .ok_or(AuthError::InvalidSignupCode)?;
         if invite.max_uses.is_some_and(|max| invite.used_count >= max) {
-            return Err(AuthError::Unauthorized);
+            return Err(AuthError::InvalidSignupCode);
         }
         tx.execute(
             "UPDATE invites SET used_count = used_count + 1 WHERE id = ?1",
             params![invite.id],
         )?;
-        let user_id =
-            insert_user_with_generated_code(&tx, &email, "", &invite.role, Some(invite.id), now)?;
+        (invite.role, Some(invite.id))
+    };
+    let user_id = insert_user_with_password(
+        &tx,
+        &email,
+        &password_hash,
+        &full_name,
+        &role,
+        invite_id,
+        now,
+    )?;
+    if let Some(invite_id) = invite_id {
         tx.execute(
             "INSERT INTO invite_redemptions (invite_id, user_id, redeemed_at) VALUES (?1, ?2, ?3)",
-            params![invite.id, user_id, now],
+            params![invite_id, user_id, now],
         )?;
     }
     let user = tx.query_row(
-        "SELECT id, email, code, full_name, role, invite_id, last_seen_at FROM users WHERE email = ?1",
+        "SELECT id, email, full_name, role, invite_id, last_seen_at FROM users WHERE email = ?1",
         params![email],
         user_from_row,
     )?;
@@ -434,36 +513,23 @@ fn user_count(tx: &rusqlite::Transaction<'_>) -> Result<i64, AuthError> {
     Ok(tx.query_row("SELECT COUNT(*) FROM users", [], |row| row.get(0))?)
 }
 
-fn insert_user_with_generated_code(
+fn insert_user_with_password(
     tx: &rusqlite::Transaction<'_>,
     email: &str,
+    password_hash: &str,
     full_name: &str,
     role: &str,
     invite_id: Option<i64>,
     now: i64,
 ) -> Result<i64, AuthError> {
-    for _ in 0..10 {
-        let code = generate_access_code();
-        let code_exists: bool = tx.query_row(
-            "SELECT COUNT(*) > 0 FROM users WHERE code = ?1",
-            params![code],
-            |row| row.get(0),
-        )?;
-        if code_exists {
-            continue;
-        }
-        tx.execute(
-            r#"
-INSERT INTO users (email, code, full_name, role, invite_id, created_at, updated_at, last_seen_at)
+    tx.execute(
+        r#"
+INSERT INTO users (email, password_hash, full_name, role, invite_id, created_at, updated_at, last_seen_at)
 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?6)
 "#,
-            params![email, code, full_name, role, invite_id, now],
-        )?;
-        return Ok(tx.last_insert_rowid());
-    }
-    Err(AuthError::Anyhow(anyhow!(
-        "failed to generate unique user code"
-    )))
+        params![email, password_hash, full_name, role, invite_id, now],
+    )?;
+    Ok(tx.last_insert_rowid())
 }
 
 fn create_session_in_tx(tx: &rusqlite::Transaction<'_>, user_id: i64) -> Result<String, AuthError> {
@@ -594,7 +660,7 @@ WHERE owner_user_id = ?1
 fn user_get(id: i64) -> Result<AuthUser, AuthError> {
     let db = fleet_db()?;
     db.query_row(
-        "SELECT id, email, code, full_name, role, invite_id, last_seen_at FROM users WHERE id = ?1",
+        "SELECT id, email, full_name, role, invite_id, last_seen_at FROM users WHERE id = ?1",
         params![id],
         user_from_row,
     )
@@ -605,7 +671,7 @@ fn user_get(id: i64) -> Result<AuthUser, AuthError> {
 fn user_all() -> Result<Vec<AuthUser>, AuthError> {
     let db = fleet_db()?;
     let mut stmt = db.prepare(
-        "SELECT id, email, code, full_name, role, invite_id, last_seen_at FROM users ORDER BY role, email",
+        "SELECT id, email, full_name, role, invite_id, last_seen_at FROM users ORDER BY role, email",
     )?;
     Ok(stmt
         .query_map([], user_from_row)?
@@ -615,7 +681,7 @@ fn user_all() -> Result<Vec<AuthUser>, AuthError> {
 fn users_for_invite(invite_id: i64) -> Result<Vec<AuthUser>, AuthError> {
     let db = fleet_db()?;
     let mut stmt = db.prepare(
-        "SELECT id, email, code, full_name, role, invite_id, last_seen_at FROM users WHERE invite_id = ?1 ORDER BY email",
+        "SELECT id, email, full_name, role, invite_id, last_seen_at FROM users WHERE invite_id = ?1 ORDER BY email",
     )?;
     Ok(stmt
         .query_map(params![invite_id], user_from_row)?
@@ -673,11 +739,10 @@ fn user_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AuthUser> {
     Ok(AuthUser {
         id: row.get(0)?,
         email: row.get(1)?,
-        code: row.get(2)?,
-        full_name: row.get(3)?,
-        role: row.get(4)?,
-        invite_id: row.get(5)?,
-        last_seen_at: row.get(6)?,
+        full_name: row.get(2)?,
+        role: row.get(3)?,
+        invite_id: row.get(4)?,
+        last_seen_at: row.get(5)?,
     })
 }
 
@@ -705,6 +770,14 @@ fn normalize_email(email: &str) -> Result<String, AuthError> {
     Ok(email)
 }
 
+fn normalize_full_name(full_name: &str) -> Result<String, AuthError> {
+    let full_name = full_name.trim();
+    if full_name.is_empty() {
+        return Err(AuthError::BadRequest("name is required".to_string()));
+    }
+    Ok(full_name.to_string())
+}
+
 fn is_valid_email(email: &str) -> bool {
     let Some((local, domain)) = email.split_once('@') else {
         return false;
@@ -717,6 +790,31 @@ fn is_valid_email(email: &str) -> bool {
 
 fn session_token_hash(token: &str) -> Result<String, AuthError> {
     hmac_hex(token.trim().as_bytes())
+}
+
+fn validate_password(password: &str) -> Result<(), AuthError> {
+    if password.len() < 8 {
+        return Err(AuthError::BadRequest(
+            "password must be at least 8 characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn hash_password(password: &str) -> Result<String, AuthError> {
+    let salt = SaltString::generate(&mut OsRng);
+    Ok(Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map_err(|error| AuthError::Anyhow(anyhow!("hash password: {error}")))?
+        .to_string())
+}
+
+fn verify_password(password: &str, hash: &str) -> Result<bool, AuthError> {
+    let parsed = PasswordHash::new(hash)
+        .map_err(|error| AuthError::Anyhow(anyhow!("parse password hash: {error}")))?;
+    Ok(Argon2::default()
+        .verify_password(password.as_bytes(), &parsed)
+        .is_ok())
 }
 
 fn hmac_hex(bytes: &[u8]) -> Result<String, AuthError> {
@@ -739,12 +837,7 @@ fn normalize_access_code(code: &str) -> String {
 }
 
 fn generate_access_code() -> String {
-    format!(
-        "AM-{}-{}-{}",
-        random_code_part(4),
-        random_code_part(4),
-        random_code_part(4)
-    )
+    random_code_part(8)
 }
 
 fn generate_session_token() -> String {
@@ -811,6 +904,7 @@ fn bool_flag_enabled(value: &str) -> bool {
 #[derive(Debug)]
 pub(crate) enum AuthError {
     Unauthorized,
+    InvalidSignupCode,
     Forbidden,
     NotFound,
     Unavailable(String),
@@ -836,8 +930,11 @@ impl IntoResponse for AuthError {
         let (status, error) = match self {
             AuthError::Unauthorized => (
                 StatusCode::UNAUTHORIZED,
-                "Invalid email or access code.".to_string(),
+                "Invalid email or password.".to_string(),
             ),
+            AuthError::InvalidSignupCode => {
+                (StatusCode::UNAUTHORIZED, "Invalid signup code.".to_string())
+            }
             AuthError::Forbidden => (
                 StatusCode::FORBIDDEN,
                 "Admin access is required.".to_string(),

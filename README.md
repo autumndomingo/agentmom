@@ -78,7 +78,7 @@ Required assumptions:
 - `guest.hermes_profile` is the Hermes profile name created in the guest.
 - `guest.model` is the default model written into the generated Hermes config.
 - `auth.secret_file` is required for `mom api`; it signs browser sessions.
-- On an empty catalog, the first login creates the admin user. Existing users log in with their app-generated user code.
+- On an empty catalog, the first signup creates the admin user. Existing users log in with email and password.
 
 `mom config doctor` validates the configured file and prints a redacted
 effective config. `mom node ensure-runtime` checks host prerequisites for the
@@ -271,13 +271,12 @@ export AGENTMOM_REAL_ALLOW_BACKUP=1
 export AGENTMOM_REAL_ALLOW_CATALOG_BACKUP=1
 export AGENTMOM_REAL_API_SSH_HOST=mom-ctrl
 export AGENTMOM_REAL_ADMIN_EMAIL=you@example.com
-# Existing catalogs also need this admin user's app-generated code:
-# export AGENTMOM_REAL_ADMIN_USER_CODE=...
+export AGENTMOM_REAL_ADMIN_PASSWORD=...
 just real-fleet-test-prod-mutating
 ```
 
 Use the intended production admin email for `AGENTMOM_REAL_ADMIN_EMAIL`. On a
-freshly wiped catalog, that login creates the first admin; do not leave it at a
+freshly wiped catalog, that signup creates the first admin; do not leave it at a
 test address.
 
 ## Production Cutovers
