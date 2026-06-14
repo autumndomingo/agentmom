@@ -606,7 +606,7 @@ async fn workspace_command(command: WorkspaceCommand) -> Result<()> {
             require_workspace_local(&workspace, "hermes")?;
             workspace_touch(&workspace.name)?;
             let vm = workspace_running_vm(&workspace).await?;
-            let mut command = vec!["hermes".to_string()];
+            let mut command = vec![GUEST_AGENTMOM_HERMES.to_string()];
             command.extend(args);
             run_guest_command(&vm, command).await
         }

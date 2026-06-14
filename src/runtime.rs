@@ -1600,9 +1600,18 @@ mod tests {
         assert!(template.contains("writeShellScriptBin \"agentmom-run\""));
         assert!(template.contains("writeShellScriptBin \"agentmom-hermes\""));
         assert!(template.contains("writeShellScriptBin \"agentmom-hermes-acp\""));
+        assert!(template.contains("writeShellScriptBin \"agentmom-hermes-dashboard\""));
         assert!(template.contains("writeShellScriptBin \"agentmom-hermes-dashboard-start\""));
+        assert!(template.contains("systemd.services.agentmom-hermes-dashboard"));
+        assert!(
+            template.contains(
+                "ExecStart = \"${agentmomHermesDashboard}/bin/agentmom-hermes-dashboard\""
+            )
+        );
+        assert!(template.contains("Restart = \"on-failure\""));
         assert!(template.contains(". /etc/profile.d/mom.sh"));
         assert!(template.contains(". /etc/profile.d/agentmom-proxy.sh"));
+        assert!(!template.contains("setsid hermes dashboard"));
         assert!(
             template.contains(
                 "model:\n      provider: openrouter\n      default: ${spec.hermes_model}"

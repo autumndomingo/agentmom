@@ -175,6 +175,24 @@ set -e
 if command -v agentmom-hermes-dashboard-start >/dev/null 2>&1; then
   exec agentmom-hermes-dashboard-start
 fi
+probe_hermes_dashboard() {{
+  timeout {probe_timeout}s wget -q -O /dev/null --timeout={wget_timeout} http://127.0.0.1:{port}{health_path} >/dev/null 2>&1
+}}
+if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files agentmom-hermes-dashboard.service --no-legend | grep -q '^agentmom-hermes-dashboard\.service[[:space:]]'; then
+  if probe_hermes_dashboard; then
+    exit 0
+  fi
+  systemctl start agentmom-hermes-dashboard.service
+  for _ in $(seq 1 {readiness_attempts}); do
+    if probe_hermes_dashboard; then
+      exit 0
+    fi
+    sleep 1
+  done
+  systemctl status --no-pager agentmom-hermes-dashboard.service >&2 || true
+  journalctl -u agentmom-hermes-dashboard.service -n 120 --no-pager >&2 || true
+  exit 1
+fi
 if ! command -v hermes >/dev/null 2>&1; then
   echo "Hermes is not installed in this VM; recreate it with the current runtime" >&2
   exit 1
@@ -182,9 +200,6 @@ fi
 if [ -f /etc/profile.d/mom.sh ]; then . /etc/profile.d/mom.sh; fi
 if [ -f /etc/profile.d/agentmom-proxy.sh ]; then . /etc/profile.d/agentmom-proxy.sh; fi
 mkdir -p {workdir_q} {log_dir_q}
-probe_hermes_dashboard() {{
-  timeout {probe_timeout}s wget -q -O /dev/null --timeout={wget_timeout} http://127.0.0.1:{port}{health_path} >/dev/null 2>&1
-}}
 if probe_hermes_dashboard; then
   exit 0
 fi
@@ -468,6 +483,8 @@ mod tests {
         let script = hermes_dashboard_script();
 
         assert!(script.contains("agentmom-hermes-dashboard-start"));
+        assert!(script.contains("systemctl start agentmom-hermes-dashboard.service"));
+        assert!(script.contains("journalctl -u agentmom-hermes-dashboard.service"));
         assert!(script.contains(". /etc/profile.d/mom.sh"));
         assert!(script.contains(". /etc/profile.d/agentmom-proxy.sh"));
     }
