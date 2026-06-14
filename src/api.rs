@@ -4,7 +4,8 @@ pub(crate) async fn api(args: ApiArgs) -> Result<()> {
     ensure_fleet_schema()?;
     auth::seed_admin_from_config()?;
     let (notifier, _) = broadcast::channel(1024);
-    let state = ApiState { notifier };
+    let (shutdown, _) = broadcast::channel(16);
+    let state = Arc::new(ApiState { notifier, shutdown });
     let app = Router::new()
         .route("/health/live", get(api_health_live))
         .route("/health/ready", get(api_health_ready))
@@ -37,7 +38,7 @@ pub(crate) async fn api(args: ApiArgs) -> Result<()> {
         .route("/worker/events", get(api_worker_events))
         .merge(auth::api_routes())
         .merge(ui::api_routes())
-        .with_state(Arc::new(state));
+        .with_state(state.clone());
     let app = ui::serve_assets(app);
     let addr: SocketAddr = args
         .bind
@@ -48,8 +49,13 @@ pub(crate) async fn api(args: ApiArgs) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("bind {addr}"))?;
+    let shutdown = state.shutdown.clone();
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            log_record("info", "api_shutdown", None, "Agent Mom API shutting down");
+            let _ = shutdown.send(());
+        })
         .await?;
     Ok(())
 }
@@ -432,6 +438,10 @@ async fn api_worker_events(
                 .data(json!({ "node_id": node_id }).to_string()))),
             Err(_) => None,
         }
+    });
+    let mut shutdown = state.shutdown.subscribe();
+    let stream = futures_util::StreamExt::take_until(stream, async move {
+        let _ = shutdown.recv().await;
     });
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }

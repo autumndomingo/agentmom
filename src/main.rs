@@ -496,6 +496,7 @@ struct WorkerWorkspacesQuery {
 #[derive(Debug, Clone)]
 struct ApiState {
     notifier: broadcast::Sender<String>,
+    shutdown: broadcast::Sender<()>,
 }
 
 #[derive(Debug)]
