@@ -1477,4 +1477,14 @@ mod tests {
         );
         Ok(())
     }
+
+    #[test]
+    fn microvm_template_exports_proxy_ca_env_for_hermes() {
+        let template = microvm_workspace_nix();
+
+        assert!(template.contains("export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt"));
+        assert!(template.contains("export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt"));
+        assert!(template.contains("REQUESTS_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt"));
+        assert!(template.contains("SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt"));
+    }
 }

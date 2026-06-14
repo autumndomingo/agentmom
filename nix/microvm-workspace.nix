@@ -14,6 +14,9 @@ let
     export ALL_PROXY=${spec.credential_proxy_url}
     export OPENAI_API_KEY=agentmom-proxy
     export OPENROUTER_API_KEY=agentmom-proxy
+    export NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/agentmom-proxy.crt
+    export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+    export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
   '';
   codexConfig = ''
     approval_policy = "never"
@@ -26,6 +29,15 @@ let
         provider: openrouter
         model: ${spec.hermes_model}
         api_key_env: OPENROUTER_API_KEY
+    env:
+      HTTP_PROXY: ${spec.credential_proxy_url}
+      HTTPS_PROXY: ${spec.credential_proxy_url}
+      ALL_PROXY: ${spec.credential_proxy_url}
+      OPENAI_API_KEY: agentmom-proxy
+      OPENROUTER_API_KEY: agentmom-proxy
+      NODE_EXTRA_CA_CERTS: /usr/local/share/ca-certificates/agentmom-proxy.crt
+      REQUESTS_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
+      SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
   '' else ''
     default_provider: openai-codex
     providers:
