@@ -214,12 +214,20 @@ EOF
     description = "Install Agent Mom pinned SSH host key";
     before = [ "sshd.service" ];
     requiredBy = [ "sshd.service" ];
-    requiresMountsFor = [ "/run/agentmom-secrets" ];
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
     };
     script = ''
+      for _ in $(${lib.getExe' pkgs.coreutils "seq"} 1 100); do
+        if [ -r /run/agentmom-secrets/ssh_host_ed25519_key ] && [ -r /run/agentmom-secrets/ssh_host_ed25519_key.pub ]; then
+          break
+        fi
+        ${lib.getExe' pkgs.coreutils "sleep"} 0.1
+      done
+
+      ${lib.getExe' pkgs.coreutils "test"} -r /run/agentmom-secrets/ssh_host_ed25519_key
+      ${lib.getExe' pkgs.coreutils "test"} -r /run/agentmom-secrets/ssh_host_ed25519_key.pub
       ${lib.getExe' pkgs.coreutils "install"} -d -m 0755 /etc/ssh
       ${lib.getExe' pkgs.coreutils "install"} -m 0600 /run/agentmom-secrets/ssh_host_ed25519_key /etc/ssh/ssh_host_ed25519_key
       ${lib.getExe' pkgs.coreutils "install"} -m 0644 /run/agentmom-secrets/ssh_host_ed25519_key.pub /etc/ssh/ssh_host_ed25519_key.pub
