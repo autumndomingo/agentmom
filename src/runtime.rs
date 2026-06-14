@@ -1504,4 +1504,13 @@ mod tests {
 
         assert!(template.contains("PerSourcePenalties = \"no\";"));
     }
+
+    #[test]
+    fn microvm_template_installs_pinned_ssh_host_key_after_keygen() {
+        let template = microvm_workspace_nix();
+
+        assert!(template.contains("after = [ \"sshd-keygen.service\" ];"));
+        assert!(template.contains("before = [ \"sshd.service\" ];"));
+        assert!(template.contains("requires = [ \"sshd-keygen.service\" ];"));
+    }
 }

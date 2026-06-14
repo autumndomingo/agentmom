@@ -227,7 +227,9 @@ EOF
   };
   systemd.services.agentmom-ssh-host-key = {
     description = "Install Agent Mom pinned SSH host key";
+    after = [ "sshd-keygen.service" ];
     before = [ "sshd.service" ];
+    requires = [ "sshd-keygen.service" ];
     requiredBy = [ "sshd.service" ];
     serviceConfig = {
       Type = "oneshot";
