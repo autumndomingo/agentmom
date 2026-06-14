@@ -1057,6 +1057,10 @@ fn workspace_events_cmd(name: &str, since: &str) -> Result<()> {
 
 async fn workspace_start(name: &str) -> Result<()> {
     let workspace = workspace_get(name)?;
+    if !workspace_is_local(&workspace)? {
+        queue_assigned_workspace_job(&workspace, "start", json!({})).await?;
+        return Ok(());
+    }
     workspace_set_desired(name, "running")?;
     workspace_touch(name)?;
     record_workspace_event(
@@ -1066,21 +1070,16 @@ async fn workspace_start(name: &str) -> Result<()> {
         "workspace desired state set to running",
         json!({ "vm": workspace.vm_name }),
     )?;
-    if workspace_is_local(&workspace)? {
-        workspace_ensure_running(&workspace).await
-    } else {
-        queue_assigned_workspace_job(&workspace, "start", json!({})).await?;
-        Ok(())
-    }
+    workspace_ensure_running(&workspace).await
 }
 
 async fn workspace_stop(name: &str) -> Result<()> {
     let workspace = workspace_get(name)?;
-    workspace_set_desired(name, "stopped")?;
     if !workspace_is_local(&workspace)? {
         queue_assigned_workspace_job(&workspace, "stop", json!({})).await?;
         return Ok(());
     }
+    workspace_set_desired(name, "stopped")?;
     if let Ok(handle) = get_vm(&workspace.vm_name).await
         && handle.status().is_running()
     {
@@ -1148,6 +1147,21 @@ fn require_workspace_local(workspace: &WorkspaceRecord, action: &str) -> Result<
     )
 }
 
+fn require_assigned_workspace_claimable(workspace: &WorkspaceRecord) -> Result<()> {
+    let node_id = workspace.node_id.as_deref().ok_or_else(|| {
+        anyhow!(
+            "workspace {} is not assigned to a worker node",
+            workspace.name
+        )
+    })?;
+    require_claimable_node(node_id).with_context(|| {
+        format!(
+            "workspace {} is assigned to node {node_id}, but that node is not accepting jobs",
+            workspace.name
+        )
+    })
+}
+
 async fn queue_assigned_workspace_job(
     workspace: &WorkspaceRecord,
     kind: &str,
@@ -1159,12 +1173,7 @@ async fn queue_assigned_workspace_job(
             workspace.name
         )
     })?;
-    if !node_allows_worker_claims(node_id)? {
-        bail!(
-            "workspace {} is assigned to node {node_id}, but that node is not accepting jobs",
-            workspace.name
-        );
-    }
+    require_assigned_workspace_claimable(workspace)?;
     let job = create_job(CreateJobRequest {
         workspace_name: workspace.name.clone(),
         node_id: Some(node_id.to_string()),

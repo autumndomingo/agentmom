@@ -387,6 +387,59 @@ async fn workspace_backup_restore_cli_rejects_stale_remote_worker() -> Result<()
 }
 
 #[tokio::test]
+async fn workspace_lifecycle_cli_rejects_stale_remote_worker_before_queueing() -> Result<()> {
+    let _guard = fleet_test_guard().await;
+    let fleet = TestFleet::start().await?;
+    insert_node(fleet.api_state.path(), "stale-node", now_epoch()? - 3600)?;
+    insert_workspace_with_state(
+        fleet.api_state.path(),
+        "stale-lifecycle",
+        "stale-node",
+        "stopped",
+        "stopped",
+    )?;
+
+    let start_status = run_mom_status(
+        fleet.api_state.path(),
+        &["workspace", "start", "stale-lifecycle"],
+    )?;
+    assert!(
+        !start_status.success(),
+        "CLI start should fail before queueing work to a stale node"
+    );
+    assert_eq!(
+        workspace_desired_state(fleet.api_state.path(), "stale-lifecycle")?,
+        "stopped",
+        "failed remote start must not change desired state"
+    );
+
+    let stop_status = run_mom_status(
+        fleet.api_state.path(),
+        &["workspace", "stop", "stale-lifecycle"],
+    )?;
+    assert!(
+        !stop_status.success(),
+        "CLI stop should fail before queueing work to a stale node"
+    );
+
+    let remove_status = run_mom_status(
+        fleet.api_state.path(),
+        &["workspace", "rm", "stale-lifecycle", "--force"],
+    )?;
+    assert!(
+        !remove_status.success(),
+        "CLI remove should fail before queueing work to a stale node"
+    );
+    assert_eq!(
+        queued_job_count(fleet.api_state.path(), "stale-lifecycle")?,
+        0,
+        "stale-node CLI lifecycle paths must not leave queued work behind"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn workspace_inspect_labels_remote_runtime_as_not_checked_locally() -> Result<()> {
     let _guard = fleet_test_guard().await;
     let fleet = TestFleet::start().await?;
@@ -625,6 +678,49 @@ async fn recover_host_reassigns_and_restores_latest_backup_on_target_node() -> R
         async move { restored_from.exists() }
     })
     .await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn recover_host_rejects_batches_that_exceed_target_capacity() -> Result<()> {
+    let _guard = fleet_test_guard().await;
+    let fleet = TestFleet::start().await?;
+    let now = now_epoch()?;
+    insert_node(fleet.api_state.path(), "source-node", now)?;
+    insert_node_with_capacity(fleet.api_state.path(), "target-node", now, 1)?;
+    insert_workspace(fleet.api_state.path(), "recover-a", "source-node")?;
+    insert_workspace(fleet.api_state.path(), "recover-b", "source-node")?;
+    insert_backup_record(fleet.api_state.path(), "recover-a", "source-node")?;
+    insert_backup_record(fleet.api_state.path(), "recover-b", "source-node")?;
+
+    let status = run_mom_status(
+        fleet.api_state.path(),
+        &[
+            "fleet",
+            "recover-host",
+            "--from",
+            "source-node",
+            "--to",
+            "target-node",
+        ],
+    )?;
+    assert!(
+        !status.success(),
+        "recovery should reject a batch that exceeds target active capacity"
+    );
+    assert_eq!(
+        workspace_count_for_node(fleet.api_state.path(), "target-node")?,
+        0,
+        "failed recovery must not move any workspace to the target"
+    );
+    assert_eq!(queued_job_count(fleet.api_state.path(), "recover-a")?, 0);
+    assert_eq!(queued_job_count(fleet.api_state.path(), "recover-b")?, 0);
+    assert_eq!(
+        node_status(fleet.api_state.path(), "source-node")?,
+        "ready",
+        "failed recovery must not mark the source offline"
+    );
 
     Ok(())
 }
@@ -2051,6 +2147,15 @@ fn queued_job_count(api_state: &Path, workspace: &str) -> Result<i64> {
     let db = Connection::open(api_state.join("fleet.db"))?;
     Ok(db.query_row(
         "SELECT COUNT(*) FROM jobs WHERE workspace_name = ?1 AND status = 'queued'",
+        [workspace],
+        |row| row.get(0),
+    )?)
+}
+
+fn workspace_desired_state(api_state: &Path, workspace: &str) -> Result<String> {
+    let db = Connection::open(api_state.join("fleet.db"))?;
+    Ok(db.query_row(
+        "SELECT desired_state FROM workspaces WHERE name = ?1",
         [workspace],
         |row| row.get(0),
     )?)

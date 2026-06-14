@@ -549,30 +549,27 @@ pub(crate) fn recover_host_with_backups(
     items: &[(WorkspaceRecord, BackupRecord)],
 ) -> Result<()> {
     ensure_fleet_schema()?;
-    let now = now_epoch()?;
-    let mut db = fleet_db()?;
-    let tx = db.transaction()?;
-
-    let target_ready: bool = tx
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM nodes WHERE node_id = ?1 AND status = 'ready'",
-            params![to],
-            |row| row.get(0),
-        )
-        .optional()?
-        .unwrap_or(false);
-    if !target_ready {
-        bail!("target node is not ready: {to}");
+    if from == to {
+        bail!("source and target nodes must be different: {from}");
     }
+    let now = now_epoch()?;
+    let stale_cutoff = now.saturating_sub(i64::try_from(env_u64("MOM_NODE_STALE_SECS", 60))?);
+    let mut db = fleet_db()?;
+    let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
+    let mut current_items = Vec::with_capacity(items.len());
+    let mut incoming_running: i64 = 0;
     for (workspace, backup) in items {
-        let current_node: Option<String> = tx
+        let current: Option<(Option<String>, String)> = tx
             .query_row(
-                "SELECT node_id FROM workspaces WHERE name = ?1 AND status != 'removed'",
+                "SELECT node_id, desired_state FROM workspaces WHERE name = ?1 AND status != 'removed'",
                 params![workspace.name],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
+        let Some((current_node, current_desired_state)) = current else {
+            bail!("workspace {} is no longer recoverable", workspace.name);
+        };
         if current_node.as_deref() != Some(from) {
             bail!(
                 "workspace {} is no longer assigned to source node {}",
@@ -580,7 +577,48 @@ pub(crate) fn recover_host_with_backups(
                 from
             );
         }
+        if current_desired_state == "running" {
+            incoming_running = incoming_running
+                .checked_add(1)
+                .ok_or_else(|| anyhow!("incoming workspace count overflowed"))?;
+        }
+        current_items.push((workspace, backup, current_desired_state));
+    }
 
+    let target_capacity = tx
+        .query_row(
+            r#"
+SELECT max_active_workspaces,
+       (
+           SELECT COUNT(*)
+           FROM workspaces
+           WHERE node_id = nodes.node_id
+             AND desired_state = 'running'
+             AND status != 'removed'
+       ) AS active_running
+FROM nodes
+WHERE node_id = ?1
+  AND status = 'ready'
+  AND worker_url IS NOT NULL
+  AND last_seen_at >= ?2
+"#,
+            params![to, stale_cutoff],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()?;
+    let Some((max_active, active_running)) = target_capacity else {
+        bail!("target node is not ready: {to}");
+    };
+    let projected_running = active_running
+        .checked_add(incoming_running)
+        .ok_or_else(|| anyhow!("target node active workspace count overflowed"))?;
+    if max_active > 0 && projected_running > max_active {
+        bail!(
+            "target node {to} does not have capacity for {incoming_running} recovered running workspace(s): {active_running}/{max_active} active"
+        );
+    }
+
+    for (workspace, backup, desired_state) in current_items {
         let superseded_output = serde_json::to_string(&json!({
             "error": "job superseded by host-loss recovery",
             "from_node": from,
@@ -644,7 +682,7 @@ INSERT INTO jobs (
                     "backup_id": backup.id,
                     "backup_location": backup.location,
                     "backup_workspace_name": backup.workspace_name,
-                    "desired_state": workspace.desired_state,
+                    "desired_state": desired_state,
                     "from_node": from,
                     "to_node": to
                 }))?,
