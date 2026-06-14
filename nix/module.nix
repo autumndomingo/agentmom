@@ -1,4 +1,4 @@
-{ config, lib, pkgs, ... }:
+{ config, lib, pkgs, defaultNixpkgsUrl ? "github:NixOS/nixpkgs/nixpkgs-unstable", defaultMicrovmNixUrl ? "github:microvm-nix/microvm.nix", ... }:
 
 let
   cfg = config.services.agentmom;
@@ -6,9 +6,6 @@ let
   json = pkgs.formats.json { };
   generatedConfigFile = json.generate "agentmom-config.json" {
     schema_version = 1;
-    runtime = {
-      snapshot_name = cfg.runtime.snapshotName;
-    };
     credentials = {
       proxy_url =
         if cfg.credentials.proxyUrl != null then cfg.credentials.proxyUrl
@@ -106,7 +103,15 @@ let
   };
   commonEnvironment = {
     MOM_STATE_DIR = cfg.stateDir;
-    MSB_HOME = cfg.microsandboxHome;
+    MOM_MICROVM_STATE_DIR = cfg.microvm.stateDir;
+    MOM_MICROVM_WORKSPACE_DIR = cfg.microvm.workspaceDir;
+    MOM_MICROVM_BRIDGE = cfg.microvm.bridge;
+    MOM_MICROVM_TAP_PREFIX = cfg.microvm.tapPrefix;
+    MOM_MICROVM_CIDR = cfg.microvm.cidr;
+    MOM_MICROVM_HOST_IP = cfg.microvm.hostAddress;
+    MOM_MICROVM_EXTERNAL_INTERFACE = cfg.microvm.externalInterface;
+    MOM_MICROVM_NIXPKGS_URL = cfg.microvm.nixpkgsUrl;
+    MOM_MICROVM_NIX_URL = cfg.microvm.microvmNixUrl;
     MOM_NODE_ID = cfg.nodeId;
     MOM_LOG_FORMAT = cfg.logFormat;
     MOM_CAPACITY_CPUS = toString cfg.capacity.cpus;
@@ -117,41 +122,97 @@ let
   // {
     MOM_CONFIG = toString effectiveConfigFile;
   }
-  // lib.optionalAttrs (cfg.microsandboxPackage != null) {
-    MSB_PATH = "${cfg.microsandboxPackage}/bin/msb";
-  }
   // lib.optionalAttrs (cfg.workerTokenFile != null) {
     MOM_WORKER_TOKEN_FILE = cfg.workerTokenFile;
   }
-  // lib.optionalAttrs (cfg.workerUrlAllowlist != [ ]) {
-    MOM_WORKER_URL_ALLOWLIST = lib.concatStringsSep "," cfg.workerUrlAllowlist;
+  // lib.optionalAttrs (effectiveWorkerUrlAllowlist != [ ]) {
+    MOM_WORKER_URL_ALLOWLIST = lib.concatStringsSep "," effectiveWorkerUrlAllowlist;
   };
+  effectiveWorkerUrlAllowlist = lib.unique (
+    cfg.workerUrlAllowlist ++ lib.optional (cfg.worker.url != null) cfg.worker.url
+  );
 
   commonPath = with pkgs; [
     bash
     coreutils
     curl
+    dbus
+    iproute2
+    nix
     openssh
     restic
-  ] ++ lib.optional (cfg.microsandboxPackage != null) cfg.microsandboxPackage;
+    systemd
+  ];
   tmpfilesReadyUnits = [
     "systemd-tmpfiles-setup.service"
     "systemd-tmpfiles-resetup.service"
   ];
+  microvmCidrAddress = builtins.head (lib.splitString "/" cfg.microvm.cidr);
+  microvmCidrOctets = lib.splitString "." microvmCidrAddress;
+  microvmCidrPrefix = lib.concatStringsSep "." (lib.take 3 microvmCidrOctets);
+  microvmBridgePrefixLength = "24";
+  microvmRunner = pkgs.writeShellScript "agentmom-microvm-runner" ''
+    set -eu
+    name="$1"
+    state_dir="${cfg.microvm.stateDir}/machines/$name"
+    cd "$state_dir"
+    virtiofsd_pid=""
+    vm_pid=""
+    cleanup() {
+      status="$?"
+      trap - EXIT INT TERM
+      if [ -n "$vm_pid" ]; then
+        kill "$vm_pid" >/dev/null 2>&1 || true
+        wait "$vm_pid" >/dev/null 2>&1 || true
+      fi
+      if [ -n "$virtiofsd_pid" ]; then
+        kill "$virtiofsd_pid" >/dev/null 2>&1 || true
+        wait "$virtiofsd_pid" >/dev/null 2>&1 || true
+      fi
+      if [ -x result/bin/tap-down ]; then
+        result/bin/tap-down >/dev/null 2>&1 || true
+      fi
+      exit "$status"
+    }
+    trap cleanup EXIT INT TERM
+    ${pkgs.nix}/bin/nix build --extra-experimental-features 'nix-command flakes' .#runner -o result
+    if [ -x result/bin/tap-up ]; then
+      result/bin/tap-up
+    fi
+    if [ -x result/bin/virtiofsd-run ]; then
+      for socket_file in result/share/microvm/virtiofs/*/socket; do
+        [ -e "$socket_file" ] || continue
+        rm -f "$(cat "$socket_file")"
+      done
+      result/bin/virtiofsd-run &
+      virtiofsd_pid="$!"
+      for socket_file in result/share/microvm/virtiofs/*/socket; do
+        [ -e "$socket_file" ] || continue
+        socket="$(cat "$socket_file")"
+        i=0
+        while [ "$i" -lt 600 ]; do
+          [ -S "$socket" ] && break
+          i=$((i + 1))
+          sleep 0.05
+        done
+        if [ ! -S "$socket" ]; then
+          echo "timed out waiting for virtiofs socket $socket" >&2
+          exit 1
+        fi
+      done
+    fi
+    result/bin/microvm-run &
+    vm_pid="$!"
+    wait "$vm_pid"
+  '';
 in
 {
   options.services.agentmom = {
-    enable = lib.mkEnableOption "Agent Mom microsandbox workspace worker";
+    enable = lib.mkEnableOption "Agent Mom workspace worker";
 
     package = lib.mkOption {
       type = lib.types.package;
       description = "Package that provides the mom binary.";
-    };
-
-    microsandboxPackage = lib.mkOption {
-      type = lib.types.nullOr lib.types.package;
-      default = null;
-      description = "Package that provides the msb binary and libkrunfw runtime bundle.";
     };
 
     user = lib.mkOption {
@@ -178,10 +239,65 @@ in
       description = "Directory for Agent Mom's SQLite catalog and local backup fallback.";
     };
 
-    microsandboxHome = lib.mkOption {
-      type = lib.types.str;
-      default = "/var/lib/agentmom/microsandbox";
-      description = "MSB_HOME used by microsandbox on this worker.";
+    microvm = {
+      enable = lib.mkEnableOption "cold-start microvm.nix workspace runtime";
+
+      stateDir = lib.mkOption {
+        type = lib.types.str;
+        default = "${cfg.stateDir}/microvms";
+        description = "Directory containing generated microvm.nix workspace flakes and runtime metadata.";
+      };
+
+      workspaceDir = lib.mkOption {
+        type = lib.types.str;
+        default = "${cfg.microvm.stateDir}/workspaces";
+        description = "Host directory containing per-workspace directories shared into guests with virtiofs.";
+      };
+
+      bridge = lib.mkOption {
+        type = lib.types.str;
+        default = "agentmom0";
+        description = "Host bridge that microvm.nix tap devices attach to.";
+      };
+
+      tapPrefix = lib.mkOption {
+        type = lib.types.str;
+        default = "amvm";
+        description = "Prefix used by generated tap device names.";
+      };
+
+      cidr = lib.mkOption {
+        type = lib.types.str;
+        default = "192.168.83.0/24";
+        description = "IPv4 CIDR reserved for Agent Mom microVM guests.";
+      };
+
+      hostAddress = lib.mkOption {
+        type = lib.types.str;
+        default = "192.168.83.1";
+        description = "Host bridge address used as the guest default gateway.";
+      };
+
+      externalInterface = lib.mkOption {
+        type = lib.types.str;
+        default = "eth0";
+        description = "Host interface used for microVM guest NAT.";
+      };
+
+      nixpkgsUrl = lib.mkOption {
+        type = lib.types.str;
+        default = defaultNixpkgsUrl;
+        defaultText = lib.literalExpression ''"path:/nix/store/...-source"'';
+        description = "Nixpkgs flake URL used by generated microvm.nix workspace flakes.";
+      };
+
+      microvmNixUrl = lib.mkOption {
+        type = lib.types.str;
+        default = defaultMicrovmNixUrl;
+        defaultText = lib.literalExpression ''"path:/nix/store/...-source"'';
+        description = "microvm.nix flake URL used by generated workspace flakes.";
+      };
+
     };
 
     nodeId = lib.mkOption {
@@ -202,14 +318,6 @@ in
       description = "Optional externally managed Agent Mom config.json. When unset, the module generates a structured non-secret config.";
     };
 
-    runtime = {
-      snapshotName = lib.mkOption {
-        type = lib.types.nullOr lib.types.str;
-        default = null;
-        description = "Required microsandbox base snapshot name used for new workspaces.";
-      };
-    };
-
     credentials = {
       proxyUrl = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
@@ -228,7 +336,7 @@ in
       hermesProfile = lib.mkOption {
         type = lib.types.str;
         default = "main";
-        description = "Hermes profile name created inside guest sandboxes.";
+        description = "Hermes profile name created inside guest VMs.";
       };
 
       model = lib.mkOption {
@@ -437,31 +545,15 @@ in
         description = "Optional runtime environment file with RESTIC_* and S3-compatible credentials for workspace backups.";
       };
 
-      ensureBaseSnapshot = lib.mkOption {
+      ensureRuntime = lib.mkOption {
         type = lib.types.bool;
         default = true;
-        description = "Run mom node ensure-base before starting the worker so deploys fail unless the required versioned base snapshot exists and passes doctor.";
-      };
-    };
-
-    ui = {
-      enable = lib.mkEnableOption "serving the Agent Mom web UI from agentmom-api";
-
-      bind = lib.mkOption {
-        type = lib.types.str;
-        default = "127.0.0.1:8787";
-        description = "Deprecated. The UI is now served by agentmom-api.";
-      };
-
-      apiUrl = lib.mkOption {
-        type = lib.types.str;
-        default = "http://127.0.0.1:8080";
-        description = "Deprecated. The browser uses same-origin /api routes.";
+        description = "Run mom node ensure-runtime before starting the worker so deploys fail unless the microvm.nix host prerequisites are present.";
       };
     };
 
     credentialProxy = {
-      enable = lib.mkEnableOption "iron-proxy credential injection for Agent Mom sandboxes";
+      enable = lib.mkEnableOption "iron-proxy credential injection for Agent Mom guests";
 
       package = lib.mkOption {
         type = lib.types.nullOr lib.types.package;
@@ -477,8 +569,8 @@ in
 
       tunnelListen = lib.mkOption {
         type = lib.types.str;
-        default = "0.0.0.0:1080";
-        description = "CONNECT/SOCKS5 listener used by sandbox HTTP(S)_PROXY settings.";
+        default = "${cfg.microvm.hostAddress}:1080";
+        description = "CONNECT/SOCKS5 listener used by guest HTTP(S)_PROXY settings.";
       };
 
       httpListen = lib.mkOption {
@@ -501,14 +593,14 @@ in
 
       guestProxyUrl = lib.mkOption {
         type = lib.types.str;
-        default = "http://192.168.83.1:1080";
+        default = "http://${cfg.microvm.hostAddress}:1080";
         description = "Proxy URL written into Agent Mom guest configuration.";
       };
 
       caCert = lib.mkOption {
         type = lib.types.str;
         default = "${cfg.credentialProxy.stateDir}/ca.crt";
-        description = "CA certificate path trusted by sandboxes.";
+        description = "CA certificate path trusted by guests.";
       };
 
       caKey = lib.mkOption {
@@ -588,36 +680,63 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    users.groups = lib.mkIf cfg.createUser {
-      ${cfg.group} = { };
-    };
-    users.users = lib.mkIf cfg.createUser {
-      ${cfg.user} = {
-        isSystemUser = true;
-        group = cfg.group;
-        home = cfg.stateDir;
-        createHome = true;
-        extraGroups = [ "kvm" ];
+    users.groups =
+      lib.optionalAttrs cfg.createUser {
+        ${cfg.group} = { };
+      }
+      // lib.optionalAttrs cfg.microvm.enable {
+        microvm = { };
       };
-    };
+    users.users =
+      lib.optionalAttrs cfg.createUser {
+        ${cfg.user} = {
+          isSystemUser = true;
+          group = cfg.group;
+          home = cfg.stateDir;
+          createHome = true;
+          extraGroups = [ "kvm" ];
+        };
+      }
+      // lib.optionalAttrs cfg.microvm.enable {
+        microvm = {
+          isSystemUser = true;
+          group = "microvm";
+          extraGroups = [ "kvm" ];
+        };
+      };
 
     systemd.tmpfiles.rules = [
       "d ${cfg.stateDir} 0750 ${cfg.user} ${cfg.group} - -"
-      "d ${cfg.microsandboxHome} 0750 ${cfg.user} ${cfg.group} - -"
+    ] ++ lib.optionals cfg.microvm.enable [
+      "d ${cfg.microvm.stateDir} 0750 ${cfg.user} ${cfg.group} - -"
+      "d ${cfg.microvm.stateDir}/machines 0750 ${cfg.user} ${cfg.group} - -"
+      "d ${cfg.microvm.workspaceDir} 0750 ${cfg.user} ${cfg.group} - -"
     ] ++ lib.optionals cfg.catalogBackup.enable [
       "d ${cfg.catalogBackup.outputDir} 0750 ${cfg.user} ${cfg.group} - -"
     ] ++ lib.optionals cfg.credentialProxy.enable [
       "d ${cfg.credentialProxy.stateDir} 0755 root root - -"
     ];
 
+    networking.firewall.interfaces = lib.mkIf (cfg.microvm.enable && cfg.credentialProxy.enable) {
+      ${cfg.microvm.bridge}.allowedTCPPorts = [ 1080 ];
+    };
+
+    networking.nat = lib.mkIf cfg.microvm.enable {
+      enable = true;
+      externalInterface = cfg.microvm.externalInterface;
+      internalInterfaces = [ cfg.microvm.bridge ];
+    };
+
+    boot.kernelModules = lib.mkIf cfg.microvm.enable [
+      "bridge"
+      "tap"
+      "vhost_net"
+    ];
+
     assertions = [
       {
         assertion = !cfg.worker.enable || cfg.worker.apiUrl != null;
         message = "services.agentmom.worker.apiUrl is required when services.agentmom.worker.enable is true.";
-      }
-      {
-        assertion = !cfg.ui.enable || cfg.api.enable;
-        message = "services.agentmom.api.enable is required when services.agentmom.ui.enable is true.";
       }
       {
         assertion = !cfg.api.enable || cfg.configFile != null || cfg.auth.secretFile != null;
@@ -628,20 +747,32 @@ in
         message = "services.agentmom.credentialProxy.package is required when credentialProxy.enable is true.";
       }
       {
+        assertion = !cfg.credentialProxy.enable || cfg.credentialProxy.openaiApiKeyFile != null || cfg.credentialProxy.openrouterApiKeyFile != null;
+        message = "services.agentmom.credentialProxy.openaiApiKeyFile or openrouterApiKeyFile is required when credentialProxy.enable is true.";
+      }
+      {
+        assertion = !cfg.worker.enable || cfg.microvm.enable;
+        message = "services.agentmom.microvm.enable is required when services.agentmom.worker.enable is true.";
+      }
+      {
+        assertion = !cfg.microvm.enable || builtins.match "[0-9]+\\.[0-9]+\\.[0-9]+\\.0/24" cfg.microvm.cidr != null;
+        message = "services.agentmom.microvm.cidr must be a /24 network ending in .0, for example 192.168.83.0/24.";
+      }
+      {
+        assertion = !cfg.microvm.enable || cfg.microvm.hostAddress == "${microvmCidrPrefix}.1";
+        message = "services.agentmom.microvm.hostAddress must be the .1 address inside services.agentmom.microvm.cidr.";
+      }
+      {
         assertion = !(cfg.api.enable || cfg.worker.enable) || cfg.workerTokenFile != null;
         message = "services.agentmom.workerTokenFile is required when the Agent Mom API or worker service is enabled.";
       }
       {
-        assertion = !cfg.worker.enable || cfg.configFile != null || cfg.runtime.snapshotName != null;
-        message = "services.agentmom.runtime.snapshotName is required when the generated config is used by services.agentmom.worker.";
+        assertion = cfg.configFile != null || !cfg.worker.enable || cfg.credentials.proxyUrl != null || cfg.credentialProxy.enable;
+        message = "services.agentmom.credentials.proxyUrl or services.agentmom.credentialProxy.enable is required for workers when the generated config is used.";
       }
       {
-        assertion = cfg.configFile != null || cfg.credentials.proxyUrl != null || cfg.credentialProxy.enable;
-        message = "services.agentmom.credentials.proxyUrl or services.agentmom.credentialProxy.enable is required when the generated config is used.";
-      }
-      {
-        assertion = cfg.configFile != null || cfg.credentials.proxyCaPath != null || cfg.credentialProxy.enable;
-        message = "services.agentmom.credentials.proxyCaPath or services.agentmom.credentialProxy.enable is required when the generated config is used.";
+        assertion = cfg.configFile != null || !cfg.worker.enable || cfg.credentials.proxyCaPath != null || cfg.credentialProxy.enable;
+        message = "services.agentmom.credentials.proxyCaPath or services.agentmom.credentialProxy.enable is required for workers when the generated config is used.";
       }
       {
         assertion = !cfg.catalogBackup.enable || cfg.api.enable;
@@ -659,7 +790,7 @@ in
       after = [ "network-online.target" ] ++ tmpfilesReadyUnits;
       wants = [ "network-online.target" ];
       path = commonPath;
-      environment = commonEnvironment // lib.optionalAttrs cfg.ui.enable {
+      environment = commonEnvironment // {
         MOM_UI_DIST = "${cfg.package}/share/agentmom/ui";
       };
       serviceConfig = {
@@ -694,12 +825,12 @@ in
       };
       serviceConfig = {
         Type = "simple";
-        User = cfg.user;
-        Group = cfg.group;
-        ExecStartPre = lib.optional cfg.worker.ensureBaseSnapshot (pkgs.writeShellScript "agentmom-worker-ensure-base" ''
+        User = "root";
+        Group = "root";
+        ExecStartPre = lib.optional cfg.worker.ensureRuntime (pkgs.writeShellScript "agentmom-worker-ensure-runtime" ''
           set -eu
           ${cfg.package}/bin/mom config doctor
-          ${cfg.package}/bin/mom node ensure-base
+          ${cfg.package}/bin/mom node ensure-runtime
         '');
         ExecStart = "${cfg.package}/bin/mom worker --interval ${toString cfg.worker.intervalSeconds}";
         Restart = "always";
@@ -709,6 +840,62 @@ in
         WorkingDirectory = cfg.stateDir;
       } // lib.optionalAttrs (cfg.worker.resticEnvFile != null) {
         EnvironmentFile = cfg.worker.resticEnvFile;
+      };
+    };
+
+    systemd.services.agentmom-microvm-bridge = lib.mkIf cfg.microvm.enable {
+      description = "Agent Mom microvm.nix guest bridge";
+      wantedBy = [ "multi-user.target" ];
+      after = tmpfilesReadyUnits;
+      path = [ pkgs.iproute2 ];
+      unitConfig.RequiresMountsFor = [
+        cfg.microvm.stateDir
+        cfg.microvm.workspaceDir
+      ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+      };
+      script = ''
+        if ! ip link show ${lib.escapeShellArg cfg.microvm.bridge} >/dev/null 2>&1; then
+          ip link add ${lib.escapeShellArg cfg.microvm.bridge} type bridge
+        fi
+        ip addr replace ${lib.escapeShellArg cfg.microvm.hostAddress}/${microvmBridgePrefixLength} dev ${lib.escapeShellArg cfg.microvm.bridge}
+        ip link set ${lib.escapeShellArg cfg.microvm.bridge} up
+      '';
+    };
+
+    systemd.services."agentmom-microvm@" = lib.mkIf cfg.microvm.enable {
+      description = "Agent Mom microvm.nix workspace %i";
+      after = [
+        "agentmom-microvm-bridge.service"
+        "network-online.target"
+      ] ++ tmpfilesReadyUnits;
+      wants = [
+        "agentmom-microvm-bridge.service"
+        "network-online.target"
+      ];
+      requires = [ "agentmom-microvm-bridge.service" ];
+      path = commonPath ++ [
+        pkgs.iproute2
+        pkgs.nix
+      ];
+      environment = commonEnvironment;
+      unitConfig.RequiresMountsFor = [
+        cfg.microvm.stateDir
+        cfg.microvm.workspaceDir
+      ];
+      serviceConfig = {
+        Type = "simple";
+        User = "root";
+        Group = "root";
+        ExecStart = "${microvmRunner} %i";
+        Restart = "on-failure";
+        RestartSec = "2s";
+        WorkingDirectory = cfg.microvm.stateDir;
+        KillMode = "mixed";
+        TimeoutStartSec = "30min";
+        TimeoutStopSec = "20s";
       };
     };
 
@@ -799,8 +986,9 @@ in
     systemd.services.agentmom-credential-proxy = lib.mkIf cfg.credentialProxy.enable {
       description = "Agent Mom credential egress proxy";
       wantedBy = [ "multi-user.target" ];
-      after = [ "network-online.target" ];
-      wants = [ "network-online.target" ];
+      after = [ "network-online.target" ] ++ lib.optionals cfg.microvm.enable [ "agentmom-microvm-bridge.service" ];
+      wants = [ "network-online.target" ] ++ lib.optionals cfg.microvm.enable [ "agentmom-microvm-bridge.service" ];
+      requires = lib.optionals cfg.microvm.enable [ "agentmom-microvm-bridge.service" ];
       path = [ pkgs.openssl ];
       serviceConfig = {
         Type = "simple";

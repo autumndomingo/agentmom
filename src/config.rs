@@ -1,4 +1,7 @@
-use std::{env, fs, path::PathBuf};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -10,20 +13,11 @@ pub(crate) struct MomConfig {
     #[serde(default = "default_schema_version")]
     pub(crate) schema_version: u32,
     #[serde(default)]
-    pub(crate) runtime: RuntimeConfig,
-    #[serde(default)]
     pub(crate) credentials: CredentialConfig,
     #[serde(default)]
     pub(crate) guest: GuestConfig,
     #[serde(default)]
     pub(crate) auth: AuthConfig,
-}
-
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RuntimeConfig {
-    #[serde(default)]
-    pub(crate) snapshot_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -63,15 +57,6 @@ pub(crate) struct AuthConfig {
 }
 
 impl MomConfig {
-    pub(crate) fn snapshot_name(&self) -> Result<&str> {
-        self.runtime
-            .snapshot_name
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| anyhow!("runtime.snapshot_name is required"))
-    }
-
     pub(crate) fn hermes_profile(&self) -> &str {
         &self.guest.hermes_profile
     }
@@ -107,7 +92,6 @@ impl MomConfig {
     }
 
     pub(crate) fn validate_for_node(&self) -> Result<()> {
-        self.snapshot_name()?;
         self.validate_referenced_files()?;
         Ok(())
     }
@@ -129,9 +113,6 @@ impl MomConfig {
     pub(crate) fn redacted_json(&self) -> serde_json::Value {
         json!({
             "schema_version": self.schema_version,
-            "runtime": {
-                "snapshot_name": self.runtime.snapshot_name,
-            },
             "credentials": {
                 "proxy_url": self.credentials.proxy_url,
                 "proxy_ca_path": self.credentials.proxy_ca_path.as_ref().map(|p| p.display().to_string()),
@@ -166,7 +147,7 @@ pub(crate) fn config_path() -> Result<PathBuf> {
     }
 }
 
-pub(crate) fn resolve_required_file(path: &PathBuf, key: &str) -> Result<PathBuf> {
+pub(crate) fn resolve_required_file(path: &Path, key: &str) -> Result<PathBuf> {
     let expanded = expand_tilde(path)?;
     expanded.canonicalize().with_context(|| {
         format!(
@@ -198,7 +179,7 @@ fn required_config_secret(
     bail!("{inline_key} or {file_key} is required");
 }
 
-pub(crate) fn expand_tilde(path: &PathBuf) -> Result<PathBuf> {
+pub(crate) fn expand_tilde(path: &Path) -> Result<PathBuf> {
     let raw = path.to_string_lossy();
     if raw == "~" {
         return home_dir();
@@ -206,7 +187,7 @@ pub(crate) fn expand_tilde(path: &PathBuf) -> Result<PathBuf> {
     if let Some(rest) = raw.strip_prefix("~/") {
         return Ok(home_dir()?.join(rest));
     }
-    Ok(path.clone())
+    Ok(path.to_path_buf())
 }
 
 pub(crate) fn home_dir() -> Result<PathBuf> {
@@ -238,7 +219,6 @@ mod tests {
         let config = parse_config(
             r#"{
               "schema_version": 1,
-              "runtime": { "snapshot_name": "mom-base-abc123" },
               "credentials": {
                 "proxy_url": "http://127.0.0.1:1080",
                 "proxy_ca_path": "/tmp/ca.crt"
@@ -253,7 +233,6 @@ mod tests {
             }"#,
         );
 
-        assert_eq!(config.snapshot_name().unwrap(), "mom-base-abc123");
         assert_eq!(config.model(), "openai/gpt-5.5");
         assert_eq!(config.auth_secret().unwrap(), "dev-secret");
         assert_eq!(config.credential_proxy_url(), Some("http://127.0.0.1:1080"));
@@ -263,8 +242,7 @@ mod tests {
     fn missing_proxy_credentials_are_invalid_for_guest_config() {
         let config = parse_config(
             r#"{
-              "schema_version": 1,
-              "runtime": { "snapshot_name": "mom-base-default" }
+              "schema_version": 1
             }"#,
         );
 

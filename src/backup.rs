@@ -4,24 +4,28 @@ pub(crate) async fn backup_workspace(
     workspace: &WorkspaceRecord,
     leave_stopped: bool,
 ) -> Result<()> {
-    let volume_path = microsandbox_volume_path(&workspace.volume_name)?;
-    if !volume_path.exists() {
-        return backup_workspace_via_worker(workspace, leave_stopped, &volume_path).await;
+    let workspace_dir_path = workspace_dir_path(&workspace.workspace_dir_name)?;
+    if !workspace_assigned_to_local(workspace)? {
+        return backup_workspace_via_worker(workspace, leave_stopped, Some(&workspace_dir_path))
+            .await;
+    }
+    if !workspace_dir_path.exists() {
+        return backup_workspace_via_worker(workspace, leave_stopped, Some(&workspace_dir_path))
+            .await;
     }
 
-    let was_running = match Sandbox::get(&workspace.sandbox_name).await {
+    let was_running = match get_vm(&workspace.vm_name).await {
         Ok(handle) => {
-            let running = handle.status() == SandboxStatus::Running
-                || handle.status() == SandboxStatus::Draining;
+            let running = handle.status().is_running();
             if running {
                 record_workspace_event(
                     &workspace.name,
                     "backup_stop_started",
                     "running",
                     "stopping workspace before backup",
-                    json!({ "sandbox": workspace.sandbox_name }),
+                    json!({ "vm": workspace.vm_name }),
                 )?;
-                println!("stopping {} before backup", workspace.sandbox_name);
+                println!("stopping {} before backup", workspace.vm_name);
                 handle.stop_with_timeout(Duration::from_secs(20)).await?;
                 workspace_mark_status(&workspace.name, "backup-stopped")?;
             }
@@ -40,19 +44,19 @@ pub(crate) async fn backup_workspace(
         &workspace.name,
         "workspace_backup_started",
         "running",
-        "workspace volume backup started",
-        json!({ "volume": workspace.volume_name }),
+        "workspace directory backup started",
+        json!({ "workspace_dir": workspace.workspace_dir_name }),
     )?;
-    let artifact = run_restic_backup(workspace, &volume_path).await?;
+    let artifact = run_restic_backup(workspace, &workspace_dir_path).await?;
     let backup_id = record_backup_artifact(workspace, &artifact, "succeeded")?;
     workspace_mark_backup(&workspace.name)?;
     record_workspace_event(
         &workspace.name,
         "workspace_backup_succeeded",
         "succeeded",
-        "workspace volume backup completed",
+        "workspace directory backup completed",
         json!({
-            "volume": workspace.volume_name,
+            "workspace_dir": workspace.workspace_dir_name,
             "backup_id": backup_id,
             "kind": artifact.kind,
             "location": artifact.location
@@ -68,21 +72,22 @@ pub(crate) async fn backup_workspace(
 async fn backup_workspace_via_worker(
     workspace: &WorkspaceRecord,
     leave_stopped: bool,
-    missing_volume_path: &Path,
+    local_workspace_dir_path: Option<&Path>,
 ) -> Result<()> {
     let Some(node_id) = workspace.node_id.as_deref() else {
         bail!(
-            "workspace volume {} does not exist at {}, and workspace {} is not assigned to a worker node",
-            workspace.volume_name,
-            missing_volume_path.display(),
+            "workspace directory {} does not exist at {}, and workspace {} is not assigned to a worker node",
+            workspace.workspace_dir_name,
+            local_workspace_dir_path
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "-".to_string()),
             workspace.name
         );
     };
     if !node_allows_worker_claims(node_id)? {
         bail!(
-            "workspace volume {} does not exist at {}, and assigned node {node_id} is not accepting jobs",
-            workspace.volume_name,
-            missing_volume_path.display()
+            "workspace {} is assigned to node {node_id}, but that node is not accepting jobs",
+            workspace.workspace_dir_name,
         );
     }
     let job = create_job(CreateJobRequest {
@@ -95,22 +100,22 @@ async fn backup_workspace_via_worker(
         "queued backup job {} for workspace {} on node {}",
         job.id, workspace.name, node_id
     );
-    wait_for_backup_job(&job.id).await?;
+    wait_for_worker_job("backup", &job.id).await?;
     Ok(())
 }
 
-async fn wait_for_backup_job(job_id: &str) -> Result<()> {
+pub(crate) async fn wait_for_worker_job(kind: &str, job_id: &str) -> Result<JobRecord> {
     let deadline = now_epoch()?.saturating_add(900);
     loop {
         let job = job_get(job_id)?;
         match job.status.as_str() {
             "succeeded" => {
-                println!("backup job {job_id} succeeded");
-                return Ok(());
+                println!("{kind} job {job_id} succeeded");
+                return Ok(job);
             }
             "failed" | "canceled" => {
                 bail!(
-                    "backup job {job_id} ended with status {}: {}",
+                    "{kind} job {job_id} ended with status {}: {}",
                     job.status,
                     job.output_json
                         .as_deref()
@@ -120,7 +125,7 @@ async fn wait_for_backup_job(job_id: &str) -> Result<()> {
             _ => {
                 if now_epoch()? >= deadline {
                     bail!(
-                        "timed out waiting for backup job {job_id}; current status is {}",
+                        "timed out waiting for {kind} job {job_id}; current status is {}",
                         job.status
                     );
                 }
@@ -132,7 +137,7 @@ async fn wait_for_backup_job(job_id: &str) -> Result<()> {
 
 pub(crate) async fn run_restic_backup(
     workspace: &WorkspaceRecord,
-    volume_path: &Path,
+    workspace_dir_path: &Path,
 ) -> Result<BackupArtifact> {
     if env::var_os("RESTIC_REPOSITORY").is_none() {
         bail!("RESTIC_REPOSITORY must be set before workspace backups can run");
@@ -145,7 +150,7 @@ pub(crate) async fn run_restic_backup(
     let output = TokioCommand::new("restic")
         .arg("backup")
         .arg("--json")
-        .arg(volume_path)
+        .arg(workspace_dir_path)
         .arg("--tag")
         .arg("agentmom")
         .arg("--tag")
@@ -196,7 +201,6 @@ pub(crate) fn workspace_backups(name: &str) -> Result<()> {
 
 pub(crate) async fn workspace_restore(name: &str, backup_id: Option<&str>) -> Result<()> {
     let workspace = workspace_get(name)?;
-    workspace_stop(name).await?;
     let backup = match backup_id {
         Some(id) => backup_record_get(id)?,
         None => latest_restic_backup(name)?,
@@ -208,24 +212,78 @@ pub(crate) async fn workspace_restore(name: &str, backup_id: Option<&str>) -> Re
             backup.kind
         );
     }
-    let volume_path = microsandbox_volume_path(&workspace.volume_name)?;
-    run_restic_restore(&backup.id, &backup.location, &volume_path).await?;
+    if backup.workspace_name != workspace.name {
+        bail!(
+            "backup {} belongs to workspace {}, not {}",
+            backup.id,
+            backup.workspace_name,
+            workspace.name
+        );
+    }
+    if !workspace_assigned_to_local(&workspace)? {
+        return restore_workspace_via_worker(&workspace, &backup).await;
+    }
+    workspace_stop(name).await?;
+    let workspace_dir_path = workspace_dir_path(&workspace.workspace_dir_name)?;
+    run_restic_restore(&backup.id, &backup.location, &workspace_dir_path).await?;
     workspace_mark_status(name, "restored")?;
     record_workspace_event(
         name,
         "workspace_restored",
         "succeeded",
-        "workspace volume restored from backup",
+        "workspace directory restored from backup",
         json!({ "backup_id": backup.id, "location": backup.location }),
     )?;
     println!("restored workspace {name} from {}", backup.id);
     Ok(())
 }
 
+async fn restore_workspace_via_worker(
+    workspace: &WorkspaceRecord,
+    backup: &BackupRecord,
+) -> Result<()> {
+    let Some(node_id) = workspace.node_id.as_deref() else {
+        bail!(
+            "workspace {} is not assigned to a worker node; cannot queue restore",
+            workspace.name
+        );
+    };
+    if !node_allows_worker_claims(node_id)? {
+        bail!(
+            "workspace {} is assigned to node {node_id}, but that node is not accepting jobs",
+            workspace.name
+        );
+    }
+    let job = create_job(CreateJobRequest {
+        workspace_name: workspace.name.clone(),
+        node_id: Some(node_id.to_string()),
+        kind: "restore".to_string(),
+        payload: json!({
+            "backup_id": backup.id,
+            "backup_location": backup.location,
+            "backup_workspace_name": backup.workspace_name,
+            "desired_state": workspace.desired_state
+        }),
+    })?;
+    println!(
+        "queued restore job {} for workspace {} on node {}",
+        job.id, workspace.name, node_id
+    );
+    wait_for_worker_job("restore", &job.id).await?;
+    Ok(())
+}
+
+fn workspace_assigned_to_local(workspace: &WorkspaceRecord) -> Result<bool> {
+    let Some(assigned_node) = workspace.node_id.as_deref() else {
+        return Ok(true);
+    };
+    Ok(assigned_node == node_id()?)
+}
+
 pub(crate) async fn run_restic_restore(
     backup_id: &str,
     backup_location: &str,
-    volume_path: &Path,
+    workspace_dir_path: &Path,
 ) -> Result<()> {
     if env::var_os("RESTIC_REPOSITORY").is_none() {
         bail!("RESTIC_REPOSITORY must be set before workspace restore can run");
@@ -238,17 +296,20 @@ pub(crate) async fn run_restic_restore(
         .map(|(_, snapshot)| snapshot)
         .filter(|snapshot| !snapshot.is_empty())
         .ok_or_else(|| anyhow!("backup {backup_id} is missing restic snapshot id"))?;
-    let parent = volume_path
-        .parent()
-        .ok_or_else(|| anyhow!("volume path has no parent: {}", volume_path.display()))?;
+    let parent = workspace_dir_path.parent().ok_or_else(|| {
+        anyhow!(
+            "workspace directory has no parent: {}",
+            workspace_dir_path.display()
+        )
+    })?;
     fs::create_dir_all(parent)?;
-    let volume_name = volume_path
+    let workspace_dir_name = workspace_dir_path
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| {
             anyhow!(
-                "volume path has no final component: {}",
-                volume_path.display()
+                "workspace directory path has no final component: {}",
+                workspace_dir_path.display()
             )
         })?;
     let restore_tmp = parent.join(format!(".restore-{backup_id}"));
@@ -269,40 +330,41 @@ pub(crate) async fn run_restic_restore(
     if !status.success() {
         bail!("restic restore exited with {status}");
     }
-    let restored_volume = restored_volume_path(&restore_tmp, volume_path, volume_name)?;
-    let previous_volume = parent.join(format!(".pre-restore-{backup_id}"));
-    if previous_volume.exists() {
-        fs::remove_dir_all(&previous_volume).with_context(|| {
+    let restored_workspace_dir =
+        restored_workspace_dir_path(&restore_tmp, workspace_dir_path, workspace_dir_name)?;
+    let previous_workspace_dir = parent.join(format!(".pre-restore-{backup_id}"));
+    if previous_workspace_dir.exists() {
+        fs::remove_dir_all(&previous_workspace_dir).with_context(|| {
             format!(
                 "remove stale previous restore dir {}",
-                previous_volume.display()
+                previous_workspace_dir.display()
             )
         })?;
     }
-    if volume_path.exists() {
-        fs::rename(volume_path, &previous_volume).with_context(|| {
+    if workspace_dir_path.exists() {
+        fs::rename(workspace_dir_path, &previous_workspace_dir).with_context(|| {
             format!(
-                "move current volume {} aside to {}",
-                volume_path.display(),
-                previous_volume.display()
+                "move current workspace directory {} aside to {}",
+                workspace_dir_path.display(),
+                previous_workspace_dir.display()
             )
         })?;
     }
-    fs::rename(&restored_volume, volume_path).with_context(|| {
-        if previous_volume.exists() && !volume_path.exists() {
-            let _ = fs::rename(&previous_volume, volume_path);
+    fs::rename(&restored_workspace_dir, workspace_dir_path).with_context(|| {
+        if previous_workspace_dir.exists() && !workspace_dir_path.exists() {
+            let _ = fs::rename(&previous_workspace_dir, workspace_dir_path);
         }
         format!(
-            "move restored volume {} to {}",
-            restored_volume.display(),
-            volume_path.display()
+            "move restored workspace directory {} to {}",
+            restored_workspace_dir.display(),
+            workspace_dir_path.display()
         )
     })?;
-    if previous_volume.exists() {
-        fs::remove_dir_all(&previous_volume).with_context(|| {
+    if previous_workspace_dir.exists() {
+        fs::remove_dir_all(&previous_workspace_dir).with_context(|| {
             format!(
-                "remove previous restored volume {}",
-                previous_volume.display()
+                "remove previous restored workspace directory {}",
+                previous_workspace_dir.display()
             )
         })?;
     }
@@ -311,7 +373,11 @@ pub(crate) async fn run_restic_restore(
     Ok(())
 }
 
-fn restored_volume_path(root: &Path, original_path: &Path, volume_name: &str) -> Result<PathBuf> {
+fn restored_workspace_dir_path(
+    root: &Path,
+    original_path: &Path,
+    workspace_dir_name: &str,
+) -> Result<PathBuf> {
     if let Ok(relative) = original_path.strip_prefix("/") {
         let path = root.join(relative);
         if path.exists() {
@@ -324,10 +390,10 @@ fn restored_volume_path(root: &Path, original_path: &Path, volume_name: &str) ->
             return Ok(path);
         }
     }
-    find_dir_named(root, volume_name)?.ok_or_else(|| {
+    find_dir_named(root, workspace_dir_name)?.ok_or_else(|| {
         anyhow!(
-            "restic restore did not contain volume {} under {}",
-            volume_name,
+            "restic restore did not contain workspace directory {} under {}",
+            workspace_dir_name,
             root.display()
         )
     })

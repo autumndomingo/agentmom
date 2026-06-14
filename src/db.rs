@@ -1,6 +1,6 @@
 use super::*;
 
-pub(crate) const FLEET_SCHEMA_VERSION: i64 = 2;
+pub(crate) const FLEET_SCHEMA_VERSION: i64 = 3;
 
 const NODE_HAS_CAPACITY_SQL: &str = r#"
 max_active_workspaces = 0 OR (
@@ -39,19 +39,19 @@ CREATE TABLE IF NOT EXISTS schema_version (
 
 CREATE TABLE IF NOT EXISTS workspaces (
     name TEXT PRIMARY KEY,
-    workspace_id TEXT UNIQUE,
-    slug TEXT UNIQUE,
-    display_name TEXT,
+    workspace_id TEXT NOT NULL UNIQUE,
+    slug TEXT NOT NULL UNIQUE,
+    display_name TEXT NOT NULL,
     user_id TEXT NOT NULL,
     owner_user_id INTEGER,
     agent_name TEXT,
-    sandbox_name TEXT NOT NULL UNIQUE,
-    volume_name TEXT NOT NULL UNIQUE,
+    vm_name TEXT NOT NULL UNIQUE,
+    workspace_dir_name TEXT NOT NULL UNIQUE,
     node_id TEXT,
     desired_state TEXT NOT NULL,
     cpus INTEGER NOT NULL,
     memory_mib INTEGER NOT NULL,
-    volume_quota_mib INTEGER NOT NULL,
+    workspace_quota_mib INTEGER NOT NULL,
     status TEXT NOT NULL,
     idle_timeout_secs INTEGER NOT NULL,
     backup_interval_secs INTEGER NOT NULL,
@@ -130,16 +130,10 @@ CREATE INDEX IF NOT EXISTS idx_service_tunnels_workspace
 ON service_tunnels (workspace_name, service);
 "#,
     )?;
-    add_column_if_missing(&db, "workspaces", "node_id", "TEXT")?;
-    add_column_if_missing(&db, "workspaces", "workspace_id", "TEXT")?;
-    add_column_if_missing(&db, "workspaces", "slug", "TEXT")?;
-    add_column_if_missing(&db, "workspaces", "display_name", "TEXT")?;
-    add_column_if_missing(&db, "workspaces", "owner_user_id", "INTEGER")?;
-    add_column_if_missing(&db, "workspaces", "agent_name", "TEXT")?;
-    add_column_if_missing(&db, "nodes", "worker_url", "TEXT")?;
     ensure_auth_schema(&db)?;
-    backfill_workspace_identity(&db)?;
-    migrate_fleet_schema(&db, current)?;
+    if current == 0 {
+        set_schema_version(&db, FLEET_SCHEMA_VERSION)?;
+    }
     Ok(())
 }
 
@@ -194,73 +188,19 @@ WHERE owner_user_id IS NOT NULL;
     Ok(())
 }
 
-fn migrate_fleet_schema(db: &Connection, current: i64) -> Result<()> {
-    match current {
-        0 => set_schema_version(db, FLEET_SCHEMA_VERSION),
-        1 => set_schema_version(db, FLEET_SCHEMA_VERSION),
-        FLEET_SCHEMA_VERSION => Ok(()),
-        other => bail!("unsupported fleet.db schema version {other}"),
-    }
-}
-
-fn backfill_workspace_identity(db: &Connection) -> Result<()> {
-    let rows = {
-        let mut stmt =
-            db.prepare("SELECT name, workspace_id, slug, display_name FROM workspaces")?;
-        stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?
-    };
-
-    for (name, existing_id, existing_slug, existing_display_name) in rows {
-        let slug = existing_slug
-            .filter(|slug| !slug.is_empty())
-            .map(Ok)
-            .unwrap_or_else(|| workspace_slug_from_name(&name))?;
-        let workspace_id = existing_id
-            .filter(|id| !id.is_empty())
-            .unwrap_or_else(|| workspace_id_from_slug(&slug));
-        let display_name = existing_display_name
-            .filter(|display_name| !display_name.is_empty())
-            .unwrap_or_else(|| name.clone());
-        db.execute(
-            r#"
-UPDATE workspaces
-SET workspace_id = ?2, slug = ?3, display_name = ?4
-WHERE name = ?1
-"#,
-            params![name, workspace_id, slug, display_name],
-        )?;
-    }
-
-    db.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_workspaces_workspace_id ON workspaces(workspace_id)",
-        [],
-    )?;
-    db.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_workspaces_slug ON workspaces(slug)",
-        [],
-    )?;
-    Ok(())
-}
-
 fn ensure_supported_schema_without_mutation(db: &Connection) -> Result<i64> {
     let current = read_schema_version_without_mutation(db)?;
+    if current == 0 || current == FLEET_SCHEMA_VERSION {
+        return Ok(current);
+    }
     if current > FLEET_SCHEMA_VERSION {
         bail!(
             "fleet.db schema version {current} is newer than this binary supports ({FLEET_SCHEMA_VERSION})"
         );
     }
-    if current < 0 {
-        bail!("unsupported fleet.db schema version {current}");
-    }
-    Ok(current)
+    bail!(
+        "fleet.db schema version {current} is not supported by this hard-cut microvm runtime; create a fresh catalog"
+    );
 }
 
 pub(crate) fn current_fleet_schema_version() -> Result<i64> {
@@ -301,57 +241,59 @@ ON CONFLICT(id) DO UPDATE SET
     Ok(())
 }
 
-pub(crate) fn workspace_upsert_pending(
-    name: &str,
-    display_name: &str,
-    user_id: &str,
-    owner_user_id: Option<i64>,
-    agent_name: Option<&str>,
-    sandbox_name: &str,
-    volume_name: &str,
-    assigned_node_id: Option<&str>,
-    cpus: u8,
-    memory_mib: u32,
-    volume_quota_mib: u32,
-    idle_timeout_secs: u64,
-    backup_interval_secs: u64,
-) -> Result<()> {
+pub(crate) struct WorkspaceUpsert<'a> {
+    pub(crate) name: &'a str,
+    pub(crate) display_name: &'a str,
+    pub(crate) user_id: &'a str,
+    pub(crate) owner_user_id: Option<i64>,
+    pub(crate) agent_name: Option<&'a str>,
+    pub(crate) vm_name: &'a str,
+    pub(crate) workspace_dir_name: &'a str,
+    pub(crate) assigned_node_id: Option<&'a str>,
+    pub(crate) cpus: u8,
+    pub(crate) memory_mib: u32,
+    pub(crate) workspace_quota_mib: u32,
+    pub(crate) idle_timeout_secs: u64,
+    pub(crate) backup_interval_secs: u64,
+}
+
+pub(crate) fn workspace_upsert_pending(input: WorkspaceUpsert<'_>) -> Result<()> {
     ensure_fleet_schema()?;
     let now = now_epoch()?;
     let db = fleet_db()?;
-    let slug = workspace_slug_from_name(name)?;
+    let slug = workspace_slug_from_name(input.name)?;
     let workspace_id = workspace_id_from_slug(&slug);
     db.execute(
         r#"
 INSERT INTO workspaces (
-    name, workspace_id, slug, display_name, user_id, owner_user_id, agent_name, sandbox_name, volume_name,
+    name, workspace_id, slug, display_name, user_id, owner_user_id, agent_name, vm_name, workspace_dir_name,
     node_id, desired_state, cpus, memory_mib,
-    volume_quota_mib, status, idle_timeout_secs, backup_interval_secs,
+    workspace_quota_mib, status, idle_timeout_secs, backup_interval_secs,
     last_used_at, last_backup_at, created_at, updated_at
 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'running', ?11, ?12, ?13, 'creating', ?14, ?15, ?16, NULL, ?16, ?16)
 ON CONFLICT(name) DO NOTHING
 "#,
         params![
-            name,
+            input.name,
             workspace_id,
             slug,
-            display_name,
-            user_id,
-            owner_user_id,
-            agent_name,
-            sandbox_name,
-            volume_name,
-            assigned_node_id,
-            i64::from(cpus),
-            i64::from(memory_mib),
-            i64::from(volume_quota_mib),
-            i64::try_from(idle_timeout_secs).context("idle timeout too large")?,
-            i64::try_from(backup_interval_secs).context("backup interval too large")?,
+            input.display_name,
+            input.user_id,
+            input.owner_user_id,
+            input.agent_name,
+            input.vm_name,
+            input.workspace_dir_name,
+            input.assigned_node_id,
+            i64::from(input.cpus),
+            i64::from(input.memory_mib),
+            i64::from(input.workspace_quota_mib),
+            i64::try_from(input.idle_timeout_secs).context("idle timeout too large")?,
+            i64::try_from(input.backup_interval_secs).context("backup interval too large")?,
             now,
         ],
     )?;
     if db.changes() == 0 {
-        bail!("workspace already exists: {name}");
+        bail!("workspace already exists: {}", input.name);
     }
     Ok(())
 }
@@ -361,8 +303,8 @@ pub(crate) fn workspace_get(name: &str) -> Result<WorkspaceRecord> {
     let db = fleet_db()?;
     db.query_row(
         r#"
-SELECT workspace_id, name, slug, display_name, user_id, sandbox_name, volume_name, desired_state, cpus, memory_mib,
-       node_id, status, volume_quota_mib, idle_timeout_secs, backup_interval_secs, last_used_at, last_backup_at,
+SELECT workspace_id, name, slug, display_name, user_id, vm_name, workspace_dir_name, desired_state, cpus, memory_mib,
+       node_id, status, workspace_quota_mib, idle_timeout_secs, backup_interval_secs, last_used_at, last_backup_at,
        owner_user_id, agent_name
 FROM workspaces
 WHERE name = ?1
@@ -379,8 +321,8 @@ pub(crate) fn workspace_all() -> Result<Vec<WorkspaceRecord>> {
     let db = fleet_db()?;
     let mut stmt = db.prepare(
         r#"
-SELECT workspace_id, name, slug, display_name, user_id, sandbox_name, volume_name, desired_state, cpus, memory_mib,
-       node_id, status, volume_quota_mib, idle_timeout_secs, backup_interval_secs, last_used_at, last_backup_at,
+SELECT workspace_id, name, slug, display_name, user_id, vm_name, workspace_dir_name, desired_state, cpus, memory_mib,
+       node_id, status, workspace_quota_mib, idle_timeout_secs, backup_interval_secs, last_used_at, last_backup_at,
        owner_user_id, agent_name
 FROM workspaces
 ORDER BY name
@@ -397,8 +339,8 @@ pub(crate) fn workspaces_for_node(node: &str) -> Result<Vec<WorkspaceRecord>> {
     let db = fleet_db()?;
     let mut stmt = db.prepare(
         r#"
-SELECT workspace_id, name, slug, display_name, user_id, sandbox_name, volume_name, desired_state, cpus, memory_mib,
-       node_id, status, volume_quota_mib, idle_timeout_secs, backup_interval_secs, last_used_at, last_backup_at,
+SELECT workspace_id, name, slug, display_name, user_id, vm_name, workspace_dir_name, desired_state, cpus, memory_mib,
+       node_id, status, workspace_quota_mib, idle_timeout_secs, backup_interval_secs, last_used_at, last_backup_at,
        owner_user_id, agent_name
 FROM workspaces
 WHERE node_id = ?1 AND status != 'removed'
@@ -413,7 +355,7 @@ ORDER BY name
 pub(crate) fn workspace_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkspaceRecord> {
     let cpus: i64 = row.get(8)?;
     let memory_mib: i64 = row.get(9)?;
-    let volume_quota_mib: i64 = row.get(12)?;
+    let workspace_quota_mib: i64 = row.get(12)?;
     let idle_timeout_secs: i64 = row.get(13)?;
     let backup_interval_secs: i64 = row.get(14)?;
     Ok(WorkspaceRecord {
@@ -424,14 +366,14 @@ pub(crate) fn workspace_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Wo
         user_id: row.get(4)?,
         owner_user_id: row.get(17)?,
         agent_name: row.get(18)?,
-        sandbox_name: row.get(5)?,
-        volume_name: row.get(6)?,
+        vm_name: row.get(5)?,
+        workspace_dir_name: row.get(6)?,
         desired_state: row.get(7)?,
         node_id: row.get(10)?,
         status: row.get(11)?,
         cpus: cpus as u8,
         memory_mib: memory_mib as u32,
-        volume_quota_mib: volume_quota_mib as u32,
+        workspace_quota_mib: workspace_quota_mib as u32,
         idle_timeout_secs: idle_timeout_secs as u64,
         backup_interval_secs: backup_interval_secs as u64,
         last_used_at: row.get(15)?,
@@ -621,6 +563,7 @@ INSERT INTO jobs (
                 serde_json::to_string(&json!({
                     "backup_id": backup.id,
                     "backup_location": backup.location,
+                    "backup_workspace_name": backup.workspace_name,
                     "desired_state": workspace.desired_state,
                     "from_node": from,
                     "to_node": to
@@ -1070,41 +1013,54 @@ WHERE id = ?1
 pub(crate) fn claim_job(node: &str) -> Result<Option<JobRecord>> {
     ensure_fleet_schema()?;
     let now = now_epoch()?;
-    let db = fleet_db()?;
-    requeue_stale_claims(&db, now)?;
-    db.execute(
+    let mut db = fleet_db()?;
+    let tx = db.transaction()?;
+    requeue_stale_claims(&tx, now)?;
+    let job_id: Option<String> = tx
+        .query_row(
+            r#"
+SELECT id
+FROM jobs
+WHERE status = 'queued' AND node_id = ?1
+  AND EXISTS (
+      SELECT 1 FROM nodes
+      WHERE nodes.node_id = ?1
+        AND nodes.status IN ('ready', 'cordoned')
+  )
+ORDER BY created_at ASC
+LIMIT 1
+"#,
+            params![node],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(job_id) = job_id else {
+        tx.commit()?;
+        return Ok(None);
+    };
+    let changed = tx.execute(
         r#"
 UPDATE jobs
-SET status = 'claimed', claimed_by = ?1, claimed_at = ?2, updated_at = ?2
-WHERE id = (
-    SELECT id
-    FROM jobs
-    WHERE status = 'queued' AND node_id = ?1
-      AND EXISTS (
-          SELECT 1 FROM nodes
-          WHERE nodes.node_id = ?1
-            AND nodes.status IN ('ready', 'cordoned')
-      )
-    ORDER BY created_at ASC
-    LIMIT 1
-)
+SET status = 'claimed', claimed_by = ?2, claimed_at = ?3, updated_at = ?3
+WHERE id = ?1 AND status = 'queued'
 "#,
-        params![node, now],
+        params![job_id, node, now],
     )?;
-    db.query_row(
+    if changed != 1 {
+        bail!("failed to claim queued job {job_id}");
+    }
+    let job = tx.query_row(
         r#"
 SELECT id, workspace_name, node_id, kind, status, payload_json, output_json,
        claimed_by, claimed_at, created_at, updated_at
 FROM jobs
-WHERE status = 'claimed' AND claimed_by = ?1 AND claimed_at = ?2
-ORDER BY created_at ASC
-LIMIT 1
+WHERE id = ?1
 "#,
-        params![node, now],
+        params![job_id],
         job_from_row,
-    )
-    .optional()
-    .map_err(Into::into)
+    )?;
+    tx.commit()?;
+    Ok(Some(job))
 }
 
 pub(crate) fn complete_job(id: &str, node: &str, status: &str, output: Value) -> Result<JobRecord> {
@@ -1267,7 +1223,7 @@ fn requeue_stale_claims(db: &Connection, now: i64) -> Result<()> {
         r#"
 UPDATE jobs
 SET status = 'queued', claimed_by = NULL, claimed_at = NULL, updated_at = ?1
-WHERE status IN ('claimed', 'running') AND claimed_at IS NOT NULL AND claimed_at < ?2
+WHERE status = 'claimed' AND claimed_at IS NOT NULL AND claimed_at < ?2
 "#,
         params![now, cutoff],
     )?;
@@ -1472,7 +1428,7 @@ fn fleet_db_path() -> Result<PathBuf> {
 
 pub(crate) fn backup_fleet_catalog(output: Option<&Path>) -> Result<PathBuf> {
     let path = match output {
-        Some(path) => expand_tilde(&path.to_path_buf())?,
+        Some(path) => expand_tilde(path)?,
         None => default_catalog_backup_path()?,
     };
     if path.exists() {
@@ -1497,27 +1453,6 @@ fn default_catalog_backup_path() -> Result<PathBuf> {
         .join(format!("fleet-{}.db", now_epoch()?)))
 }
 
-fn add_column_if_missing(
-    db: &Connection,
-    table: &str,
-    column: &str,
-    column_type: &str,
-) -> Result<()> {
-    let mut stmt = db.prepare(&format!("PRAGMA table_info({table})"))?;
-    let exists = stmt
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<rusqlite::Result<Vec<_>>>()?
-        .into_iter()
-        .any(|name| name == column);
-    if !exists {
-        db.execute(
-            &format!("ALTER TABLE {table} ADD COLUMN {column} {column_type}"),
-            [],
-        )?;
-    }
-    Ok(())
-}
-
 pub(crate) fn fleet_state_dir() -> Result<PathBuf> {
     if let Some(path) = env::var_os("MOM_STATE_DIR") {
         return Ok(PathBuf::from(path));
@@ -1525,27 +1460,16 @@ pub(crate) fn fleet_state_dir() -> Result<PathBuf> {
     Ok(home_dir()?.join(".local").join("state").join("mom"))
 }
 
-pub(crate) fn microsandbox_volume_path(volume_name: &str) -> Result<PathBuf> {
-    Ok(microsandbox_home()?.join("volumes").join(volume_name))
-}
-
-pub(crate) fn microsandbox_home() -> Result<PathBuf> {
-    if let Some(path) = env::var_os("MSB_HOME") {
-        return Ok(PathBuf::from(path));
-    }
-    Ok(home_dir()?.join(".microsandbox"))
-}
-
 pub(crate) fn node_id() -> Result<String> {
-    if let Ok(value) = env::var("MOM_NODE_ID") {
-        if !value.trim().is_empty() {
-            return Ok(value);
-        }
+    if let Ok(value) = env::var("MOM_NODE_ID")
+        && !value.trim().is_empty()
+    {
+        return Ok(value);
     }
-    if let Ok(value) = env::var("HOSTNAME") {
-        if !value.trim().is_empty() {
-            return Ok(value);
-        }
+    if let Ok(value) = env::var("HOSTNAME")
+        && !value.trim().is_empty()
+    {
+        return Ok(value);
     }
     let output = std::process::Command::new("hostname").output();
     if let Ok(output) = output {

@@ -59,7 +59,7 @@ impl Drop for ChildGuard {
 
 struct TestNode {
     _state: TempDir,
-    msb_home: TempDir,
+    runtime_home: TempDir,
     worker_url: String,
     _process: ChildGuard,
 }
@@ -187,7 +187,7 @@ async fn fake_worker_start_stop_backup_jobs_update_central_state() -> Result<()>
         .error_for_status()?;
     wait_for_workspace_status(&fleet.api_url, "alice", "stopped").await?;
     assert_eq!(
-        std::fs::read_to_string(node.msb_home.path().join("fake/alice/state"))?,
+        std::fs::read_to_string(node.runtime_home.path().join("fake/alice/state"))?,
         "stopped"
     );
 
@@ -195,7 +195,7 @@ async fn fake_worker_start_stop_backup_jobs_update_central_state() -> Result<()>
     wait_for_job_status(&fleet.api_url, &start, "succeeded").await?;
     wait_for_workspace_status(&fleet.api_url, "alice", "running").await?;
     assert_eq!(
-        std::fs::read_to_string(node.msb_home.path().join("fake/alice/state"))?,
+        std::fs::read_to_string(node.runtime_home.path().join("fake/alice/state"))?,
         "running"
     );
 
@@ -237,7 +237,8 @@ async fn browser_workspace_routes_require_session_cookie() -> Result<()> {
 }
 
 #[tokio::test]
-async fn workspace_backup_cli_queues_remote_worker_job_when_volume_is_not_local() -> Result<()> {
+async fn workspace_backup_cli_queues_remote_worker_job_when_workspace_dir_is_not_local()
+-> Result<()> {
     let _guard = fleet_test_guard().await;
     let fleet = TestFleet::start().await?;
     let _node = spawn_worker("node-a", &fleet.api_url)?;
@@ -246,11 +247,25 @@ async fn workspace_backup_cli_queues_remote_worker_job_when_volume_is_not_local(
     let create = create_workspace(&fleet.api_url, "remote-backup", "node-a", 0).await?;
     wait_for_job_status(&fleet.api_url, &create, "succeeded").await?;
 
-    let local_msb = tempfile::tempdir()?;
+    let local_runtime = tempfile::tempdir()?;
+    let local_workspaces = tempfile::tempdir()?;
+    let stale_dir = local_workspaces.path().join("mom-remote-backup-workspace");
+    fs::create_dir_all(&stale_dir)?;
+    fs::write(stale_dir.join("stale-local-marker"), b"wrong copy")?;
     run_mom_with_env(
         fleet.api_state.path(),
         &["workspace", "backup", "remote-backup", "--leave-stopped"],
-        &[("MSB_HOME", local_msb.path().to_str().unwrap_or(""))],
+        &[
+            (
+                "MOM_MICROVM_STATE_DIR",
+                local_runtime.path().to_str().unwrap_or(""),
+            ),
+            (
+                "MOM_MICROVM_WORKSPACE_DIR",
+                local_workspaces.path().to_str().unwrap_or(""),
+            ),
+            ("MOM_NODE_ID", "control"),
+        ],
     )?;
     wait_for_backup_count(fleet.api_state.path(), "remote-backup", 1).await?;
 
@@ -267,13 +282,16 @@ async fn workspace_inspect_labels_remote_runtime_as_not_checked_locally() -> Res
     let create = create_workspace(&fleet.api_url, "remote-inspect", "node-a", 0).await?;
     wait_for_job_status(&fleet.api_url, &create, "succeeded").await?;
 
-    let local_msb = tempfile::tempdir()?;
+    let local_runtime = tempfile::tempdir()?;
     let output = run_mom_output_with_env(
         fleet.api_state.path(),
         &["workspace", "inspect", "remote-inspect"],
         &[
             ("MOM_NODE_ID", "control"),
-            ("MSB_HOME", local_msb.path().to_str().unwrap_or("")),
+            (
+                "MOM_MICROVM_STATE_DIR",
+                local_runtime.path().to_str().unwrap_or(""),
+            ),
         ],
     )?;
     assert!(
@@ -281,8 +299,8 @@ async fn workspace_inspect_labels_remote_runtime_as_not_checked_locally() -> Res
         "inspect output should identify the local inspecting node: {output}"
     );
     assert!(
-        output.contains("Sandbox status: not checked locally; assigned to node-a"),
-        "inspect output should not report remote sandbox as missing: {output}"
+        output.contains("VM status: not checked locally; assigned to node-a"),
+        "inspect output should not report remote VM as missing: {output}"
     );
 
     Ok(())
@@ -303,11 +321,11 @@ async fn fake_workers_create_assigned_workspace_without_shared_sqlite() -> Resul
     wait_for_workspace_status(&fleet.api_url, "alice", "running").await?;
 
     assert!(
-        !node_a.msb_home.path().join("fake/alice").exists(),
+        !node_a.runtime_home.path().join("fake/alice").exists(),
         "node-a should not create node-b's workspace"
     );
     assert!(
-        node_b.msb_home.path().join("fake/alice").exists(),
+        node_b.runtime_home.path().join("fake/alice").exists(),
         "node-b should create its assigned workspace"
     );
     assert_no_local_fleet_db(&node_a)?;
@@ -335,7 +353,7 @@ async fn ui_create_selects_registered_worker_node() -> Result<()> {
     wait_for_workspace_node(&fleet.api_url, "ui-created", "node-a").await?;
     wait_for_workspace_status(&fleet.api_url, "ui-created", "running").await?;
     assert!(
-        node.msb_home.path().join("fake/ui-created").exists(),
+        node.runtime_home.path().join("fake/ui-created").exists(),
         "UI-created workspace should be created on the registered worker"
     );
 
@@ -365,11 +383,11 @@ async fn unpinned_jobs_are_pinned_to_workspace_owner() -> Result<()> {
     );
     wait_for_job_status(&fleet.api_url, job_id, "succeeded").await?;
     assert!(
-        !node_a.msb_home.path().join("fake/owner").exists(),
+        !node_a.runtime_home.path().join("fake/owner").exists(),
         "node-a should not claim node-b's unpinned job"
     );
     assert_eq!(
-        std::fs::read_to_string(node_b.msb_home.path().join("fake/owner/state"))?,
+        std::fs::read_to_string(node_b.runtime_home.path().join("fake/owner/state"))?,
         "stopped"
     );
 
@@ -479,10 +497,13 @@ async fn recover_host_reassigns_and_restores_latest_backup_on_target_node() -> R
     wait_for_workspace_node(&fleet.api_url, "recover-me", "node-b").await?;
     wait_for_workspace_status(&fleet.api_url, "recover-me", "running").await?;
     assert!(
-        node_a.msb_home.path().join("fake/recover-me").exists(),
-        "source worker's local fake volume remains as lost-host residue"
+        node_a.runtime_home.path().join("fake/recover-me").exists(),
+        "source worker's local fake workspace_dir remains as lost-host residue"
     );
-    let restored_from = node_b.msb_home.path().join("fake/recover-me/restored-from");
+    let restored_from = node_b
+        .runtime_home
+        .path()
+        .join("fake/recover-me/restored-from");
     wait_until("workspace restored on node-b", || {
         let restored_from = restored_from.clone();
         async move { restored_from.exists() }
@@ -493,7 +514,7 @@ async fn recover_host_reassigns_and_restores_latest_backup_on_target_node() -> R
 }
 
 #[tokio::test]
-async fn worker_service_open_rejects_spoofed_sandbox_identity() -> Result<()> {
+async fn worker_service_open_rejects_spoofed_vm_identity() -> Result<()> {
     let _guard = fleet_test_guard().await;
     let fleet = TestFleet::start().await?;
     let node = spawn_worker("node-a", &fleet.api_url)?;
@@ -507,18 +528,18 @@ async fn worker_service_open_rejects_spoofed_sandbox_identity() -> Result<()> {
         .bearer_auth(WORKER_TOKEN)
         .json(&json!({
             "workspace_name": "guard",
-            "sandbox_name": "mom-other"
+            "vm_name": "mom-other"
         }))
         .send()
         .await?;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert!(
         !node
-            .msb_home
+            .runtime_home
             .path()
             .join("fake/guard/service-hermes")
             .exists(),
-        "worker should not open a service for a mismatched sandbox"
+        "worker should not open a service for a mismatched vm"
     );
 
     Ok(())
@@ -544,7 +565,7 @@ async fn create_selects_fresh_worker_over_stale_node() -> Result<()> {
     wait_for_workspace_node(&fleet.api_url, "fresh", "fresh-node").await?;
     wait_for_workspace_status(&fleet.api_url, "fresh", "running").await?;
     assert!(
-        node.msb_home.path().join("fake/fresh").exists(),
+        node.runtime_home.path().join("fake/fresh").exists(),
         "workspace should be placed on the fresh worker"
     );
 
@@ -574,9 +595,9 @@ async fn duplicate_create_does_not_move_existing_workspace() -> Result<()> {
         .await?;
     assert!(!response.status().is_success());
     wait_for_workspace_node(&fleet.api_url, "dupe", "node-a").await?;
-    assert!(node_a.msb_home.path().join("fake/dupe").exists());
+    assert!(node_a.runtime_home.path().join("fake/dupe").exists());
     assert!(
-        !node_b.msb_home.path().join("fake/dupe").exists(),
+        !node_b.runtime_home.path().join("fake/dupe").exists(),
         "duplicate create should not move the workspace to node-b"
     );
 
@@ -654,18 +675,18 @@ async fn worker_reconcile_ignores_unassigned_and_idle_stopped_workspaces() -> Re
     wait_for_node(fleet.api_state.path(), "node-a").await?;
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert!(
-        !node.msb_home.path().join("fake/legacy").exists(),
+        !node.runtime_home.path().join("fake/legacy").exists(),
         "worker should not reconcile unassigned legacy workspaces"
     );
     assert!(
-        !node.msb_home.path().join("fake/cold").exists(),
+        !node.runtime_home.path().join("fake/cold").exists(),
         "idle-stopped workspace should remain cold until a job wakes it"
     );
 
     let start = create_job(&fleet.api_url, "cold", "start").await?;
     wait_for_job_status(&fleet.api_url, &start, "succeeded").await?;
     assert_eq!(
-        std::fs::read_to_string(node.msb_home.path().join("fake/cold/state"))?,
+        std::fs::read_to_string(node.runtime_home.path().join("fake/cold/state"))?,
         "running"
     );
 
@@ -727,8 +748,8 @@ async fn offline_node_is_not_reenabled_by_stale_heartbeat() -> Result<()> {
                 "disk_reserve_mib": 1024
             },
             "pressure": {
-                "managed_sandboxes": 0,
-                "running_sandboxes": 0,
+                "managed_vms": 0,
+                "running_vms": 0,
                 "active_workspaces": 0,
                 "allocated_memory_mib": 0,
                 "disk_available_mib": 65536,
@@ -783,7 +804,7 @@ async fn node_lifecycle_controls_placement_and_claims() -> Result<()> {
     let stop = create_job(&fleet.api_url, "lifecycle", "stop").await?;
     wait_for_job_status(&fleet.api_url, &stop, "succeeded").await?;
     assert_eq!(
-        std::fs::read_to_string(node.msb_home.path().join("fake/lifecycle/state"))?,
+        std::fs::read_to_string(node.runtime_home.path().join("fake/lifecycle/state"))?,
         "stopped",
         "cordoned node should still claim assigned workspace jobs"
     );
@@ -998,7 +1019,7 @@ async fn service_open_routes_to_assigned_worker_url() -> Result<()> {
     );
     assert!(
         !node_a
-            .msb_home
+            .runtime_home
             .path()
             .join("fake/svc/service-hermes")
             .exists(),
@@ -1006,7 +1027,7 @@ async fn service_open_routes_to_assigned_worker_url() -> Result<()> {
     );
     assert!(
         node_b
-            .msb_home
+            .runtime_home
             .path()
             .join("fake/svc/service-hermes")
             .exists(),
@@ -1187,7 +1208,7 @@ fn spawn_worker_with_options(
     fake_service_base_url: Option<&str>,
 ) -> Result<TestNode> {
     let state = tempfile::tempdir()?;
-    let msb_home = tempfile::tempdir()?;
+    let runtime_home = tempfile::tempdir()?;
     let bind = free_addr()?;
     let mut command = Command::new(MOM_BIN);
     command
@@ -1195,7 +1216,7 @@ fn spawn_worker_with_options(
         .env("MOM_RUNTIME", "fake")
         .env("MOM_NODE_ID", node)
         .env("MOM_STATE_DIR", state.path())
-        .env("MSB_HOME", msb_home.path())
+        .env("MOM_MICROVM_STATE_DIR", runtime_home.path())
         .env("MOM_API_URL", api_url)
         .env("MOM_WORKER_BIND", &bind)
         .env("MOM_WORKER_URL", format!("http://{bind}"))
@@ -1210,7 +1231,7 @@ fn spawn_worker_with_options(
         .with_context(|| format!("spawn worker {node}"))?;
     Ok(TestNode {
         _state: state,
-        msb_home,
+        runtime_home,
         worker_url: format!("http://{bind}"),
         _process: ChildGuard { child },
     })
@@ -1425,17 +1446,19 @@ fn insert_workspace_with_state(
     status: &str,
 ) -> Result<()> {
     let now = now_epoch()?;
+    let workspace_id = test_workspace_id(name);
     let db = Connection::open(api_state.join("fleet.db"))?;
     db.execute(
         r#"
 INSERT INTO workspaces (
-    name, user_id, sandbox_name, volume_name, node_id, desired_state, cpus, memory_mib,
-    volume_quota_mib, status, idle_timeout_secs, backup_interval_secs,
+    name, workspace_id, slug, display_name, user_id, vm_name, workspace_dir_name, node_id, desired_state, cpus, memory_mib,
+    workspace_quota_mib, status, idle_timeout_secs, backup_interval_secs,
     last_used_at, last_backup_at, created_at, updated_at
-) VALUES (?1, ?1, ?2, ?3, ?4, ?5, 1, 2048, 10240, ?6, 1800, 0, ?7, NULL, ?7, ?7)
+) VALUES (?1, ?2, ?1, ?1, ?1, ?3, ?4, ?5, ?6, 1, 2048, 10240, ?7, 1800, 0, ?8, NULL, ?8, ?8)
 "#,
         (
             name,
+            workspace_id,
             format!("mom-{name}"),
             format!("mom-{name}-workspace"),
             node,
@@ -1449,23 +1472,29 @@ INSERT INTO workspaces (
 
 fn insert_unassigned_workspace(api_state: &Path, name: &str) -> Result<()> {
     let now = now_epoch()?;
+    let workspace_id = test_workspace_id(name);
     let db = Connection::open(api_state.join("fleet.db"))?;
     db.execute(
         r#"
 INSERT INTO workspaces (
-    name, user_id, sandbox_name, volume_name, node_id, desired_state, cpus, memory_mib,
-    volume_quota_mib, status, idle_timeout_secs, backup_interval_secs,
+    name, workspace_id, slug, display_name, user_id, vm_name, workspace_dir_name, node_id, desired_state, cpus, memory_mib,
+    workspace_quota_mib, status, idle_timeout_secs, backup_interval_secs,
     last_used_at, last_backup_at, created_at, updated_at
-) VALUES (?1, ?1, ?2, ?3, NULL, 'running', 1, 2048, 10240, 'running', 1800, 0, ?4, NULL, ?4, ?4)
+) VALUES (?1, ?2, ?1, ?1, ?1, ?3, ?4, NULL, 'running', 1, 2048, 10240, 'running', 1800, 0, ?5, NULL, ?5, ?5)
 "#,
         (
             name,
+            workspace_id,
             format!("mom-{name}"),
             format!("mom-{name}-workspace"),
             now,
         ),
     )?;
     Ok(())
+}
+
+fn test_workspace_id(name: &str) -> String {
+    format!("ws_test_{}", name.replace('-', "_"))
 }
 
 fn node_status(api_state: &Path, node: &str) -> Result<String> {

@@ -4,8 +4,6 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_root}"
 
-repo_hash="$(printf '%s' "${repo_root}" | shasum -a 256 | cut -c1-10)"
-msb_home="/tmp/mom-msb-${repo_hash}"
 pid_file="${repo_root}/.state/dev.pid"
 
 kill_pid() {
@@ -30,17 +28,20 @@ kill_pid_hard() {
   fi
 }
 
-kill_msb_home_processes() {
-  while IFS= read -r line; do
-    local pid="${line%% *}"
-    local command="${line#${pid} }"
-    if [[ "${command}" == *"${msb_home}"* ]]; then
-      kill_pid "${pid}"
-    fi
-  done < <(ps -axo pid=,command=)
-}
+stop_microvm_units() {
+  local machines_dir="${repo_root}/.state/microvms/machines"
+  [ -d "${machines_dir}" ] || return 0
+  command -v systemctl >/dev/null 2>&1 || return 0
+  command -v systemd-escape >/dev/null 2>&1 || return 0
 
-kill_msb_home_processes
+  local machine name unit
+  for machine in "${machines_dir}"/*; do
+    [ -d "${machine}" ] || continue
+    name="$(basename "${machine}")"
+    unit="$(systemd-escape --template=agentmom-microvm@.service "${name}")"
+    systemctl stop "${unit}" >/dev/null 2>&1 || true
+  done
+}
 
 if [ -f "${pid_file}" ]; then
   # shellcheck disable=SC1090
@@ -57,15 +58,7 @@ if [ -f "${pid_file}" ]; then
   kill_pid_hard "${dev_run_pid:-}"
 fi
 
-sleep 1
-while IFS= read -r line; do
-  pid="${line%% *}"
-  command="${line#${pid} }"
-  if [[ "${command}" == *"${msb_home}"* ]]; then
-    kill_pid_hard "${pid}"
-  fi
-done < <(ps -axo pid=,command=)
-
-rm -rf "${repo_root}/.state" "${msb_home}" "${repo_root}/dev/iron-proxy"
+stop_microvm_units
+rm -rf "${repo_root}/.state" "${repo_root}/dev/iron-proxy"
 
 printf 'dev state reset\n'

@@ -12,12 +12,33 @@ struct WorkerApi {
     client: reqwest::Client,
     api_url: String,
     node: String,
+    runtime: RuntimeMode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeMode {
+    Microvm,
+    Fake,
+}
+
+impl RuntimeMode {
+    fn from_env() -> Self {
+        if env::var("MOM_RUNTIME").is_ok_and(|value| value == "fake") {
+            Self::Fake
+        } else {
+            Self::Microvm
+        }
+    }
+
+    fn is_fake(self) -> bool {
+        matches!(self, Self::Fake)
+    }
 }
 
 #[derive(Debug, Deserialize)]
 struct OpenServiceRequest {
     workspace_name: String,
-    sandbox_name: String,
+    vm_name: String,
 }
 
 pub(crate) async fn worker(args: WorkerArgs) -> Result<()> {
@@ -25,10 +46,12 @@ pub(crate) async fn worker(args: WorkerArgs) -> Result<()> {
     let client = worker_api_client()?;
     let sse_client = worker_sse_client()?;
     let api_url = args.api_url.trim_end_matches('/').to_string();
+    let runtime = RuntimeMode::from_env();
     let worker_api = WorkerApi {
         client: client.clone(),
         api_url: api_url.clone(),
         node: node.clone(),
+        runtime,
     };
     let worker_url = args
         .worker_url
@@ -159,20 +182,19 @@ async fn worker_open_hermes(
             state.api.node
         )));
     }
-    if request.sandbox_name != workspace.sandbox_name {
+    if request.vm_name != workspace.vm_name {
         return Err(ApiError::Unauthorized(anyhow!(
-            "service-open sandbox does not match workspace assignment"
+            "service-open vm does not match workspace assignment"
         )));
     }
-    if fake_runtime_enabled() {
+    if state.api.runtime.is_fake() {
         let url = fake_open_hermes(&workspace.name)
             .await
             .map_err(ApiError::Anyhow)?;
         return Ok(Json(json!({ "url": url })));
     }
-    let url =
-        service::open_hermes_dashboard(&state.services, &workspace.name, &workspace.sandbox_name)
-            .await?;
+    let url = service::open_hermes_dashboard(&state.services, &workspace.name, &workspace.vm_name)
+        .await?;
     Ok(Json(json!({ "url": url })))
 }
 
@@ -195,27 +217,27 @@ async fn worker_hermes_acp_ws(
             state.api.node
         )));
     }
-    if query.sandbox_name != workspace.sandbox_name {
+    if query.vm_name != workspace.vm_name {
         return Err(ApiError::Unauthorized(anyhow!(
-            "Hermes ACP sandbox does not match workspace assignment"
+            "Hermes ACP vm does not match workspace assignment"
         )));
     }
-    if fake_runtime_enabled() {
+    if state.api.runtime.is_fake() {
         let workspace_name = workspace.name.clone();
         return Ok(ws
             .on_upgrade(move |socket| acp::fake_worker_socket(workspace_name, socket))
             .into_response());
     }
 
-    let sandbox = workspace_running_sandbox_local(&state.api, &workspace)
+    let vm = workspace_running_vm_local(&state.api, &workspace)
         .await
         .map_err(ApiError::Anyhow)?;
     let acp = state.acp.clone();
     let workspace_name = workspace.name.clone();
-    let sandbox_name = workspace.sandbox_name.clone();
+    let vm_name = workspace.vm_name.clone();
     Ok(ws
         .on_upgrade(move |socket| {
-            acp::bridge_worker_socket(acp, workspace_name, sandbox_name, sandbox, socket)
+            acp::bridge_worker_socket(acp, workspace_name, vm_name, vm, socket)
         })
         .into_response())
 }
@@ -297,14 +319,14 @@ async fn worker_claim_once(api: &WorkerApi, worker_url: &str) -> Result<bool> {
 
 async fn run_claimed_job(api: &WorkerApi, job: JobRecord) -> Result<()> {
     worker_job_event(
-        &api.client,
-        &api.api_url,
-        &api.node,
-        &job.id,
-        "job_running",
-        "running",
-        "worker started job",
-        json!({ "kind": job.kind }),
+        api,
+        WorkerJobEvent {
+            job_id: &job.id,
+            event_type: "job_running",
+            status: "running",
+            message: "worker started job",
+            metadata: json!({ "kind": job.kind }),
+        },
     )
     .await?;
     let result = execute_job(api, &job).await;
@@ -342,25 +364,27 @@ async fn run_claimed_job(api: &WorkerApi, job: JobRecord) -> Result<()> {
     }
 }
 
-async fn worker_job_event(
-    client: &reqwest::Client,
-    api_url: &str,
-    node: &str,
-    job_id: &str,
-    event_type: &str,
-    status: &str,
-    message: &str,
+struct WorkerJobEvent<'a> {
+    job_id: &'a str,
+    event_type: &'a str,
+    status: &'a str,
+    message: &'a str,
     metadata: Value,
-) -> Result<()> {
-    client
-        .post(format!("{api_url}/worker/jobs/{job_id}/events"))
+}
+
+async fn worker_job_event(api: &WorkerApi, event: WorkerJobEvent<'_>) -> Result<()> {
+    api.client
+        .post(format!(
+            "{}/worker/jobs/{}/events",
+            api.api_url, event.job_id
+        ))
         .with_worker_token()
         .json(&json!({
-            "node_id": node,
-            "event_type": event_type,
-            "status": status,
-            "message": message,
-            "metadata": metadata
+            "node_id": api.node,
+            "event_type": event.event_type,
+            "status": event.status,
+            "message": event.message,
+            "metadata": event.metadata
         }))
         .send()
         .await?
@@ -396,12 +420,12 @@ async fn execute_job(api: &WorkerApi, job: &JobRecord) -> Result<Value> {
         }
         "remove" => {
             let workspace = api.workspace(&job.workspace_name).await?;
-            let remove_volume = payload
-                .get("remove_volume")
+            let remove_workspace_dir = payload
+                .get("remove_workspace_dir")
                 .and_then(Value::as_bool)
                 .unwrap_or(true);
-            remove_workspace_local(api, &workspace, remove_volume).await?;
-            Ok(json!({ "removed": true, "volume_removed": remove_volume }))
+            remove_workspace_local(api, &workspace, remove_workspace_dir).await?;
+            Ok(json!({ "removed": true, "workspace_dir_removed": remove_workspace_dir }))
         }
         "backup" => {
             let workspace = api.workspace(&job.workspace_name).await?;
@@ -433,8 +457,8 @@ async fn execute_job(api: &WorkerApi, job: &JobRecord) -> Result<Value> {
             let workspace = api.workspace(&job.workspace_name).await?;
             api.update_workspace(&workspace.name, None, None, true, false)
                 .await?;
-            let sandbox = workspace_running_sandbox_local(api, &workspace).await?;
-            let output = capture_guest_command(&sandbox, command).await?;
+            let vm = workspace_running_vm_local(api, &workspace).await?;
+            let output = capture_guest_command(&vm, command).await?;
             Ok(output)
         }
         "hermes" => {
@@ -454,10 +478,10 @@ async fn execute_job(api: &WorkerApi, job: &JobRecord) -> Result<Value> {
             let workspace = api.workspace(&job.workspace_name).await?;
             api.update_workspace(&workspace.name, None, None, true, false)
                 .await?;
-            let sandbox = workspace_running_sandbox_local(api, &workspace).await?;
+            let vm = workspace_running_vm_local(api, &workspace).await?;
             let mut command = vec!["hermes".to_string()];
             command.extend(args);
-            let output = capture_guest_command(&sandbox, command).await?;
+            let output = capture_guest_command(&vm, command).await?;
             Ok(output)
         }
         other => bail!("unknown job kind: {other}"),
@@ -493,7 +517,7 @@ async fn worker_reconcile_once(api: &WorkerApi) -> Result<()> {
                     "workspace_reconcile_failed",
                     "failed",
                     &format!("{error:#}"),
-                    json!({ "sandbox": record.sandbox_name, "volume": record.volume_name }),
+                    json!({ "vm": record.vm_name, "workspace_dir": record.workspace_dir_name }),
                 )
                 .await
             {
@@ -524,12 +548,10 @@ async fn worker_reconcile_workspace(
                 Some(&record.name),
                 "workspace idle timeout reached",
             );
-            if let Ok(handle) = Sandbox::get(&record.sandbox_name).await {
-                if handle.status() == SandboxStatus::Running
-                    || handle.status() == SandboxStatus::Draining
-                {
-                    handle.stop_with_timeout(Duration::from_secs(10)).await?;
-                }
+            if let Ok(handle) = get_vm(&record.vm_name).await
+                && handle.status().is_running()
+            {
+                handle.stop_with_timeout(Duration::from_secs(10)).await?;
             }
             api.update_workspace(
                 &record.name,
@@ -550,24 +572,24 @@ async fn worker_reconcile_workspace(
         }
     }
 
-    if backup_due(record, now) {
-        if let Err(error) = backup_workspace_local(api, record, false).await {
-            log_record(
-                "error",
-                "workspace_backup_failed",
-                Some(&record.name),
-                "workspace backup failed",
-            );
-            api.event(
-                &record.name,
-                "workspace_backup_failed",
-                "failed",
-                &format!("{error:#}"),
-                json!({}),
-            )
-            .await?;
-            eprintln!("backup {} failed: {error:#}", record.name);
-        }
+    if backup_due(record, now)
+        && let Err(error) = backup_workspace_local(api, record, false).await
+    {
+        log_record(
+            "error",
+            "workspace_backup_failed",
+            Some(&record.name),
+            "workspace backup failed",
+        );
+        api.event(
+            &record.name,
+            "workspace_backup_failed",
+            "failed",
+            &format!("{error:#}"),
+            json!({}),
+        )
+        .await?;
+        eprintln!("backup {} failed: {error:#}", record.name);
     }
     Ok(())
 }
@@ -675,7 +697,7 @@ async fn create_workspace_local(
     workspace: &WorkspaceRecord,
     payload: &Value,
 ) -> Result<()> {
-    if fake_runtime_enabled() {
+    if api.runtime.is_fake() {
         return fake_create_workspace(api, workspace, payload).await;
     }
     api.event(
@@ -684,42 +706,32 @@ async fn create_workspace_local(
         "running",
         "workspace create requested",
         json!({
-            "sandbox": workspace.sandbox_name,
-            "volume": workspace.volume_name,
+            "vm": workspace.vm_name,
+            "workspace_dir": workspace.workspace_dir_name,
             "cpus": workspace.cpus,
             "memory_mib": workspace.memory_mib,
-            "volume_quota_mib": workspace.volume_quota_mib
+            "workspace_quota_mib": workspace.workspace_quota_mib
         }),
     )
     .await?;
-    let rebuild_snapshot = payload
-        .get("rebuild_snapshot")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let no_snapshot = payload
-        .get("no_snapshot")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    if let Err(error) =
-        create_workspace_sandbox(workspace, false, rebuild_snapshot, no_snapshot).await
-    {
-        let volume_path = microsandbox_volume_path(&workspace.volume_name)?;
-        if volume_path.exists() {
+    if let Err(error) = create_workspace_vm(workspace, false).await {
+        let workspace_dir_path = workspace_dir_path(&workspace.workspace_dir_name)?;
+        if workspace_dir_path.exists() {
             api.event(
                 &workspace.name,
                 "workspace_create_retry_recreate_started",
                 "running",
-                "workspace volume exists after create failure; recreating sandbox around it",
+                "workspace directory exists after create failure; recreating vm around it",
                 json!({
-                    "sandbox": workspace.sandbox_name,
-                    "volume": workspace.volume_name,
+                    "vm": workspace.vm_name,
+                    "workspace_dir": workspace.workspace_dir_name,
                     "error": format!("{error:#}")
                 }),
             )
             .await?;
-            create_workspace_sandbox(workspace, true, false, no_snapshot).await.with_context(|| {
+            create_workspace_vm(workspace, true).await.with_context(|| {
                 format!(
-                    "initial create failed with {error:#}; retry around existing volume also failed"
+                    "initial create failed with {error:#}; retry around existing workspace directory also failed"
                 )
             })?;
         } else {
@@ -730,7 +742,7 @@ async fn create_workspace_local(
                 "workspace_create_failed",
                 "failed",
                 &format!("{error:#}"),
-                json!({ "sandbox": workspace.sandbox_name, "volume": workspace.volume_name }),
+                json!({ "vm": workspace.vm_name, "workspace_dir": workspace.workspace_dir_name }),
             )
             .await?;
             return Err(error);
@@ -742,10 +754,10 @@ async fn create_workspace_local(
         &workspace.name,
         "workspace_created",
         "succeeded",
-        "workspace VM created and stopped with persistent volume",
+        "workspace VM created and stopped with persistent workspace directory",
         json!({
-            "sandbox": workspace.sandbox_name,
-            "volume": workspace.volume_name,
+            "vm": workspace.vm_name,
+            "workspace_dir": workspace.workspace_dir_name,
             "user": payload.get("user")
         }),
     )
@@ -754,15 +766,15 @@ async fn create_workspace_local(
 }
 
 async fn stop_workspace_local(api: &WorkerApi, workspace: &WorkspaceRecord) -> Result<()> {
-    if fake_runtime_enabled() {
+    if api.runtime.is_fake() {
         return fake_stop_workspace(api, workspace).await;
     }
     api.update_workspace(&workspace.name, None, Some("stopped"), false, false)
         .await?;
-    if let Ok(handle) = Sandbox::get(&workspace.sandbox_name).await {
-        if handle.status() == SandboxStatus::Running || handle.status() == SandboxStatus::Draining {
-            handle.stop_with_timeout(Duration::from_secs(10)).await?;
-        }
+    if let Ok(handle) = get_vm(&workspace.vm_name).await
+        && handle.status().is_running()
+    {
+        handle.stop_with_timeout(Duration::from_secs(10)).await?;
     }
     api.update_workspace(&workspace.name, Some("stopped"), None, false, false)
         .await?;
@@ -771,7 +783,7 @@ async fn stop_workspace_local(api: &WorkerApi, workspace: &WorkspaceRecord) -> R
         "workspace_stopped",
         "succeeded",
         "workspace stopped",
-        json!({ "sandbox": workspace.sandbox_name }),
+        json!({ "vm": workspace.vm_name }),
     )
     .await?;
     Ok(())
@@ -780,10 +792,10 @@ async fn stop_workspace_local(api: &WorkerApi, workspace: &WorkspaceRecord) -> R
 async fn remove_workspace_local(
     api: &WorkerApi,
     workspace: &WorkspaceRecord,
-    remove_volume: bool,
+    remove_workspace_dir: bool,
 ) -> Result<()> {
-    if fake_runtime_enabled() {
-        return fake_remove_workspace(api, workspace, remove_volume).await;
+    if api.runtime.is_fake() {
+        return fake_remove_workspace(api, workspace, remove_workspace_dir).await;
     }
     api.update_workspace(
         &workspace.name,
@@ -793,14 +805,14 @@ async fn remove_workspace_local(
         false,
     )
     .await?;
-    if let Ok(handle) = Sandbox::get(&workspace.sandbox_name).await {
-        if handle.status() == SandboxStatus::Running || handle.status() == SandboxStatus::Draining {
+    if let Ok(handle) = get_vm(&workspace.vm_name).await {
+        if handle.status().is_running() {
             let _ = handle.stop_with_timeout(Duration::from_secs(20)).await;
         }
-        let _ = Sandbox::remove(&workspace.sandbox_name).await;
+        let _ = remove_vm(&workspace.vm_name).await;
     }
-    if remove_volume {
-        let _ = Volume::remove(&workspace.volume_name).await;
+    if remove_workspace_dir {
+        let _ = runtime::remove_workspace_dir(&workspace.workspace_dir_name).await;
     }
     api.update_workspace(
         &workspace.name,
@@ -814,8 +826,8 @@ async fn remove_workspace_local(
         &workspace.name,
         "workspace_removed",
         "succeeded",
-        "workspace sandbox removed",
-        json!({ "volume_removed": remove_volume }),
+        "workspace vm removed",
+        json!({ "workspace_dir_removed": remove_workspace_dir }),
     )
     .await
 }
@@ -824,145 +836,139 @@ async fn ensure_workspace_running_local(
     api: &WorkerApi,
     workspace: &WorkspaceRecord,
 ) -> Result<()> {
-    if fake_runtime_enabled() {
+    if api.runtime.is_fake() {
         return fake_start_workspace(api, workspace).await;
     }
-    match Sandbox::get(&workspace.sandbox_name).await {
-        Ok(handle) if handle.status() == SandboxStatus::Running => {
+    match get_vm(&workspace.vm_name).await {
+        Ok(handle) if handle.status().is_running() => {
             api.update_workspace(&workspace.name, Some("running"), None, false, false)
                 .await
         }
         Ok(handle) => {
             api.event(
                 &workspace.name,
-                "sandbox_starting",
+                "vm_starting",
                 "running",
-                "starting workspace sandbox",
-                json!({ "sandbox": workspace.sandbox_name }),
+                "starting workspace vm",
+                json!({ "vm": workspace.vm_name }),
             )
             .await?;
-            handle.start_detached().await?;
+            handle.start().await?;
             api.update_workspace(&workspace.name, Some("running"), None, false, false)
                 .await?;
             api.event(
                 &workspace.name,
-                "sandbox_started",
+                "vm_started",
                 "succeeded",
-                "workspace sandbox started",
-                json!({ "sandbox": workspace.sandbox_name }),
+                "workspace vm started",
+                json!({ "vm": workspace.vm_name }),
             )
             .await
         }
         Err(error) => {
             api.event(
                 &workspace.name,
-                "sandbox_recreate_started",
+                "vm_recreate_started",
                 "running",
-                "workspace sandbox missing; recreating it around existing volume",
-                json!({ "sandbox": workspace.sandbox_name, "volume": workspace.volume_name }),
+                "workspace vm missing; recreating it around existing workspace directory",
+                json!({ "vm": workspace.vm_name, "workspace_dir": workspace.workspace_dir_name }),
             )
             .await?;
-            create_workspace_sandbox(workspace, true, false, false)
+            create_workspace_vm(workspace, true)
                 .await
                 .with_context(|| {
                     format!(
-                        "workspace {} has no sandbox {}; failed to recreate it after: {error:#}",
-                        workspace.name, workspace.sandbox_name
+                        "workspace {} has no vm {}; failed to recreate it after: {error:#}",
+                        workspace.name, workspace.vm_name
                     )
                 })?;
             api.event(
                 &workspace.name,
-                "sandbox_recreated",
+                "vm_recreated",
                 "succeeded",
-                "workspace sandbox recreated around existing volume",
-                json!({ "sandbox": workspace.sandbox_name, "volume": workspace.volume_name }),
+                "workspace vm recreated around existing workspace directory",
+                json!({ "vm": workspace.vm_name, "workspace_dir": workspace.workspace_dir_name }),
             )
             .await?;
-            let handle = Sandbox::get(&workspace.sandbox_name)
+            let handle = get_vm(&workspace.vm_name)
                 .await
-                .with_context(|| format!("get recreated sandbox '{}'", workspace.sandbox_name))?;
-            handle.start_detached().await?;
+                .with_context(|| format!("get recreated VM '{}'", workspace.vm_name))?;
+            handle.start().await?;
             api.update_workspace(&workspace.name, Some("running"), None, false, false)
                 .await?;
             api.event(
                 &workspace.name,
-                "sandbox_started",
+                "vm_started",
                 "succeeded",
-                "workspace sandbox started",
-                json!({ "sandbox": workspace.sandbox_name }),
+                "workspace vm started",
+                json!({ "vm": workspace.vm_name }),
             )
             .await
         }
     }
 }
 
-async fn create_workspace_sandbox(
-    workspace: &WorkspaceRecord,
-    replace: bool,
-    rebuild_snapshot: bool,
-    no_snapshot: bool,
-) -> Result<()> {
-    let create_args = CreateArgs {
-        name: workspace.sandbox_name.clone(),
+async fn create_workspace_vm(workspace: &WorkspaceRecord, replace: bool) -> Result<()> {
+    let request = WorkspaceVmRequest {
+        name: workspace.vm_name.clone(),
         replace,
         cpus: workspace.cpus,
-        memory: u64::from(workspace.memory_mib),
-        rebuild_snapshot,
-        no_snapshot,
-    };
-    let mount = WorkspaceMount {
-        volume_name: workspace.volume_name.clone(),
-        volume_quota_mib: workspace.volume_quota_mib,
+        memory_mib: u64::from(workspace.memory_mib),
         workspace_name: workspace.name.clone(),
+        workspace_dir_name: workspace.workspace_dir_name.clone(),
+        workspace_quota_mib: workspace.workspace_quota_mib,
     };
-    create_sandbox(create_args, Some(mount)).await
+    create_vm(request).await
 }
 
-async fn workspace_running_sandbox_local(
+async fn workspace_running_vm_local(
     api: &WorkerApi,
     workspace: &WorkspaceRecord,
-) -> Result<Sandbox> {
-    if fake_runtime_enabled() {
+) -> Result<GuestVm> {
+    if api.runtime.is_fake() {
         bail!("MOM_RUNTIME=fake does not support guest command execution yet");
     }
-    match Sandbox::get(&workspace.sandbox_name).await {
+    match get_vm(&workspace.vm_name).await {
         Ok(handle) => match handle.status() {
-            SandboxStatus::Running | SandboxStatus::Draining => handle
+            VmStatus::Running | VmStatus::Draining => handle
                 .connect_with_timeout(Duration::from_secs(30))
                 .await
-                .with_context(|| {
-                    format!("connect to running sandbox '{}'", workspace.sandbox_name)
-                }),
-            SandboxStatus::Stopped | SandboxStatus::Crashed | SandboxStatus::Paused => {
+                .with_context(|| format!("connect to running vm '{}'", workspace.vm_name)),
+            VmStatus::Stopped | VmStatus::Crashed | VmStatus::Paused | VmStatus::Unknown => {
                 api.event(
                     &workspace.name,
-                    "sandbox_starting",
+                    "vm_starting",
                     "running",
-                    "starting workspace sandbox",
-                    json!({ "sandbox": workspace.sandbox_name }),
+                    "starting workspace vm",
+                    json!({ "vm": workspace.vm_name }),
                 )
                 .await?;
-                let sandbox = handle
+                let vm = handle
                     .start()
                     .await
-                    .with_context(|| format!("start sandbox '{}'", workspace.sandbox_name))?;
+                    .with_context(|| format!("start vm '{}'", workspace.vm_name))?;
                 api.update_workspace(&workspace.name, Some("running"), None, false, false)
                     .await?;
                 api.event(
                     &workspace.name,
-                    "sandbox_started",
+                    "vm_started",
                     "succeeded",
-                    "workspace sandbox started",
-                    json!({ "sandbox": workspace.sandbox_name }),
+                    "workspace vm started",
+                    json!({ "vm": workspace.vm_name }),
                 )
                 .await?;
-                Ok(sandbox)
+                Ok(vm)
             }
+            VmStatus::Missing => Err(anyhow!(
+                "workspace {} has no VM {}; recreate it",
+                workspace.name,
+                workspace.vm_name
+            )),
         },
         Err(error) => Err(error).with_context(|| {
             format!(
-                "workspace {} has no sandbox {}; recreate it",
-                workspace.name, workspace.sandbox_name
+                "workspace {} has no vm {}; recreate it",
+                workspace.name, workspace.vm_name
             )
         }),
     }
@@ -973,21 +979,20 @@ async fn backup_workspace_local(
     workspace: &WorkspaceRecord,
     leave_stopped: bool,
 ) -> Result<()> {
-    if fake_runtime_enabled() {
+    if api.runtime.is_fake() {
         let _ = leave_stopped;
         return fake_backup_workspace(api, workspace).await;
     }
-    let was_running = match Sandbox::get(&workspace.sandbox_name).await {
+    let was_running = match get_vm(&workspace.vm_name).await {
         Ok(handle) => {
-            let running = handle.status() == SandboxStatus::Running
-                || handle.status() == SandboxStatus::Draining;
+            let running = handle.status().is_running();
             if running {
                 api.event(
                     &workspace.name,
                     "backup_stop_started",
                     "running",
                     "stopping workspace before backup",
-                    json!({ "sandbox": workspace.sandbox_name }),
+                    json!({ "vm": workspace.vm_name }),
                 )
                 .await?;
                 handle.stop_with_timeout(Duration::from_secs(20)).await?;
@@ -998,23 +1003,23 @@ async fn backup_workspace_local(
         }
         Err(_) => false,
     };
-    let volume_path = microsandbox_volume_path(&workspace.volume_name)?;
-    if !volume_path.exists() {
+    let workspace_dir_path = workspace_dir_path(&workspace.workspace_dir_name)?;
+    if !workspace_dir_path.exists() {
         bail!(
-            "workspace volume {} does not exist at {}",
-            workspace.volume_name,
-            volume_path.display()
+            "workspace directory {} does not exist at {}",
+            workspace.workspace_dir_name,
+            workspace_dir_path.display()
         );
     }
     api.event(
         &workspace.name,
         "workspace_backup_started",
         "running",
-        "workspace volume backup started",
-        json!({ "volume": workspace.volume_name }),
+        "workspace directory backup started",
+        json!({ "workspace_dir": workspace.workspace_dir_name }),
     )
     .await?;
-    let artifact = backup::run_restic_backup(workspace, &volume_path).await?;
+    let artifact = backup::run_restic_backup(workspace, &workspace_dir_path).await?;
     let backup_id = api.record_backup(&workspace.name, &artifact).await?;
     api.update_workspace(&workspace.name, None, None, false, true)
         .await?;
@@ -1022,9 +1027,9 @@ async fn backup_workspace_local(
         &workspace.name,
         "workspace_backup_succeeded",
         "succeeded",
-        "workspace volume backup completed",
+        "workspace directory backup completed",
         json!({
-            "volume": workspace.volume_name,
+            "workspace_dir": workspace.workspace_dir_name,
             "backup_id": backup_id,
             "kind": artifact.kind,
             "location": artifact.location
@@ -1050,17 +1055,28 @@ async fn restore_workspace_local(
         .get("backup_location")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("restore job payload requires backup_location"))?;
+    let backup_workspace_name = payload
+        .get("backup_workspace_name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("restore job payload requires backup_workspace_name"))?;
+    if backup_workspace_name != workspace.name {
+        bail!(
+            "restore backup belongs to workspace {}, not {}",
+            backup_workspace_name,
+            workspace.name
+        );
+    }
     let desired_state = payload
         .get("desired_state")
         .and_then(Value::as_str)
         .unwrap_or(&workspace.desired_state);
-    if fake_runtime_enabled() {
+    if api.runtime.is_fake() {
         return fake_restore_workspace(api, workspace, backup_id, backup_location).await;
     }
-    if let Ok(handle) = Sandbox::get(&workspace.sandbox_name).await {
-        if handle.status() == SandboxStatus::Running || handle.status() == SandboxStatus::Draining {
-            handle.stop_with_timeout(Duration::from_secs(20)).await?;
-        }
+    if let Ok(handle) = get_vm(&workspace.vm_name).await
+        && handle.status().is_running()
+    {
+        handle.stop_with_timeout(Duration::from_secs(20)).await?;
     }
     api.update_workspace(&workspace.name, Some("restoring"), None, false, false)
         .await?;
@@ -1068,13 +1084,12 @@ async fn restore_workspace_local(
         &workspace.name,
         "workspace_restore_started",
         "running",
-        "workspace volume restore started",
+        "workspace directory restore started",
         json!({ "backup_id": backup_id, "location": backup_location }),
     )
     .await?;
-    ensure_workspace_volume_registered_for_restore(workspace).await?;
-    let volume_path = microsandbox_volume_path(&workspace.volume_name)?;
-    backup::run_restic_restore(backup_id, backup_location, &volume_path).await?;
+    let workspace_dir_path = workspace_dir_path(&workspace.workspace_dir_name)?;
+    backup::run_restic_restore(backup_id, backup_location, &workspace_dir_path).await?;
     api.update_workspace(
         &workspace.name,
         Some("restored"),
@@ -1087,7 +1102,7 @@ async fn restore_workspace_local(
         &workspace.name,
         "workspace_restored",
         "succeeded",
-        "workspace volume restored from backup",
+        "workspace directory restored from backup",
         json!({
             "backup_id": backup_id,
             "location": backup_location,
@@ -1097,8 +1112,8 @@ async fn restore_workspace_local(
     .await?;
     if desired_state == "running" {
         ensure_workspace_running_local(api, workspace).await?;
-    } else if Sandbox::get(&workspace.sandbox_name).await.is_err() {
-        create_workspace_sandbox(workspace, true, false, false).await?;
+    } else if get_vm(&workspace.vm_name).await.is_err() {
+        create_workspace_vm(workspace, true).await?;
         api.update_workspace(
             &workspace.name,
             Some("stopped"),
@@ -1120,42 +1135,8 @@ async fn restore_workspace_local(
     Ok(())
 }
 
-async fn ensure_workspace_volume_registered_for_restore(workspace: &WorkspaceRecord) -> Result<()> {
-    match Volume::get(&workspace.volume_name).await {
-        Ok(_) => Ok(()),
-        Err(MicrosandboxError::VolumeNotFound(_)) => {
-            let volume_path = microsandbox_volume_path(&workspace.volume_name)?;
-            if volume_path.exists() {
-                fs::remove_dir_all(&volume_path).with_context(|| {
-                    format!(
-                        "remove orphaned restored volume path {} before registering volume",
-                        volume_path.display()
-                    )
-                })?;
-            }
-            Volume::builder(&workspace.volume_name)
-                .quota(workspace.volume_quota_mib)
-                .label("mom.workspace", &workspace.name)
-                .create()
-                .await
-                .with_context(|| format!("register restored volume {}", workspace.volume_name))?;
-            Ok(())
-        }
-        Err(error) => Err(error).with_context(|| {
-            format!(
-                "inspect restored volume registration for {}",
-                workspace.volume_name
-            )
-        }),
-    }
-}
-
-fn fake_runtime_enabled() -> bool {
-    env::var("MOM_RUNTIME").is_ok_and(|value| value == "fake")
-}
-
 fn fake_workspace_dir(workspace: &WorkspaceRecord) -> Result<PathBuf> {
-    Ok(microsandbox_home()?.join("fake").join(&workspace.name))
+    Ok(runtime_home()?.join("fake").join(&workspace.name))
 }
 
 async fn fake_create_workspace(
@@ -1169,8 +1150,8 @@ async fn fake_create_workspace(
         dir.join("metadata.json"),
         serde_json::to_vec_pretty(&json!({
             "workspace": workspace.name,
-            "sandbox": workspace.sandbox_name,
-            "volume": workspace.volume_name,
+            "vm": workspace.vm_name,
+            "workspace_dir": workspace.workspace_dir_name,
             "payload": payload
         }))?,
     )?;
@@ -1194,7 +1175,7 @@ async fn fake_start_workspace(api: &WorkerApi, workspace: &WorkspaceRecord) -> R
         .await?;
     api.event(
         &workspace.name,
-        "sandbox_started",
+        "vm_started",
         "succeeded",
         "fake workspace started",
         json!({ "runtime": "fake" }),
@@ -1227,7 +1208,7 @@ async fn fake_stop_workspace(api: &WorkerApi, workspace: &WorkspaceRecord) -> Re
 async fn fake_remove_workspace(
     api: &WorkerApi,
     workspace: &WorkspaceRecord,
-    remove_volume: bool,
+    remove_workspace_dir: bool,
 ) -> Result<()> {
     let dir = fake_workspace_dir(workspace)?;
     let _ = fs::remove_dir_all(&dir);
@@ -1244,7 +1225,7 @@ async fn fake_remove_workspace(
         "workspace_removed",
         "succeeded",
         "fake workspace removed",
-        json!({ "runtime": "fake", "volume_removed": remove_volume }),
+        json!({ "runtime": "fake", "workspace_dir_removed": remove_workspace_dir }),
     )
     .await
 }
@@ -1301,7 +1282,7 @@ async fn fake_restore_workspace(
 }
 
 async fn fake_open_hermes(workspace_name: &str) -> Result<String> {
-    let dir = microsandbox_home()?.join("fake").join(workspace_name);
+    let dir = runtime_home()?.join("fake").join(workspace_name);
     fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     fs::write(dir.join("service-hermes"), b"opened")?;
     let base = env::var("MOM_FAKE_SERVICE_BASE_URL")

@@ -21,10 +21,6 @@ use axum::{
     routing::{get, post},
 };
 use clap::{Args, Parser, Subcommand};
-use microsandbox::{
-    MicrosandboxError, NetworkPolicy, Sandbox, Snapshot, SnapshotDestination, Volume,
-    sandbox::SandboxStatus,
-};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -33,13 +29,10 @@ use tokio::process::Command as TokioCommand;
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 
-const IMAGE: &str = "alpine";
 const LABEL_MANAGED: &str = "mom.managed";
 const LABEL_VERSION: &str = "mom.version";
 const GUEST_HERMES_HOME: &str = "/root/.hermes-agent";
 const HERMES_GUEST_PORT: u16 = 9119;
-const BASE_BUILDER_NAME: &str = "mom-base-builder";
-const BASE_DOCTOR_NAME: &str = "mom-base-doctor";
 
 mod acp;
 mod api;
@@ -47,19 +40,19 @@ mod auth;
 mod backup;
 mod config;
 mod db;
-mod sandbox;
+mod runtime;
 mod service;
 mod ui;
 mod worker;
 
 pub(crate) use config::*;
 pub(crate) use db::*;
-pub(crate) use sandbox::*;
+pub(crate) use runtime::*;
 
 #[derive(Debug, Parser)]
 #[command(
     name = "mom",
-    about = "Agent Mom: workspace control plane for microsandbox agent runtimes"
+    about = "Agent Mom: workspace control plane for microvm.nix agent runtimes"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -68,7 +61,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Manage durable user workspaces backed by named volumes.
+    /// Manage durable user workspaces backed by workspace directories.
     #[command(alias = "ws")]
     Workspace {
         #[command(subcommand)]
@@ -103,26 +96,6 @@ enum Command {
     Api(ApiArgs),
     /// Run a worker that claims jobs from a central API.
     Worker(WorkerArgs),
-}
-
-#[derive(Debug, Args)]
-struct CreateArgs {
-    name: String,
-    /// Replace an existing VM with this name.
-    #[arg(long)]
-    replace: bool,
-    /// vCPUs to allocate.
-    #[arg(long, default_value_t = 2)]
-    cpus: u8,
-    /// Memory in MiB.
-    #[arg(long, default_value_t = 2048)]
-    memory: u64,
-    /// Rebuild the base snapshot before creating the VM.
-    #[arg(long)]
-    rebuild_snapshot: bool,
-    /// Provision directly from Alpine instead of the base snapshot.
-    #[arg(long)]
-    no_snapshot: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -160,7 +133,7 @@ enum WorkspaceCommand {
     RefreshConfig { name: String },
     /// Verify proxy-mode credentials and egress in a workspace VM.
     ProxySmoke { name: String },
-    /// Back up a workspace volume now.
+    /// Back up a workspace directory now.
     Backup {
         name: String,
         /// Leave a running workspace stopped after backup.
@@ -176,12 +149,12 @@ enum WorkspaceCommand {
         #[arg(long)]
         backup_id: Option<String>,
     },
-    /// Remove a workspace record and VM. The named volume is kept by default.
+    /// Remove a workspace record and VM. The named workspace_dir is kept by default.
     Rm {
         name: String,
-        /// Remove the workspace named volume too.
+        /// Remove the workspace named workspace_dir too.
         #[arg(long)]
-        volume: bool,
+        workspace_dir: bool,
         /// Do not ask for confirmation.
         #[arg(short, long)]
         force: bool,
@@ -192,12 +165,8 @@ enum WorkspaceCommand {
 enum NodeCommand {
     /// Show local worker node status.
     Status,
-    /// Ensure the required versioned base snapshot exists and passes doctor.
-    EnsureBase {
-        /// Rebuild the required base snapshot even if it already exists.
-        #[arg(long)]
-        rebuild: bool,
-    },
+    /// Verify the local microvm.nix runtime prerequisites.
+    EnsureRuntime,
     /// List registered fleet nodes from the central catalog.
     List,
     /// Show a registered fleet node from the central catalog.
@@ -261,21 +230,15 @@ struct WorkspaceCreateArgs {
     /// Memory in MiB.
     #[arg(long, default_value_t = 2048)]
     memory: u64,
-    /// Workspace volume quota in MiB.
+    /// Workspace directory quota in MiB.
     #[arg(long, default_value_t = 10240)]
-    volume_quota: u32,
+    workspace_quota: u32,
     /// Auto-stop after this many idle seconds.
     #[arg(long, default_value_t = 1800)]
     idle_timeout: u64,
     /// Back up at most this often. Set 0 to disable worker-scheduled backups.
     #[arg(long, default_value_t = 900)]
     backup_interval: u64,
-    /// Rebuild the base snapshot before creating the VM.
-    #[arg(long)]
-    rebuild_snapshot: bool,
-    /// Provision directly from Alpine instead of the base snapshot.
-    #[arg(long)]
-    no_snapshot: bool,
 }
 
 #[derive(Debug, Args)]
@@ -342,10 +305,14 @@ struct WorkerArgs {
 }
 
 #[derive(Debug, Clone)]
-struct WorkspaceMount {
-    volume_name: String,
-    volume_quota_mib: u32,
+struct WorkspaceVmRequest {
+    name: String,
+    replace: bool,
+    cpus: u8,
+    memory_mib: u64,
     workspace_name: String,
+    workspace_dir_name: String,
+    workspace_quota_mib: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -357,14 +324,14 @@ struct WorkspaceRecord {
     user_id: String,
     owner_user_id: Option<i64>,
     agent_name: Option<String>,
-    sandbox_name: String,
-    volume_name: String,
+    vm_name: String,
+    workspace_dir_name: String,
     node_id: Option<String>,
     desired_state: String,
     status: String,
     cpus: u8,
     memory_mib: u32,
-    volume_quota_mib: u32,
+    workspace_quota_mib: u32,
     idle_timeout_secs: u64,
     backup_interval_secs: u64,
     last_used_at: i64,
@@ -406,8 +373,8 @@ struct NodeCapacity {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct NodePressure {
     active_workspaces: usize,
-    running_sandboxes: usize,
-    managed_sandboxes: usize,
+    running_vms: usize,
+    managed_vms: usize,
     allocated_memory_mib: u64,
     disk_available_mib: Option<u64>,
     capacity_ok: bool,
@@ -459,8 +426,8 @@ struct CreateWorkspaceRequest {
     cpus: u8,
     #[serde(default = "default_workspace_memory")]
     memory: u64,
-    #[serde(default = "default_workspace_volume_quota")]
-    volume_quota: u32,
+    #[serde(default = "default_workspace_quota")]
+    workspace_quota: u32,
     #[serde(default = "default_workspace_idle_timeout")]
     idle_timeout: u64,
     #[serde(default = "default_workspace_backup_interval")]
@@ -620,31 +587,35 @@ async fn workspace_command(command: WorkspaceCommand) -> Result<()> {
         WorkspaceCommand::Stop { name } => workspace_stop(&name).await,
         WorkspaceCommand::Exec { name, command } => {
             let workspace = workspace_get(&name)?;
+            require_workspace_local(&workspace, "exec")?;
             workspace_touch(&workspace.name)?;
-            let sandbox = workspace_running_sandbox(&workspace).await?;
-            run_guest_command(&sandbox, command).await
+            let vm = workspace_running_vm(&workspace).await?;
+            run_guest_command(&vm, command).await
         }
         WorkspaceCommand::Hermes { name, args } => {
             let workspace = workspace_get(&name)?;
+            require_workspace_local(&workspace, "hermes")?;
             workspace_touch(&workspace.name)?;
-            let sandbox = workspace_running_sandbox(&workspace).await?;
+            let vm = workspace_running_vm(&workspace).await?;
             let mut command = vec!["hermes".to_string()];
             command.extend(args);
-            run_guest_command(&sandbox, command).await
+            run_guest_command(&vm, command).await
         }
         WorkspaceCommand::RefreshConfig { name } => {
             let workspace = workspace_get(&name)?;
+            require_workspace_local(&workspace, "refresh config")?;
             let config = load_mom_config()?;
-            let sandbox = workspace_running_sandbox(&workspace).await?;
-            apply_guest_auth_config(&sandbox, &config).await?;
+            let vm = workspace_running_vm(&workspace).await?;
+            apply_guest_auth_config(&vm, &config).await?;
             println!("refreshed workspace {name} config");
             Ok(())
         }
         WorkspaceCommand::ProxySmoke { name } => {
             let workspace = workspace_get(&name)?;
+            require_workspace_local(&workspace, "proxy smoke")?;
             workspace_touch(&workspace.name)?;
-            let sandbox = workspace_running_sandbox(&workspace).await?;
-            proxy_smoke(&sandbox).await
+            let vm = workspace_running_vm(&workspace).await?;
+            proxy_smoke(&vm).await
         }
         WorkspaceCommand::Backup {
             name,
@@ -659,18 +630,18 @@ async fn workspace_command(command: WorkspaceCommand) -> Result<()> {
         }
         WorkspaceCommand::Rm {
             name,
-            volume,
+            workspace_dir,
             force,
-        } => workspace_remove(&name, volume, force).await,
+        } => workspace_remove(&name, workspace_dir, force).await,
     }
 }
 
 async fn node_command(command: NodeCommand) -> Result<()> {
     match command {
         NodeCommand::Status => node_status().await,
-        NodeCommand::EnsureBase { rebuild } => {
+        NodeCommand::EnsureRuntime => {
             let config = load_mom_config()?;
-            sandbox::ensure_base_snapshot_for_deploy(&config, rebuild).await
+            runtime::ensure_runtime_for_deploy(&config).await
         }
         NodeCommand::List => node_list(),
         NodeCommand::Inspect { node } => node_inspect(&node),
@@ -907,61 +878,58 @@ fn fleet_recover_host(from: &str, to: &str, dry_run: bool) -> Result<()> {
 async fn workspace_create(args: WorkspaceCreateArgs) -> Result<()> {
     let display_name = args.name.trim().to_string();
     let name = workspace_slug_from_name(&args.name)?;
-    let sandbox_name = format!("mom-{name}");
-    let volume_name = format!("mom-{name}-workspace");
+    let vm_name = format!("mom-{name}");
+    let workspace_dir_name = format!("mom-{name}-workspace");
     let memory = u32::try_from(args.memory).context("memory must fit in u32 MiB")?;
     let user_id = args.user.unwrap_or_else(|| name.clone());
 
-    let create_args = CreateArgs {
-        name: sandbox_name.clone(),
+    let request = WorkspaceVmRequest {
+        name: vm_name.clone(),
         replace: args.replace,
         cpus: args.cpus,
-        memory: args.memory,
-        rebuild_snapshot: args.rebuild_snapshot,
-        no_snapshot: args.no_snapshot,
-    };
-    let mount = WorkspaceMount {
-        volume_name: volume_name.clone(),
-        volume_quota_mib: args.volume_quota,
+        memory_mib: args.memory,
         workspace_name: name.clone(),
+        workspace_dir_name: workspace_dir_name.clone(),
+        workspace_quota_mib: args.workspace_quota,
     };
 
-    workspace_upsert_pending(
-        &name,
-        &display_name,
-        &user_id,
-        None,
-        None,
-        &sandbox_name,
-        &volume_name,
-        Some(&node_id()?),
-        args.cpus,
-        memory,
-        args.volume_quota,
-        args.idle_timeout,
-        args.backup_interval,
-    )?;
+    let assigned_node = node_id()?;
+    workspace_upsert_pending(WorkspaceUpsert {
+        name: &name,
+        display_name: &display_name,
+        user_id: &user_id,
+        owner_user_id: None,
+        agent_name: None,
+        vm_name: &vm_name,
+        workspace_dir_name: &workspace_dir_name,
+        assigned_node_id: Some(&assigned_node),
+        cpus: args.cpus,
+        memory_mib: memory,
+        workspace_quota_mib: args.workspace_quota,
+        idle_timeout_secs: args.idle_timeout,
+        backup_interval_secs: args.backup_interval,
+    })?;
     record_workspace_event(
         &name,
         "workspace_create_started",
         "running",
         "workspace create requested",
         json!({
-            "sandbox": sandbox_name,
-            "volume": volume_name,
+            "vm": vm_name,
+            "workspace_dir": workspace_dir_name,
             "cpus": args.cpus,
             "memory_mib": memory,
-            "volume_quota_mib": args.volume_quota
+            "workspace_quota_mib": args.workspace_quota
         }),
     )?;
-    if let Err(error) = create_sandbox(create_args, Some(mount)).await {
+    if let Err(error) = create_vm(request).await {
         workspace_mark_status(&name, "create-failed")?;
         record_workspace_event(
             &name,
             "workspace_create_failed",
             "failed",
             &format!("{error:#}"),
-            json!({ "sandbox": sandbox_name, "volume": volume_name }),
+            json!({ "vm": vm_name, "workspace_dir": workspace_dir_name }),
         )?;
         return Err(error);
     }
@@ -970,17 +938,17 @@ async fn workspace_create(args: WorkspaceCreateArgs) -> Result<()> {
         &name,
         "workspace_created",
         "succeeded",
-        "workspace VM created and stopped with persistent volume",
-        json!({ "sandbox": sandbox_name, "volume": volume_name }),
+        "workspace VM created and stopped with persistent workspace directory",
+        json!({ "vm": vm_name, "workspace_dir": workspace_dir_name }),
     )?;
-    println!("workspace {name} ready with volume {volume_name}");
+    println!("workspace {name} ready with workspace_dir {workspace_dir_name}");
     Ok(())
 }
 
 fn workspace_list() -> Result<()> {
     let records = workspace_all()?;
     println!(
-        "{:<24} {:<24} {:<16} {:<12} {:<8} {:<8} {:<8} VOLUME",
+        "{:<24} {:<24} {:<16} {:<12} {:<8} {:<8} {:<8} WORKSPACE_DIR",
         "SLUG", "DISPLAY", "NODE", "DESIRED", "CPUS", "MEM", "QUOTA"
     );
     for record in records {
@@ -992,8 +960,8 @@ fn workspace_list() -> Result<()> {
             record.desired_state,
             record.cpus,
             format!("{}M", record.memory_mib),
-            format!("{}M", record.volume_quota_mib),
-            record.volume_name
+            format!("{}M", record.workspace_quota_mib),
+            record.workspace_dir_name
         );
     }
     Ok(())
@@ -1006,9 +974,9 @@ async fn workspace_inspect(name: &str) -> Result<()> {
         .node_id
         .as_deref()
         .is_none_or(|assigned| assigned == local_node);
-    let sandbox_status = if runtime_is_local {
-        match Sandbox::get(&record.sandbox_name).await {
-            Ok(handle) => format!("{:?}", handle.status()),
+    let vm_status = if runtime_is_local {
+        match get_vm(&record.vm_name).await {
+            Ok(handle) => handle.status().as_str().to_string(),
             Err(_) => "missing".to_string(),
         }
     } else {
@@ -1017,7 +985,7 @@ async fn workspace_inspect(name: &str) -> Result<()> {
             record.node_id.as_deref().unwrap_or("-")
         )
     };
-    let volume_path = microsandbox_volume_path(&record.volume_name)?;
+    let workspace_dir_path = workspace_dir_path(&record.workspace_dir_name)?;
     let events = workspace_recent_events(name, 5)?;
 
     println!("Workspace: {}", record.name);
@@ -1029,13 +997,16 @@ async fn workspace_inspect(name: &str) -> Result<()> {
     println!("Inspecting node: {local_node}");
     println!("Desired: {}", record.desired_state);
     println!("Status: {}", record.status);
-    println!("Sandbox: {}", record.sandbox_name);
-    println!("Sandbox status: {sandbox_status}");
-    println!("Volume: {}", record.volume_name);
-    println!("Volume path: {}", volume_path.display());
+    println!("VM: {}", record.vm_name);
+    println!("VM status: {vm_status}");
+    println!("Workspace Directory: {}", record.workspace_dir_name);
+    println!("Workspace Directory path: {}", workspace_dir_path.display());
     println!("CPUs: {}", record.cpus);
     println!("Memory: {} MiB", record.memory_mib);
-    println!("Volume quota: {} MiB", record.volume_quota_mib);
+    println!(
+        "Workspace Directory quota: {} MiB",
+        record.workspace_quota_mib
+    );
     println!("Idle timeout: {}s", record.idle_timeout_secs);
     println!("Backup interval: {}s", record.backup_interval_secs);
     println!("Last used: {}", record.last_used_at);
@@ -1092,18 +1063,27 @@ async fn workspace_start(name: &str) -> Result<()> {
         "workspace_start_requested",
         "running",
         "workspace desired state set to running",
-        json!({ "sandbox": workspace.sandbox_name }),
+        json!({ "vm": workspace.vm_name }),
     )?;
-    workspace_ensure_running(&workspace).await
+    if workspace_is_local(&workspace)? {
+        workspace_ensure_running(&workspace).await
+    } else {
+        queue_assigned_workspace_job(&workspace, "start", json!({})).await?;
+        Ok(())
+    }
 }
 
 async fn workspace_stop(name: &str) -> Result<()> {
     let workspace = workspace_get(name)?;
     workspace_set_desired(name, "stopped")?;
-    if let Ok(handle) = Sandbox::get(&workspace.sandbox_name).await {
-        if handle.status() == SandboxStatus::Running || handle.status() == SandboxStatus::Draining {
-            handle.stop_with_timeout(Duration::from_secs(10)).await?;
-        }
+    if !workspace_is_local(&workspace)? {
+        queue_assigned_workspace_job(&workspace, "stop", json!({})).await?;
+        return Ok(());
+    }
+    if let Ok(handle) = get_vm(&workspace.vm_name).await
+        && handle.status().is_running()
+    {
+        handle.stop_with_timeout(Duration::from_secs(10)).await?;
     }
     workspace_mark_status(name, "stopped")?;
     record_workspace_event(
@@ -1111,33 +1091,90 @@ async fn workspace_stop(name: &str) -> Result<()> {
         "workspace_stopped",
         "succeeded",
         "workspace stopped",
-        json!({ "sandbox": workspace.sandbox_name }),
+        json!({ "vm": workspace.vm_name }),
     )?;
     println!("stopped workspace {name}");
     Ok(())
 }
 
-async fn workspace_remove(name: &str, remove_volume: bool, force: bool) -> Result<()> {
+async fn workspace_remove(name: &str, remove_workspace_dir: bool, force: bool) -> Result<()> {
     if !force {
         bail!("refusing to remove workspace without --force");
     }
     let workspace = workspace_get(name)?;
-    let _ = workspace_stop(name).await;
-    let _ = Sandbox::remove(&workspace.sandbox_name).await;
-    if remove_volume {
-        let _ = microsandbox::Volume::remove(&workspace.volume_name).await;
+    if workspace_is_local(&workspace)? {
+        let _ = workspace_stop(name).await;
+        remove_vm(&workspace.vm_name).await?;
+        if remove_workspace_dir {
+            runtime::remove_workspace_dir(&workspace.workspace_dir_name).await?;
+        }
+    } else {
+        queue_assigned_workspace_job(
+            &workspace,
+            "remove",
+            json!({ "remove_workspace_dir": remove_workspace_dir }),
+        )
+        .await?;
     }
     record_workspace_event(
         name,
         "workspace_removed",
         "succeeded",
-        "workspace record and sandbox removed",
-        json!({ "sandbox": workspace.sandbox_name, "volume_removed": remove_volume }),
+        "workspace record and vm removed",
+        json!({ "vm": workspace.vm_name, "workspace_dir_removed": remove_workspace_dir }),
     )?;
     let db = fleet_db()?;
     db.execute("DELETE FROM workspaces WHERE name = ?1", params![name])?;
     println!("removed workspace {name}");
     Ok(())
+}
+
+fn workspace_is_local(workspace: &WorkspaceRecord) -> Result<bool> {
+    let Some(assigned) = workspace.node_id.as_deref() else {
+        return Ok(true);
+    };
+    Ok(assigned == node_id()?)
+}
+
+fn require_workspace_local(workspace: &WorkspaceRecord, action: &str) -> Result<()> {
+    if workspace_is_local(workspace)? {
+        return Ok(());
+    }
+    bail!(
+        "cannot {action} workspace {} locally; it is assigned to {}",
+        workspace.name,
+        workspace.node_id.as_deref().unwrap_or("-")
+    )
+}
+
+async fn queue_assigned_workspace_job(
+    workspace: &WorkspaceRecord,
+    kind: &str,
+    payload: Value,
+) -> Result<JobRecord> {
+    let node_id = workspace.node_id.as_deref().ok_or_else(|| {
+        anyhow!(
+            "workspace {} is not assigned to a worker node",
+            workspace.name
+        )
+    })?;
+    if !node_allows_worker_claims(node_id)? {
+        bail!(
+            "workspace {} is assigned to node {node_id}, but that node is not accepting jobs",
+            workspace.name
+        );
+    }
+    let job = create_job(CreateJobRequest {
+        workspace_name: workspace.name.clone(),
+        node_id: Some(node_id.to_string()),
+        kind: kind.to_string(),
+        payload,
+    })?;
+    println!(
+        "queued {kind} job {} for workspace {} on node {}",
+        job.id, workspace.name, node_id
+    );
+    backup::wait_for_worker_job(kind, &job.id).await
 }
 
 async fn node_status() -> Result<()> {
@@ -1147,7 +1184,7 @@ async fn node_status() -> Result<()> {
     let pressure = node_pressure(&records).await?;
     println!("Node: {}", node_id()?);
     println!("State dir: {}", fleet_state_dir()?.display());
-    println!("MSB home: {}", microsandbox_home()?.display());
+    println!("Runtime home: {}", runtime_home()?.display());
     println!("Workspaces: {}", records.len());
     println!(
         "Capacity: {} CPU, {} MiB memory, {} active workspaces, {} MiB disk reserve",
@@ -1156,8 +1193,8 @@ async fn node_status() -> Result<()> {
         capacity.max_active_workspaces,
         capacity.disk_reserve_mib
     );
-    println!("Managed sandboxes: {}", pressure.managed_sandboxes);
-    println!("Running sandboxes: {}", pressure.running_sandboxes);
+    println!("Managed vms: {}", pressure.managed_vms);
+    println!("Running vms: {}", pressure.running_vms);
     println!("Active workspaces: {}", pressure.active_workspaces);
     println!(
         "Allocated running memory: {} MiB",
@@ -1185,30 +1222,24 @@ fn node_capacity() -> NodeCapacity {
 }
 
 async fn node_pressure(records: &[WorkspaceRecord]) -> Result<NodePressure> {
-    let sandboxes = Sandbox::list().await.unwrap_or_default();
-    let running_sandboxes = sandboxes
+    let vms = list_vms().await.unwrap_or_default();
+    let running_vms = vms
         .iter()
-        .filter(|handle| handle.status() == SandboxStatus::Running)
+        .filter(|handle| handle.status().is_running())
         .count();
-    let managed_sandboxes = sandboxes
+    let managed_vms = vms
         .iter()
         .filter(|handle| {
             handle
-                .config()
-                .ok()
-                .and_then(|config| config.labels.get(LABEL_MANAGED).cloned())
+                .labels()
+                .get(LABEL_MANAGED)
                 .is_some_and(|value| value == "true")
         })
         .count();
-    let running_workspace_names: Vec<_> = sandboxes
+    let running_workspace_names: Vec<_> = vms
         .iter()
-        .filter(|handle| handle.status() == SandboxStatus::Running)
-        .filter_map(|handle| {
-            handle
-                .config()
-                .ok()
-                .and_then(|config| config.labels.get("mom.workspace").cloned())
-        })
+        .filter(|handle| handle.status().is_running())
+        .filter_map(|handle| handle.labels().get("mom.workspace").cloned())
         .collect();
     let active_workspaces = running_workspace_names.len();
     let allocated_memory_mib = records
@@ -1231,8 +1262,8 @@ async fn node_pressure(records: &[WorkspaceRecord]) -> Result<NodePressure> {
 
     Ok(NodePressure {
         active_workspaces,
-        running_sandboxes,
-        managed_sandboxes,
+        running_vms,
+        managed_vms,
         allocated_memory_mib,
         disk_available_mib,
         capacity_ok: active_ok && memory_ok && disk_ok,
@@ -1253,8 +1284,8 @@ async fn disk_available_mib() -> Result<u64> {
 }
 
 async fn workspace_ensure_running(workspace: &WorkspaceRecord) -> Result<()> {
-    match Sandbox::get(&workspace.sandbox_name).await {
-        Ok(handle) if handle.status() == SandboxStatus::Running => {
+    match get_vm(&workspace.vm_name).await {
+        Ok(handle) if handle.status().is_running() => {
             workspace_mark_status(&workspace.name, "running")?;
             Ok(())
         }
@@ -1263,89 +1294,92 @@ async fn workspace_ensure_running(workspace: &WorkspaceRecord) -> Result<()> {
                 "info",
                 "workspace_starting",
                 Some(&workspace.name),
-                "starting workspace sandbox",
+                "starting workspace vm",
             );
             record_workspace_event(
                 &workspace.name,
-                "sandbox_starting",
+                "vm_starting",
                 "running",
-                "starting workspace sandbox",
-                json!({ "sandbox": workspace.sandbox_name }),
+                "starting workspace vm",
+                json!({ "vm": workspace.vm_name }),
             )?;
-            let sandbox = handle.start_detached().await?;
-            println!("started workspace {} as {}", workspace.name, sandbox.name());
+            let vm = handle.start().await?;
+            println!("started workspace {} as {}", workspace.name, vm.name());
             workspace_mark_status(&workspace.name, "running")?;
             record_workspace_event(
                 &workspace.name,
-                "sandbox_started",
+                "vm_started",
                 "succeeded",
-                "workspace sandbox started",
-                json!({ "sandbox": workspace.sandbox_name }),
+                "workspace vm started",
+                json!({ "vm": workspace.vm_name }),
             )?;
             Ok(())
         }
         Err(error) => Err(error).with_context(|| {
             format!(
-                "workspace {} has no sandbox {}; recreate it",
-                workspace.name, workspace.sandbox_name
+                "workspace {} has no vm {}; recreate it",
+                workspace.name, workspace.vm_name
             )
         }),
     }
 }
 
-async fn workspace_running_sandbox(workspace: &WorkspaceRecord) -> Result<Sandbox> {
-    match Sandbox::get(&workspace.sandbox_name).await {
+async fn workspace_running_vm(workspace: &WorkspaceRecord) -> Result<GuestVm> {
+    match get_vm(&workspace.vm_name).await {
         Ok(handle) => match handle.status() {
-            SandboxStatus::Running | SandboxStatus::Draining => handle
+            VmStatus::Running | VmStatus::Draining => handle
                 .connect_with_timeout(Duration::from_secs(30))
                 .await
-                .with_context(|| {
-                    format!("connect to running sandbox '{}'", workspace.sandbox_name)
-                }),
-            SandboxStatus::Stopped | SandboxStatus::Crashed | SandboxStatus::Paused => {
+                .with_context(|| format!("connect to running vm '{}'", workspace.vm_name)),
+            VmStatus::Stopped | VmStatus::Crashed | VmStatus::Paused | VmStatus::Unknown => {
                 log_record(
                     "info",
                     "workspace_starting",
                     Some(&workspace.name),
-                    "starting workspace sandbox",
+                    "starting workspace vm",
                 );
                 record_workspace_event(
                     &workspace.name,
-                    "sandbox_starting",
+                    "vm_starting",
                     "running",
-                    "starting workspace sandbox",
-                    json!({ "sandbox": workspace.sandbox_name }),
+                    "starting workspace vm",
+                    json!({ "vm": workspace.vm_name }),
                 )?;
-                let sandbox = handle
+                let vm = handle
                     .start()
                     .await
-                    .with_context(|| format!("start sandbox '{}'", workspace.sandbox_name))?;
+                    .with_context(|| format!("start vm '{}'", workspace.vm_name))?;
                 workspace_mark_status(&workspace.name, "running")?;
                 record_workspace_event(
                     &workspace.name,
-                    "sandbox_started",
+                    "vm_started",
                     "succeeded",
-                    "workspace sandbox started",
-                    json!({ "sandbox": workspace.sandbox_name }),
+                    "workspace vm started",
+                    json!({ "vm": workspace.vm_name }),
                 )?;
-                Ok(sandbox)
+                Ok(vm)
             }
+            VmStatus::Missing => Err(anyhow!(
+                "workspace {} has no VM {}; recreate it",
+                workspace.name,
+                workspace.vm_name
+            )),
         },
         Err(error) => Err(error).with_context(|| {
             format!(
-                "workspace {} has no sandbox {}; recreate it",
-                workspace.name, workspace.sandbox_name
+                "workspace {} has no vm {}; recreate it",
+                workspace.name, workspace.vm_name
             )
         }),
     }
 }
 
-async fn checked_shell(sandbox: &Sandbox, script: &str) -> Result<()> {
-    let output = sandbox.shell(script).await?;
-    print!("{}", output.stdout()?);
-    eprint!("{}", output.stderr()?);
-    if !output.status().success {
-        bail!("guest shell command exited with {}", output.status().code);
+async fn checked_shell(vm: &GuestVm, script: &str) -> Result<()> {
+    let output = vm.shell(script).await?;
+    print!("{}", output.stdout);
+    eprint!("{}", output.stderr);
+    if !output.ok {
+        bail!("guest shell command exited with {}", output.code);
     }
     Ok(())
 }
@@ -1528,11 +1562,11 @@ fn short_hash(value: &str, chars: usize) -> String {
 }
 
 fn now_epoch() -> Result<i64> {
-    Ok(SystemTime::now()
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)?
         .as_secs()
         .try_into()
-        .context("system time does not fit in i64 seconds")?)
+        .context("system time does not fit in i64 seconds")
 }
 
 fn default_workspace_cpus() -> u8 {
@@ -1543,7 +1577,7 @@ fn default_workspace_memory() -> u64 {
     2048
 }
 
-fn default_workspace_volume_quota() -> u32 {
+fn default_workspace_quota() -> u32 {
     10240
 }
 
@@ -1613,7 +1647,7 @@ fn config_string(value: &str) -> String {
 }
 
 fn hermes_soul_md() -> &'static str {
-    "You are running inside an isolated Agent Mom microsandbox. Work in /workspace.\n"
+    "You are running inside an isolated Agent Mom microvm.nix VM. Work in /workspace.\n"
 }
 
 fn shell_quote(value: &str) -> String {
@@ -1627,9 +1661,6 @@ mod tests {
     fn test_config() -> MomConfig {
         MomConfig {
             schema_version: 1,
-            runtime: RuntimeConfig {
-                snapshot_name: Some("mom-base-testrev".to_string()),
-            },
             credentials: CredentialConfig {
                 proxy_url: Some("http://127.0.0.1:1080".to_string()),
                 proxy_ca_path: Some(PathBuf::from("/tmp/agentmom-proxy-ca.crt")),
@@ -1668,9 +1699,9 @@ mod tests {
     }
 
     #[test]
-    fn missing_snapshot_name_is_invalid_for_node() {
+    fn missing_referenced_proxy_ca_is_invalid_for_node() {
         let mut config = test_config();
-        config.runtime.snapshot_name = None;
+        config.credentials.proxy_ca_path = Some(PathBuf::from("/tmp/agentmom-missing-ca.crt"));
         assert!(config.validate_for_node().is_err());
     }
 

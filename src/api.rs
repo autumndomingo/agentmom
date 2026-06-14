@@ -137,6 +137,17 @@ async fn api_create_job(
     headers: HeaderMap,
     Json(mut request): Json<CreateJobRequest>,
 ) -> Result<Json<JobResponse>, ApiError> {
+    match request.kind.as_str() {
+        "start" | "warm" | "stop" | "execute" | "hermes" => {}
+        "backup" | "restore" | "remove" => {
+            auth::require_admin(&headers)?;
+        }
+        other => {
+            return Err(ApiError::Anyhow(anyhow!(
+                "unsupported public job kind: {other}"
+            )));
+        }
+    }
     let workspace = workspace_get(&request.workspace_name)?;
     auth::authorize_workspace(&headers, &workspace.name)?;
     match (&request.node_id, &workspace.node_id) {
@@ -194,21 +205,23 @@ async fn api_create_workspace(
     let assigned_node = select_ready_node(request.node_id.as_deref())?;
     let user_id = request.user.clone().unwrap_or_else(|| name.clone());
     let memory = u32::try_from(request.memory).context("memory must fit in u32 MiB")?;
-    workspace_upsert_pending(
-        &name,
-        &display_name,
-        &user_id,
-        None,
-        None,
-        &format!("mom-{name}"),
-        &format!("mom-{name}-workspace"),
-        Some(&assigned_node),
-        request.cpus,
-        memory,
-        request.volume_quota,
-        request.idle_timeout,
-        request.backup_interval,
-    )?;
+    let vm_name = format!("mom-{name}");
+    let workspace_dir_name = format!("mom-{name}-workspace");
+    workspace_upsert_pending(WorkspaceUpsert {
+        name: &name,
+        display_name: &display_name,
+        user_id: &user_id,
+        owner_user_id: None,
+        agent_name: None,
+        vm_name: &vm_name,
+        workspace_dir_name: &workspace_dir_name,
+        assigned_node_id: Some(&assigned_node),
+        cpus: request.cpus,
+        memory_mib: memory,
+        workspace_quota_mib: request.workspace_quota,
+        idle_timeout_secs: request.idle_timeout,
+        backup_interval_secs: request.backup_interval,
+    })?;
     let job = create_job(CreateJobRequest {
         workspace_name: name,
         kind: "create".to_string(),
@@ -217,7 +230,7 @@ async fn api_create_workspace(
             "user": request.user,
             "cpus": request.cpus,
             "memory": request.memory,
-            "volume_quota": request.volume_quota,
+            "workspace_quota": request.workspace_quota,
             "idle_timeout": request.idle_timeout,
             "backup_interval": request.backup_interval
         }),
@@ -284,8 +297,9 @@ async fn api_worker_job_event(
     if request.event_type == "job_running" {
         mark_job_running(&id, &request.node_id)?;
     }
-    record_workspace_event(
+    record_workspace_event_for_node(
         &job.workspace_name,
+        &request.node_id,
         &request.event_type,
         &request.status,
         &request.message,

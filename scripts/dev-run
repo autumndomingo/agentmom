@@ -164,6 +164,7 @@ fi
 proxy_dir="${repo_root}/.state/iron-proxy"
 proxy_key_file="${proxy_dir}/openrouter-api-key"
 proxy_config_file="${proxy_dir}/config.yaml"
+proxy_bind="${MOM_PROXY_BIND:-${MOM_MICROVM_HOST_IP}:1080}"
 mkdir -p "${proxy_dir}"
 install -m 0600 /dev/null "${proxy_key_file}"
 printf '%s' "${OPENROUTER_API_KEY}" >"${proxy_key_file}"
@@ -175,7 +176,7 @@ dns:
 proxy:
   http_listen: 127.0.0.1:18080
   https_listen: 127.0.0.1:18443
-  tunnel_listen: 127.0.0.1:1080
+  tunnel_listen: ${proxy_bind}
   upstream_response_header_timeout: 5m
 tls:
   mode: mitm
@@ -223,10 +224,6 @@ wait_for_tcp "starting proxy" 1080 "${log_dir}/iron-proxy.log"
 
 run_step "building UI" "${log_dir}/ui-build.log" npm --prefix ui run build
 
-if [ ! -x "${MSB_PATH}" ]; then
-  run_step "installing microsandbox" "${log_dir}/msb-install.log" bash -lc 'set -a; source .state/dev.env; set +a; cargo clean -p microsandbox >/dev/null && cargo build --bin mom'
-fi
-
 run_step "building mom" "${log_dir}/cargo-build.log" cargo build --bin mom
 
 "${repo_root}/target/debug/mom" api --bind "${MOM_API_BIND}" >"${log_dir}/api.log" 2>&1 &
@@ -235,7 +232,7 @@ write_pid_file
 wait_for_http "starting API" "${MOM_API_URL}/health/ready" "${log_dir}/api.log"
 
 run_step "checking config" "${log_dir}/config-doctor.log" "${repo_root}/target/debug/mom" config doctor
-run_step "checking base image" "${log_dir}/ensure-base.log" "${repo_root}/target/debug/mom" node ensure-base
+run_step "checking microvm runtime" "${log_dir}/ensure-runtime.log" "${repo_root}/target/debug/mom" node ensure-runtime
 
 "${repo_root}/target/debug/mom" worker --interval 5 >"${log_dir}/worker.log" 2>&1 &
 worker_pid=$!

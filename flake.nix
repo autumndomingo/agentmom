@@ -1,5 +1,5 @@
 {
-  description = "Agent Mom: small Alpine microsandbox VM manager for Codex and Hermes";
+  description = "Agent Mom: isolated workspace VM manager for Codex and Hermes";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -8,9 +8,13 @@
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    microvm = {
+      url = "github:microvm-nix/microvm.nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
-  outputs = { self, nixpkgs, crane, rust-overlay }:
+  outputs = { self, nixpkgs, crane, rust-overlay, microvm }:
     let
       systems = [
         "aarch64-darwin"
@@ -19,6 +23,8 @@
         "x86_64-linux"
       ];
       eachSystem = nixpkgs.lib.genAttrs systems;
+      nixpkgsInputUrl = "path:${nixpkgs.outPath}";
+      microvmInputUrl = "path:${microvm.outPath}";
     in
     {
       packages = eachSystem (system:
@@ -35,69 +41,11 @@
               let
                 rel = pkgs.lib.removePrefix "${toString ./.}/" (toString path);
               in
-              (craneLib.filterCargoSources path type)
+              (craneLib.filterCargoSources path type || rel == "nix" || rel == "nix/microvm-workspace.nix")
               && !(pkgs.lib.hasPrefix "tests/" rel);
           };
-          microsandboxVersion = "0.5.6";
-          microsandboxBundleHashes = {
-            x86_64-linux = "sha256-tVCx9fB4XY+2+eEyLCFq+m/k6DAg6n82ThIwgFDYTlU=";
-            aarch64-linux = "sha256-kpbLJI9u3phg625gKeMtlszwm6NOKy5vazPAiZvHjoc=";
-            aarch64-darwin = "sha256-RifDi+7vNI9g8tQIyHhhjJ6firQzmjAgQFgEFXs98t4=";
-          };
-          microsandboxBundlePlatforms = {
-            x86_64-linux = "linux-x86_64";
-            aarch64-linux = "linux-aarch64";
-            aarch64-darwin = "darwin-aarch64";
-          };
-          microsandboxBundleSrc =
-            if builtins.hasAttr system microsandboxBundleHashes then
-              pkgs.fetchurl {
-                url = "https://github.com/superradcompany/microsandbox/releases/download/v${microsandboxVersion}/microsandbox-${microsandboxBundlePlatforms.${system}}.tar.gz";
-                hash = microsandboxBundleHashes.${system};
-              }
-            else
-              null;
-          agentdPrebuilt = {
-            x86_64-linux = pkgs.fetchurl {
-              url = "https://github.com/superradcompany/microsandbox/releases/download/v0.5.6/agentd-x86_64";
-              hash = "sha256-7LRrjBMjQoPkyItM+MMrcVCYWCaxgE8s0KVbfTcEQ+o=";
-            };
-            x86_64-darwin = pkgs.fetchurl {
-              url = "https://github.com/superradcompany/microsandbox/releases/download/v0.5.6/agentd-x86_64";
-              hash = "sha256-7LRrjBMjQoPkyItM+MMrcVCYWCaxgE8s0KVbfTcEQ+o=";
-            };
-            aarch64-linux = pkgs.fetchurl {
-              url = "https://github.com/superradcompany/microsandbox/releases/download/v0.5.6/agentd-aarch64";
-              hash = "sha256-BHBGigWM/ydms0Or7E6A6/8SUo8/43mjSJgx2lIWhRg=";
-            };
-            aarch64-darwin = pkgs.fetchurl {
-              url = "https://github.com/superradcompany/microsandbox/releases/download/v0.5.6/agentd-aarch64";
-              hash = "sha256-BHBGigWM/ydms0Or7E6A6/8SUo8/43mjSJgx2lIWhRg=";
-            };
-          }.${system};
-          isMicrosandboxGit = packages:
-            nixpkgs.lib.any
-              (package:
-                nixpkgs.lib.hasPrefix "git+https://github.com/superradcompany/microsandbox"
-                  (package.source or ""))
-              packages;
           cargoVendorDir = craneLib.vendorCargoDeps {
             inherit src;
-            overrideVendorGitCheckout = packages: drv:
-              if isMicrosandboxGit packages then
-                drv.overrideAttrs (old: {
-                  postPatch = (old.postPatch or "") + ''
-                    substituteInPlace crates/filesystem/build.rs \
-                      --replace-fail 'download_to(&url, &dest);' \
-                      'std::fs::copy("${agentdPrebuilt}", &dest).expect("failed to copy Nix-provided agentd");'
-                  '' + nixpkgs.lib.optionalString (microsandboxBundleSrc != null) ''
-                    substituteInPlace crates/microsandbox/build.rs \
-                      --replace-fail 'let data = download(&url).expect("failed to download microsandbox bundle");' \
-                      'let data = std::fs::read("${microsandboxBundleSrc}").expect("failed to read Nix-provided microsandbox bundle");'
-                  '';
-                })
-              else
-                drv;
           };
           commonArgs = {
             inherit src cargoVendorDir;
@@ -113,9 +61,8 @@
               ];
             preBuild = ''
               export HOME="$TMPDIR/home"
-              export MSB_HOME="$TMPDIR/microsandbox"
               export XDG_CACHE_HOME="$TMPDIR/cache"
-              mkdir -p "$HOME" "$MSB_HOME" "$XDG_CACHE_HOME"
+              mkdir -p "$HOME" "$XDG_CACHE_HOME"
             '';
           };
           cargoArtifacts = craneLib.buildDepsOnly commonArgs;
@@ -167,42 +114,11 @@
               runHook postInstall
             '';
           };
-          microsandbox-runtime = pkgs.stdenv.mkDerivation {
-            pname = "microsandbox-runtime";
-            version = microsandboxVersion;
-            src = microsandboxBundleSrc;
-            sourceRoot = ".";
-            nativeBuildInputs = nixpkgs.lib.optionals pkgs.stdenv.isLinux [
-              pkgs.autoPatchelfHook
-            ];
-            buildInputs = nixpkgs.lib.optionals pkgs.stdenv.isLinux [
-              pkgs.libcap_ng
-              pkgs.stdenv.cc.cc.lib
-            ];
-            installPhase = ''
-              runHook preInstall
-              install -Dm755 msb $out/bin/msb
-              lib="$(echo libkrunfw.*)"
-              install -Dm644 "$lib" "$out/lib/$lib"
-              case "$lib" in
-                *.so.*)
-                  ln -s "$lib" "$out/lib/libkrunfw.so.5"
-                  ln -s libkrunfw.so.5 "$out/lib/libkrunfw.so"
-                  ;;
-                *.dylib)
-                  ln -s "$lib" "$out/lib/libkrunfw.dylib"
-                  ;;
-              esac
-              runHook postInstall
-            '';
-          };
         in
         {
           default = mom;
           mom = mom;
           iron-proxy = iron-proxy;
-        } // nixpkgs.lib.optionalAttrs (builtins.hasAttr system microsandboxBundleHashes) {
-          microsandbox-runtime = microsandbox-runtime;
         });
 
       apps = eachSystem (system: {
@@ -212,7 +128,11 @@
         };
       });
 
-      nixosModules.default = import ./nix/module.nix;
+      nixosModules.default = moduleArgs@{ config, lib, pkgs, ... }:
+        import ./nix/module.nix (moduleArgs // {
+          defaultNixpkgsUrl = nixpkgsInputUrl;
+          defaultMicrovmNixUrl = microvmInputUrl;
+        });
       nixosModules.agentmom = self.nixosModules.default;
 
       devShells = eachSystem (system:

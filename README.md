@@ -1,19 +1,21 @@
 # Agent Mom
 
-`mom` is a small Rust CLI and browser UI for running durable Hermes workspaces
-on Alpine microsandbox VMs.
+`mom` is a Rust CLI, worker, API, and browser UI for durable Hermes workspaces
+backed by NixOS microVMs.
 
-It uses the microsandbox Rust SDK directly. It does not shell out to
-`npx microsandbox` for lifecycle operations.
+The runtime is `microvm.nix` with Cloud Hypervisor and a host virtiofs workspace
+directory mounted at `/workspace`. Agent Mom generates a small declarative
+per-workspace flake, starts it through a systemd template unit, and talks to the
+guest over SSH.
 
-## Single-Host Fleet Worker
+## Workspace Model
 
 Agent Mom treats a user workspace as the durable unit and the VM as replaceable
 compute. A workspace has:
 
 - one SQLite row in `MOM_STATE_DIR/fleet.db`
-- one microsandbox VM named `mom-<workspace>`
-- one microsandbox named volume mounted at `/workspace`
+- one VM named `mom-<workspace>`
+- one host workspace directory under `MOM_MICROVM_WORKSPACE_DIR`
 
 ```sh
 mom workspace create alice --user user_123 --replace
@@ -27,10 +29,10 @@ mom workspace stop alice
 mom workspace rm alice --force
 mom node status
 mom node list
-mom node inspect pika-build
-mom node cordon pika-build
-mom node drain pika-build
-mom node uncordon pika-build
+mom node inspect mom-1
+mom node cordon mom-1
+mom node drain mom-1
+mom node uncordon mom-1
 mom db status
 mom db backup
 mom monitor check
@@ -43,91 +45,19 @@ mom api
 MOM_API_URL=http://127.0.0.1:8080 mom worker
 ```
 
-The worker:
-
-- starts workspaces whose desired state is `running`
-- stops idle workspaces after their configured idle timeout
-- backs up workspace volumes when their backup interval is due
-- claims and runs queued workspace jobs from `mom api`
-
-Backups use restic. Set `RESTIC_REPOSITORY` and the usual restic credentials in
-the service environment before enabling scheduled backups. Each backup is tagged
-with `agentmom` and the workspace name, and the recorded artifact stores the
-restic snapshot ID.
-
-Before backing up, Agent Mom gracefully stops the workspace VM so the named
-volume is in a consistent state. If the workspace was desired-running, it is
-started again after backup.
-
-For local testing without touching the default microsandbox home, use the dev
-entrypoint:
-
-```sh
-just dev
-```
-
-It writes `.state/dev.env`, keeps mom and microsandbox state under `.state/`,
-and starts the same API/worker shape used in production.
-
-## Fleet Operations
-
-The central API owns the fleet catalog at `MOM_STATE_DIR/fleet.db`. Workers own
-host-local microsandbox VMs and named volumes. If a worker host is lost, the
-central catalog still records workspace ownership and backup artifacts, but the
-host-local volume is recovered from restic rather than live-migrated.
-
-Use node lifecycle commands before planned host work:
-
-```sh
-mom node list
-mom node inspect mom-1
-mom node cordon mom-1    # stop new placements, keep assigned work running
-mom node drain mom-1     # stop new claims for assigned work
-mom node uncordon mom-1  # require a fresh heartbeat before scheduling resumes
-mom node retire mom-2    # intentionally removed host; excluded from stale checks
-```
-
-Use catalog backup commands on the API host:
-
-```sh
-mom db status
-mom db backup --output /var/lib/agentmom/catalog-backups/fleet-$(date -u +%Y%m%dT%H%M%SZ).db
-```
-
-`mom db backup` uses SQLite `VACUUM INTO`, refuses to overwrite existing files,
-and checks the fleet schema version before copying. It backs up the central
-catalog only; workspace volume data is backed up separately by restic jobs.
-
-`mom monitor check` is a small systemd-friendly health check:
-
-```sh
-mom monitor check \
-  --api-url http://127.0.0.1:8080 \
-  --min-ready-nodes 1 \
-  --max-stale-nodes 0 \
-  --max-queued-age-secs 300 \
-  --failed-job-lookback-secs 900 \
-  --max-recent-failed-jobs 0
-```
-
-It checks `/health/ready`, node freshness, ready-node count, queued-job age, and
-recent failed jobs. `/metrics` exposes the same operational surface for
-Prometheus-style scraping: workspace totals by status, job totals by status,
-node totals by status, stale node count, and oldest queued job age.
+The worker starts desired-running workspaces, stops idle workspaces, backs up
+workspace directories with restic, and claims queued jobs from `mom api`.
 
 ## Host Config
 
-`mom create` requires a host config file at `~/.config/mom/config.json`.
-Set `MOM_CONFIG=/path/to/config.json` to use a different file. Production
-NixOS deployments should let the Nix module generate this non-secret JSON from
-typed `services.agentmom.*` options.
+`mom workspace create` requires a host config file at
+`~/.config/mom/config.json`. Set `MOM_CONFIG=/path/to/config.json` to use a
+different file. Production NixOS deployments should let the Nix module generate
+this non-secret JSON from typed `services.agentmom.*` options.
 
 ```json
 {
   "schema_version": 1,
-  "runtime": {
-    "snapshot_name": "mom-base-fc3a7f7"
-  },
   "credentials": {
     "proxy_url": "http://192.168.83.1:1080",
     "proxy_ca_path": "/var/lib/agentmom/iron-proxy/ca.crt"
@@ -144,43 +74,39 @@ typed `services.agentmom.*` options.
 
 Required assumptions:
 
-- `credentials.proxy_url` and `credentials.proxy_ca_path` are required for guest configuration. Agent Mom writes proxy env into the VM and expects iron-proxy to inject the OpenRouter API key on the host.
-- `guest.hermes_profile` is the guest profile name to create.
-- `guest.model` is the default OpenRouter model written into Hermes config.
-- `runtime.snapshot_name` is the versioned prebuilt microsandbox snapshot to boot new VMs from. It is required for worker/node VM operations and has no Rust default.
-- `auth.secret_file` is required for `mom api`. It signs browser sessions.
-- On an empty DB, the first login creates the admin user and auto-generates that user's login code. After that, new users are created with admin-generated invite codes and log in with their own generated user code.
+- `credentials.proxy_url` and `credentials.proxy_ca_path` are required for guest configuration.
+- `guest.hermes_profile` is the Hermes profile name created in the guest.
+- `guest.model` is the default model written into the generated Hermes config.
+- `auth.secret_file` is required for `mom api`; it signs browser sessions.
+- On an empty DB, the first login creates the admin user and auto-generates that user's login code.
 
 `mom config doctor` validates the configured file and prints a redacted
-effective config.
+effective config. `mom node ensure-runtime` checks host prerequisites for the
+microvm.nix runtime; there is no mutable base image contract in this first
+microvm iteration.
 
-`create` uses `runtime.snapshot_name` by default and requires that exact versioned
-snapshot to already exist. This is intentionally a hard deploy contract: worker
-hosts should run `mom node ensure-base` before serving the worker. That command
-builds the configured snapshot from `alpine` if missing, installs `python3`,
-`uv`, and `hermes-agent`, then
-boots a probe VM from the snapshot and runs `mom doctor` checks. Pass
-`--rebuild-snapshot` only for explicit operator rebuilds, or `--no-snapshot` to
-force the slow direct-Alpine provisioning path.
+## Runtime State
 
-Each new VM is then patched with proxy and Hermes config:
+Relevant environment variables:
 
-- no raw OpenAI subscription auth files are written, and stale Hermes auth files are removed on `mom workspace refresh-config`
-- `/etc/profile.d/agentmom-proxy.sh` exports proxy variables and sentinel API-key values
-- Hermes `config.yaml` selects `provider: openrouter`
-- the configured iron-proxy CA is installed into the VM trust store
+- `MOM_MICROVM_STATE_DIR`: generated VM specs, flakes, SSH keys, and state files.
+- `MOM_MICROVM_WORKSPACE_DIR`: host directories shared into guests as `/workspace`.
+- `MOM_MICROVM_BRIDGE`: bridge used by generated tap devices.
+- `MOM_MICROVM_CIDR`: IPv4 CIDR for deterministic guest addresses, for example `192.168.83.0/24`.
+- `MOM_MICROVM_HOST_IP`: host bridge address used as the guest default gateway.
+- `MOM_MICROVM_NIXPKGS_URL` and `MOM_MICROVM_NIX_URL`: flake inputs used by generated workspace flakes.
 
-These are one-time writes, not bind mounts. The base snapshot may contain the
-auth/proxy config present when it was built, and each create overwrites auth from
-the current host config. Host Hermes profiles, sessions, custom providers, MCP
-entries, memories, plugins, and local paths are not copied. After creation, the
-VM has its own filesystem and no host directory sharing.
+Backups use restic. Set `RESTIC_REPOSITORY` and the usual restic credentials in
+the worker service environment before enabling scheduled backups. Agent Mom
+stops a running workspace before backing up its host workspace directory, then
+starts it again if it was desired-running.
 
-## Build
+## Development
 
 ```sh
 nix develop
 cargo build
+cargo test
 ```
 
 or:
@@ -189,48 +115,24 @@ or:
 nix build
 ```
 
-## UI
-
-The participant/admin UI is a React app served by `mom api`. The browser uses
-same-origin `/api` routes for login, admin, and workspace actions.
+For the local API/UI/worker loop:
 
 ```sh
-nix develop
 just dev
 ```
 
-`just dev` builds the UI, chooses available localhost ports, uses
-`config.dev.json` by default, starts `mom api` and `mom worker`, and uses the
-real microsandbox runtime. On a fresh checkout the first run installs the local
-microsandbox helper under `.state/msb` and builds the configured base snapshot.
-It also creates local dev proxy CA material under `dev/iron-proxy/` so the
-configured proxy trust path exists. Put a local OpenRouter key in ignored
-`.env` as `OPENROUTER_API_KEY=...`; `just dev` will start iron-proxy on host
-loopback port `1080`, write the key to an ignored `0600` file, then unset it
-before starting API/worker. Hermes always uses the generated guest proxy config:
-`/etc/profile.d/agentmom-proxy.sh` points at `credentials.proxy_url`, and
-iron-proxy injects the real key on the host. Local dev uses
-`http://host.microsandbox.internal:1080` for `credentials.proxy_url`; production
-should use the equivalent worker-host address reachable from the guest.
-Workspace sandboxes allow public egress plus host DNS and host TCP `1080`, so
-the credential proxy path is the same in dev and production. If the key is
-missing, `just dev` fails before starting the stack.
-Hermes launch requests are routed from the API to the workspace's assigned
-worker over that worker's private `worker.url`.
-Foreground output is intentionally brief; detailed API, worker, build, and base
-image logs are written to `.state/logs/`.
+`just dev` writes `.state/dev.env`, builds the UI, chooses available localhost
+ports, starts iron-proxy on host port `1080`, starts `mom api`, and starts
+`mom worker`. Runtime state stays under `.state/microvms`.
 
 With `just dev` running, use `just dev-smoke` in another shell to check the API
-health endpoint and cookie-based admin login.
-
-Use `just dev-reset` to stop the dev stack and delete dev runtime state:
-`.state/`, the repo-scoped `/tmp/mom-msb-...` Microsandbox home, and
-`dev/iron-proxy/`. It keeps `.env` and build caches.
+health endpoint and cookie-based admin login. `just dev-reset` stops the dev
+stack and deletes `.state/` and `dev/iron-proxy/`; it keeps `.env` and build
+caches.
 
 ## NixOS Service
 
-The flake exports `nixosModules.agentmom`. A host can layer the worker on top of
-its existing NixOS config:
+The flake exports `nixosModules.agentmom`.
 
 ```nix
 {
@@ -241,86 +143,54 @@ its existing NixOS config:
   services.agentmom = {
     enable = true;
     package = inputs.agentmom.packages.${pkgs.system}.mom;
-    nodeId = "pika-build";
+    nodeId = "mom-1";
     logFormat = "json";
     stateDir = "/var/lib/agentmom";
-    microsandboxHome = "/var/lib/agentmom/microsandbox";
-    runtime.snapshotName = "mom-base-${builtins.substring 0 12 inputs.agentmom.rev}";
-    credentials.proxyUrl = "http://127.0.0.1:1080";
-    credentials.proxyCaPath = "/var/lib/agentmom/iron-proxy/ca.crt";
+
+    microvm = {
+      enable = true;
+      stateDir = "/var/lib/agentmom/microvms";
+      workspaceDir = "/var/lib/agentmom/microvms/workspaces";
+      bridge = "agentmom0";
+      cidr = "192.168.83.0/24";
+      hostAddress = "192.168.83.1";
+      externalInterface = "eth0";
+    };
+
+    api = {
+      enable = true;
+      bind = "127.0.0.1:8080";
+    };
+
+    worker = {
+      enable = true;
+      apiUrl = "http://127.0.0.1:8080";
+      bind = "127.0.0.1:9090";
+      url = "http://127.0.0.1:9090";
+      intervalSeconds = 5;
+    };
+    workerUrlAllowlist = [ "http://127.0.0.1:9090" ];
+
+    credentialProxy = {
+      enable = true;
+      package = inputs.agentmom.packages.${pkgs.system}.iron-proxy;
+      openrouterApiKeyFile = "/run/secrets/openrouter-api-key";
+    };
+
     guest.model = "openai/gpt-5.5";
+    workerTokenFile = "/run/secrets/agentmom-worker-token";
     auth.secretFile = "/run/secrets/agentmom-auth-secret";
   };
 }
 ```
 
-For multi-host mode, enable the API on one host and workers on each VM host:
-
-```nix
-services.agentmom = {
-  enable = true;
-  package = inputs.agentmom.packages.${pkgs.system}.mom;
-  nodeId = "pika-build";
-  logFormat = "json";
-  stateDir = "/var/lib/agentmom";
-  microsandboxHome = "/var/lib/agentmom/microsandbox";
-
-  api = {
-    enable = true;
-    bind = "127.0.0.1:8080";
-  };
-
-  worker = {
-    enable = true;
-    apiUrl = "http://127.0.0.1:8080";
-    bind = "127.0.0.1:9090";
-    url = "http://127.0.0.1:9090";
-    intervalSeconds = 5;
-  };
-
-  ui.enable = true;
-
-  workerTokenFile = "/run/secrets/agentmom-worker-token";
-  auth.secretFile = "/run/secrets/agentmom-auth-secret";
-
-  capacity = {
-    cpus = 32;
-    memoryMib = 131072;
-    activeWorkspaces = 48;
-    diskReserveMib = 102400;
-  };
-
-  catalogBackup = {
-    enable = true;
-    onCalendar = "*:0/15";
-  };
-
-  monitorCheck = {
-    enable = true;
-    minReadyNodes = 1;
-    maxStaleNodes = 0;
-    maxQueuedAgeSeconds = 300;
-  };
-};
-```
-
-`mom api` stores workspaces, jobs, nodes, events, and backup artifacts in SQLite.
-Workers keep using host-local microsandbox volumes and claim jobs through
-`POST /worker/claim`; `GET /worker/events?node_id=...` is only a low-latency
-wake signal.
-
-The API/UI routes have first-party cookie auth for browser users and bearer
-tokens for workers. Keep production behind Tailscale, Cloudflare, or another
-trusted reverse proxy for rate limiting, TLS, and network exposure control.
-
-Workers also expose private control endpoints, such as
+The module declares the worker/API services, microVM state directories, a host
+bridge service, and `agentmom-microvm@.service` for cold-start workspace VMs.
+Workers expose private control endpoints such as
 `POST /worker/services/{service}/open`, used by the API to open Hermes tunnels
-on the host that owns the workspace VM. Bind these endpoints to localhost for
+on the host that owns a workspace. Bind these endpoints to localhost for
 single-host deployments or to a Tailscale/private address for multi-host
 deployments.
-
-Worker endpoints require a bearer token through `workerTokenFile`,
-`MOM_WORKER_TOKEN`, or `MOM_WORKER_TOKEN_FILE`.
 
 ## Real Fleet Tests
 
@@ -341,8 +211,8 @@ export AGENTMOM_REAL_NODE_A=mom-1
 just real-fleet-test
 ```
 
-Workspace-creating and backup tests are opt-in because they touch real
-microsandbox state:
+Workspace-creating and backup tests are opt-in because they touch real runtime
+state:
 
 ```sh
 export AGENTMOM_REAL_ALLOW_CREATE=1

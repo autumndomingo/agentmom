@@ -490,21 +490,24 @@ fn create_owned_workspace(
             AuthError::Anyhow(error)
         }
     })?;
-    workspace_upsert_pending(
-        &name,
-        &display_name,
-        &user.email,
-        Some(user.id),
-        Some(agent_name),
-        &format!("mom-{name}"),
-        &format!("mom-{name}-workspace"),
-        Some(&node_id),
-        default_workspace_cpus(),
-        u32::try_from(default_workspace_memory()).context("default workspace memory too large")?,
-        default_workspace_volume_quota(),
-        default_workspace_idle_timeout(),
-        default_workspace_backup_interval(),
-    )?;
+    let vm_name = format!("mom-{name}");
+    let workspace_dir_name = format!("mom-{name}-workspace");
+    workspace_upsert_pending(WorkspaceUpsert {
+        name: &name,
+        display_name: &display_name,
+        user_id: &user.email,
+        owner_user_id: Some(user.id),
+        agent_name: Some(agent_name),
+        vm_name: &vm_name,
+        workspace_dir_name: &workspace_dir_name,
+        assigned_node_id: Some(&node_id),
+        cpus: default_workspace_cpus(),
+        memory_mib: u32::try_from(default_workspace_memory())
+            .context("default workspace memory too large")?,
+        workspace_quota_mib: default_workspace_quota(),
+        idle_timeout_secs: default_workspace_idle_timeout(),
+        backup_interval_secs: default_workspace_backup_interval(),
+    })?;
     create_job(CreateJobRequest {
         workspace_name: name.clone(),
         kind: "create".to_string(),
@@ -513,7 +516,7 @@ fn create_owned_workspace(
             "user": user.email,
             "cpus": default_workspace_cpus(),
             "memory": default_workspace_memory(),
-            "volume_quota": default_workspace_volume_quota(),
+            "workspace_quota": default_workspace_quota(),
             "idle_timeout": default_workspace_idle_timeout(),
             "backup_interval": default_workspace_backup_interval()
         }),
@@ -526,8 +529,8 @@ fn workspace_for_user(user_id: i64) -> Result<Option<WorkspaceRecord>> {
     let db = fleet_db()?;
     db.query_row(
         r#"
-SELECT workspace_id, name, slug, display_name, user_id, sandbox_name, volume_name, desired_state, cpus, memory_mib,
-       node_id, status, volume_quota_mib, idle_timeout_secs, backup_interval_secs, last_used_at, last_backup_at,
+SELECT workspace_id, name, slug, display_name, user_id, vm_name, workspace_dir_name, desired_state, cpus, memory_mib,
+       node_id, status, workspace_quota_mib, idle_timeout_secs, backup_interval_secs, last_used_at, last_backup_at,
        owner_user_id, agent_name
 FROM workspaces
 WHERE owner_user_id = ?1
@@ -546,8 +549,8 @@ fn delete_user_and_workspace(state: &ApiState, user_id: i64) -> Result<(), AuthE
     let workspace: Option<WorkspaceRecord> = db
         .query_row(
             r#"
-SELECT workspace_id, name, slug, display_name, user_id, sandbox_name, volume_name, desired_state, cpus, memory_mib,
-       node_id, status, volume_quota_mib, idle_timeout_secs, backup_interval_secs, last_used_at, last_backup_at,
+SELECT workspace_id, name, slug, display_name, user_id, vm_name, workspace_dir_name, desired_state, cpus, memory_mib,
+       node_id, status, workspace_quota_mib, idle_timeout_secs, backup_interval_secs, last_used_at, last_backup_at,
        owner_user_id, agent_name
 FROM workspaces
 WHERE owner_user_id = ?1
@@ -565,7 +568,7 @@ WHERE owner_user_id = ?1
                     workspace_name: workspace.name.clone(),
                     kind: "remove".to_string(),
                     node_id: Some(node_id),
-                    payload: json!({ "remove_volume": true }),
+                    payload: json!({ "remove_workspace_dir": true }),
                 })?;
                 let _ = state.notifier.send("job_available".to_string());
             }
@@ -620,8 +623,8 @@ fn workspaces_for_invite(invite_id: i64) -> Result<Vec<WorkspaceRecord>, AuthErr
     let db = fleet_db()?;
     let mut stmt = db.prepare(
         r#"
-SELECT workspace_id, name, slug, display_name, user_id, sandbox_name, volume_name, desired_state, cpus, memory_mib,
-       node_id, status, volume_quota_mib, idle_timeout_secs, backup_interval_secs, last_used_at, last_backup_at,
+SELECT workspace_id, name, slug, display_name, user_id, vm_name, workspace_dir_name, desired_state, cpus, memory_mib,
+       node_id, status, workspace_quota_mib, idle_timeout_secs, backup_interval_secs, last_used_at, last_backup_at,
        owner_user_id, agent_name
 FROM workspaces
 JOIN users ON users.id = workspaces.owner_user_id

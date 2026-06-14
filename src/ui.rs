@@ -47,7 +47,7 @@ struct ErrorBody {
 #[derive(Debug, Serialize)]
 struct OpenWorkerServiceRequest {
     workspace_name: String,
-    sandbox_name: String,
+    vm_name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -221,9 +221,9 @@ fn worker_acp_ws_url(worker_url: &str, workspace: &WorkspaceRecord) -> Result<St
         bail!("worker_url must start with http://, https://, ws://, or wss://");
     }
     Ok(format!(
-        "{url}/worker/hermes-acp/ws?workspace_name={}&sandbox_name={}",
+        "{url}/worker/hermes-acp/ws?workspace_name={}&vm_name={}",
         crate::url_component(&workspace.name),
-        crate::url_component(&workspace.sandbox_name)
+        crate::url_component(&workspace.vm_name)
     ))
 }
 
@@ -335,7 +335,7 @@ async fn open_hermes_dashboard(name: &str) -> Result<Json<CommandResult>, UiErro
     let workspace = workspace_get(name)?;
     let worker_url = workspace_worker_url(&workspace)?;
     let workspace_name = workspace.name.clone();
-    let sandbox_name = workspace.sandbox_name.clone();
+    let vm_name = workspace.vm_name.clone();
     let node = workspace.node_id.as_deref().ok_or_else(|| {
         anyhow!(
             "workspace {} does not have an assigned node",
@@ -352,7 +352,7 @@ async fn open_hermes_dashboard(name: &str) -> Result<Json<CommandResult>, UiErro
         .with_worker_token()
         .json(&OpenWorkerServiceRequest {
             workspace_name: workspace_name.clone(),
-            sandbox_name,
+            vm_name,
         })
         .send()
         .await?
