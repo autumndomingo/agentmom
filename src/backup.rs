@@ -16,8 +16,9 @@ pub(crate) async fn backup_workspace(
 
     let was_running = match get_vm(&workspace.vm_name).await {
         Ok(handle) => {
-            let running = handle.status().is_running();
-            if running {
+            let status = handle.status();
+            let running = status.is_running();
+            if status.is_started() {
                 record_workspace_event(
                     &workspace.name,
                     "backup_stop_started",

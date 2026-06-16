@@ -106,10 +106,14 @@ async fn ensure_hermes_tunnel(
     tunnels: &Arc<Mutex<HashMap<String, ServiceTunnel>>>,
     port_reservations: &Arc<StdMutex<HashSet<u16>>>,
 ) -> Result<HermesDashboardUrls> {
+    let vm_status = get_vm(vm_name).await.ok().map(|handle| handle.status());
+    let skip_cached_health = vm_status.is_some_and(|status| !status.is_running());
     {
         let mut active = tunnels.lock().await;
         if let Some(tunnel) = active.get_mut(workspace_name) {
-            if tunnel_is_healthy(&tunnel.health_url, HERMES_HEALTH_PATH).await {
+            if !skip_cached_health
+                && tunnel_is_healthy(&tunnel.health_url, HERMES_HEALTH_PATH).await
+            {
                 return Ok(HermesDashboardUrls {
                     public_url: tunnel.url.clone(),
                     local_url: tunnel.health_url.clone(),
@@ -286,7 +290,11 @@ async fn running_vm_owned(name: &str) -> Result<GuestVm> {
             .connect_with_timeout(std::time::Duration::from_secs(30))
             .await
             .with_context(|| format!("connect to running VM '{name}'")),
-        VmStatus::Stopped | VmStatus::Crashed | VmStatus::Paused | VmStatus::Unknown => handle
+        VmStatus::Stopped
+        | VmStatus::Crashed
+        | VmStatus::Paused
+        | VmStatus::Suspended
+        | VmStatus::Unknown => handle
             .start()
             .await
             .with_context(|| format!("start VM '{name}'")),

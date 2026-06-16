@@ -34,16 +34,20 @@ let
     exec ${agentmomRun}/bin/agentmom-run -- hermes "$@"
   '';
   agentmomHermesAcp = pkgs.writeShellScriptBin "agentmom-hermes-acp" ''
-    exec ${agentmomRun}/bin/agentmom-run -- ${pkgs.runtimeShell} -c '
+    exec ${agentmomRun}/bin/agentmom-run -- ${pkgs.bash}/bin/bash -c '
       if command -v hermes-acp >/dev/null 2>&1; then
         exec hermes-acp "$@"
       fi
       if command -v hermes >/dev/null 2>&1; then
         exec hermes acp "$@"
+      else
+        echo "hermes-acp/hermes acp is not installed" >&2
+        exit 127
       fi
-      echo "hermes-acp/hermes acp is not installed" >&2
-      exit 127
     ' agentmom-hermes-acp "$@"
+  '';
+  agentmomGuestPing = pkgs.writeShellScript "agentmom-guest-ping" ''
+    exec ${lib.getExe pkgs.socat} TCP-LISTEN:9199,bind=0.0.0.0,reuseaddr,fork SYSTEM:"printf agentmom-guest-pong"
   '';
   agentmomHermesDashboard = pkgs.writeShellScriptBin "agentmom-hermes-dashboard" ''
     set -e
@@ -214,7 +218,8 @@ in
   microvm = {
     hypervisor = "cloud-hypervisor";
     optimize.enable = true;
-    storeOnDisk = false;
+    storeOnDisk = true;
+    storeDiskErofsFlags = [ ];
     vcpu = spec.cpus;
     mem = spec.memory_mib;
     registerWithMachined = true;
@@ -226,41 +231,13 @@ in
         tap.vhost = true;
       }
     ];
-    shares = [
-      {
-        proto = "virtiofs";
-        tag = "ro-store";
-        source = "/nix/store";
-        mountPoint = "/nix/.ro-store";
-        socket = "/run/agentmom-${spec.name}-store-virtiofs.sock";
-        readOnly = true;
-        cache = "always";
-      }
-      {
-        proto = "virtiofs";
-        tag = "workspace";
-        source = spec.workspace_dir;
-        mountPoint = "/workspace";
-        socket = "/run/agentmom-${spec.name}-workspace-virtiofs.sock";
-        cache = "never";
-      }
-      {
-        proto = "virtiofs";
-        tag = "agentmom-secrets";
-        source = spec.ssh_host_key_dir;
-        mountPoint = "/run/agentmom-secrets";
-        socket = "/run/agentmom-${spec.name}-secrets-virtiofs.sock";
-        readOnly = true;
-        cache = "never";
-      }
-    ];
+    shares = [ ];
     socket = "control.socket";
     binScripts.tap-up = lib.mkAfter ''
       ${lib.getExe' pkgs.iproute2 "ip"} link set dev '${spec.tap}' master '${spec.host_bridge}'
       ${lib.getExe' pkgs.iproute2 "ip"} link set dev '${spec.tap}' up
     '';
   };
-  microvm.virtiofsd.inodeFileHandles = "prefer";
 
   systemd.network.enable = true;
   systemd.network.networks."10-eth0" = {
@@ -273,7 +250,7 @@ in
 
   networking.firewall = {
     enable = true;
-    allowedTCPPorts = [ 22 ];
+    allowedTCPPorts = [ 22 9199 ];
   };
   users.users.root.hashedPassword = "";
   users.users.root.openssh.authorizedKeys.keys = [ spec.ssh_public_key ];
@@ -347,6 +324,16 @@ in
       RestartSec = "2s";
     };
   };
+  systemd.services.agentmom-guest-ping = {
+    description = "Agent Mom guest ping test endpoint";
+    wantedBy = [ "multi-user.target" ];
+    after = [ "network.target" ];
+    serviceConfig = {
+      ExecStart = agentmomGuestPing;
+      Restart = "always";
+      RestartSec = "1s";
+    };
+  };
 
   system.activationScripts.agentmomGuestConfig.text = ''
     install -d -m 0700 /root/.codex ${hermesHome} ${hermesHome}/home /root/.local/share/opencode /root/.config/opencode
@@ -378,6 +365,13 @@ EOF
   security.pki.certificateFiles =
     lib.optional (spec.credential_proxy_ca_file != null) ./agentmom-proxy.crt;
 
+  environment.etc."ssh/ssh_host_ed25519_key" = {
+    text = builtins.readFile ./guest-ssh/ssh_host_ed25519_key;
+    mode = "0600";
+  };
+  environment.etc."ssh/ssh_host_ed25519_key.pub".text =
+    builtins.readFile ./guest-ssh/ssh_host_ed25519_key.pub;
+
   services.openssh = {
     enable = true;
     startWhenNeeded = false;
@@ -401,32 +395,5 @@ EOF
       PermitRootLogin = "yes";
       UsePAM = false;
     };
-  };
-  systemd.services.agentmom-ssh-host-key = {
-    description = "Install Agent Mom pinned SSH host key";
-    before = [ "sshd.service" ];
-    requiredBy = [ "sshd.service" ];
-    serviceConfig = {
-      Type = "oneshot";
-      RemainAfterExit = true;
-    };
-    script = ''
-      for _ in $(${lib.getExe' pkgs.coreutils "seq"} 1 100); do
-        if [ -r /run/agentmom-secrets/ssh_host_ed25519_key ] && [ -r /run/agentmom-secrets/ssh_host_ed25519_key.pub ]; then
-          break
-        fi
-        ${lib.getExe' pkgs.coreutils "sleep"} 0.1
-      done
-
-      ${lib.getExe' pkgs.coreutils "test"} -r /run/agentmom-secrets/ssh_host_ed25519_key
-      ${lib.getExe' pkgs.coreutils "test"} -r /run/agentmom-secrets/ssh_host_ed25519_key.pub
-      ${lib.getExe' pkgs.coreutils "install"} -d -m 0755 /etc/ssh
-      ${lib.getExe' pkgs.coreutils "install"} -m 0600 /run/agentmom-secrets/ssh_host_ed25519_key /etc/ssh/ssh_host_ed25519_key
-      ${lib.getExe' pkgs.coreutils "install"} -m 0644 /run/agentmom-secrets/ssh_host_ed25519_key.pub /etc/ssh/ssh_host_ed25519_key.pub
-    '';
-  };
-  systemd.services.sshd = {
-    after = [ "agentmom-ssh-host-key.service" ];
-    requires = [ "agentmom-ssh-host-key.service" ];
   };
 }

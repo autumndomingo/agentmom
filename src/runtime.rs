@@ -1,7 +1,7 @@
-use std::{collections::HashMap, io::Write};
+use std::{collections::HashMap, io::Write, time::Instant};
 
 use fs2::FileExt;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::*;
 
@@ -17,9 +17,29 @@ pub(crate) enum VmStatus {
     Draining,
     Stopped,
     Paused,
+    Suspended,
     Crashed,
     Missing,
     Unknown,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct VmStartTiming {
+    pub(crate) connect_ssh_ms: Option<u128>,
+    pub(crate) refresh_definition_ms: Option<u128>,
+    pub(crate) systemctl_start_ms: Option<u128>,
+    pub(crate) systemd_active_ms: Option<u128>,
+    pub(crate) ch_api_ms: Option<u128>,
+    pub(crate) net_prime_ms: Option<u128>,
+    pub(crate) ch_resume_ms: Option<u128>,
+    pub(crate) tcp_22_ready_ms: Option<u128>,
+    pub(crate) ssh_ready_ms: Option<u128>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VmReadiness {
+    Tcp22,
+    Ssh,
 }
 
 impl VmStatus {
@@ -29,6 +49,7 @@ impl VmStatus {
             Self::Draining => "draining",
             Self::Stopped => "stopped",
             Self::Paused => "paused",
+            Self::Suspended => "suspended",
             Self::Crashed => "crashed",
             Self::Missing => "missing",
             Self::Unknown => "unknown",
@@ -37,6 +58,10 @@ impl VmStatus {
 
     pub(crate) fn is_running(self) -> bool {
         matches!(self, Self::Running | Self::Draining)
+    }
+
+    pub(crate) fn is_started(self) -> bool {
+        matches!(self, Self::Running | Self::Draining | Self::Paused)
     }
 }
 
@@ -58,6 +83,22 @@ impl VmHandle {
 
     pub(crate) async fn start(&self) -> Result<GuestVm> {
         start_vm(&self.name).await
+    }
+
+    pub(crate) async fn start_acp_timed(&self) -> Result<(GuestVm, VmStartTiming)> {
+        start_vm_timed_for_acp(&self.name).await
+    }
+
+    pub(crate) async fn pause(&self) -> Result<()> {
+        pause_vm(&self.name).await
+    }
+
+    pub(crate) async fn suspend(&self) -> Result<()> {
+        suspend_vm(&self.name).await
+    }
+
+    pub(crate) async fn resume(&self) -> Result<GuestVm> {
+        resume_vm(&self.name).await
     }
 
     pub(crate) async fn connect_with_timeout(&self, timeout: Duration) -> Result<GuestVm> {
@@ -92,9 +133,8 @@ impl GuestVm {
         run_ssh_shell(&self.name, &spec, script, None).await
     }
 
-    pub(crate) async fn spawn_shell(&self, script: &str) -> Result<tokio::process::Child> {
+    pub(crate) async fn spawn_shell_ready(&self, script: &str) -> Result<tokio::process::Child> {
         let spec = load_microvm_spec(&self.name)?;
-        wait_for_ssh(self, &spec, Duration::from_secs(90)).await?;
         let mut command = TokioCommand::new("ssh");
         command
             .args(ssh_common_args(&self.name, &spec)?)
@@ -106,6 +146,44 @@ impl GuestVm {
         command
             .spawn()
             .with_context(|| format!("start SSH command in VM {}", self.name))
+    }
+
+    pub(crate) async fn resume_if_state_file_paused_fast(&self) -> Result<bool> {
+        let state = fs::read_to_string(machine_dir(&self.name)?.join("state")).unwrap_or_default();
+        if state.trim() != "paused" {
+            return Ok(false);
+        }
+        ensure_machine_exists(&self.name)?;
+        cloud_hypervisor_control(&self.name, "resume").await?;
+        fs::write(machine_dir(&self.name)?.join("state"), b"running\n")?;
+        Ok(true)
+    }
+
+    pub(crate) async fn guest_ping(&self) -> Result<(String, u128)> {
+        let spec = load_microvm_spec(&self.name)?;
+        let started = Instant::now();
+        let mut stream = tokio::time::timeout(
+            Duration::from_millis(250),
+            tokio::net::TcpStream::connect((spec.guest_ip.as_str(), 9199)),
+        )
+        .await
+        .with_context(|| format!("guest ping connect timed out for VM {}", self.name))?
+        .with_context(|| format!("connect guest ping service for VM {}", self.name))?;
+        stream
+            .write_all(b"ping\n")
+            .await
+            .with_context(|| format!("write guest ping for VM {}", self.name))?;
+        let mut response = vec![0; 128];
+        let read = tokio::time::timeout(Duration::from_millis(250), stream.read(&mut response))
+            .await
+            .with_context(|| format!("guest ping read timed out for VM {}", self.name))?
+            .with_context(|| format!("read guest ping response for VM {}", self.name))?;
+        Ok((
+            String::from_utf8_lossy(&response[..read])
+                .trim()
+                .to_string(),
+            started.elapsed().as_millis(),
+        ))
     }
 
     pub(crate) async fn forward_tcp(
@@ -255,30 +333,227 @@ pub(crate) async fn list_vms() -> Result<Vec<VmHandle>> {
 }
 
 pub(crate) async fn start_vm(name: &str) -> Result<GuestVm> {
+    start_vm_timed(name).await.map(|(vm, _)| vm)
+}
+
+pub(crate) async fn start_vm_timed(name: &str) -> Result<(GuestVm, VmStartTiming)> {
+    start_vm_timed_with_readiness(name, VmReadiness::Ssh).await
+}
+
+pub(crate) async fn start_vm_timed_for_acp(name: &str) -> Result<(GuestVm, VmStartTiming)> {
+    start_vm_timed_with_readiness(name, VmReadiness::Tcp22).await
+}
+
+async fn start_vm_timed_with_readiness(
+    name: &str,
+    readiness: VmReadiness,
+) -> Result<(GuestVm, VmStartTiming)> {
     ensure_machine_exists(name)?;
-    if vm_status(name).await?.is_running() {
-        let vm = GuestVm::new(name);
-        let spec = load_microvm_spec(name)?;
-        wait_for_ssh(&vm, &spec, Duration::from_secs(90)).await?;
-        return Ok(vm);
+    let mut timing = VmStartTiming::default();
+    match vm_status(name).await? {
+        VmStatus::Running | VmStatus::Draining => {
+            let vm = GuestVm::new(name);
+            let spec = load_microvm_spec(name)?;
+            let started = Instant::now();
+            wait_for_vm_readiness(&vm, &spec, Duration::from_secs(90), readiness, &mut timing)
+                .await?;
+            if readiness == VmReadiness::Ssh {
+                timing.connect_ssh_ms = Some(started.elapsed().as_millis());
+            }
+            return Ok((vm, timing));
+        }
+        VmStatus::Paused => {
+            let started = Instant::now();
+            cloud_hypervisor_control(name, "resume").await?;
+            timing.ch_resume_ms = Some(started.elapsed().as_millis());
+            fs::write(machine_dir(name)?.join("state"), b"running\n")?;
+            let vm = GuestVm::new(name);
+            let spec = load_microvm_spec(name)?;
+            wait_for_vm_readiness(&vm, &spec, Duration::from_secs(30), readiness, &mut timing)
+                .await?;
+            return Ok((vm, timing));
+        }
+        VmStatus::Suspended => {
+            return restore_suspended_vm_timed_with_readiness(name, readiness).await;
+        }
+        VmStatus::Stopped | VmStatus::Crashed | VmStatus::Missing | VmStatus::Unknown => {}
     }
+    let started = Instant::now();
     refresh_vm_definition(name)?;
+    timing.refresh_definition_ms = Some(started.elapsed().as_millis());
+    let started = Instant::now();
     systemctl(&["start", &format!("agentmom-microvm@{name}.service")]).await?;
+    timing.systemctl_start_ms = Some(started.elapsed().as_millis());
     let vm = GuestVm::new(name);
     let spec = load_microvm_spec(name)?;
+    let started = Instant::now();
     if let Err(error) = wait_for_systemd_active(name, FRESH_VM_SYSTEMD_ACTIVE_TIMEOUT).await {
         let diagnostics = microvm_unit_diagnostics(name).await;
         return Err(error.context(format!(
             "microVM unit diagnostics for {name}:\n{diagnostics}"
         )));
     }
-    if let Err(error) = wait_for_ssh(&vm, &spec, FRESH_VM_SSH_READY_TIMEOUT).await {
+    timing.systemd_active_ms = Some(started.elapsed().as_millis());
+    if let Err(error) = wait_for_vm_readiness(
+        &vm,
+        &spec,
+        FRESH_VM_SSH_READY_TIMEOUT,
+        readiness,
+        &mut timing,
+    )
+    .await
+    {
         let diagnostics = microvm_unit_diagnostics(name).await;
         return Err(error.context(format!(
             "microVM unit diagnostics for {name}:\n{diagnostics}"
         )));
     }
     fs::write(machine_dir(name)?.join("state"), b"running\n")?;
+    Ok((vm, timing))
+}
+
+pub(crate) async fn pause_vm(name: &str) -> Result<()> {
+    ensure_machine_exists(name)?;
+    match vm_status(name).await? {
+        VmStatus::Paused => return Ok(()),
+        VmStatus::Running | VmStatus::Draining => {}
+        status => bail!("VM {name} is {}, not running", status.as_str()),
+    }
+    cloud_hypervisor_control(name, "pause").await?;
+    fs::write(machine_dir(name)?.join("state"), b"paused\n")?;
+    Ok(())
+}
+
+pub(crate) async fn suspend_vm(name: &str) -> Result<()> {
+    ensure_machine_exists(name)?;
+    let status = vm_status(name).await?;
+    match status {
+        VmStatus::Suspended => return Ok(()),
+        VmStatus::Paused => {}
+        VmStatus::Running | VmStatus::Draining => {
+            cloud_hypervisor_control(name, "pause").await?;
+        }
+        status => bail!("VM {name} is {}, not running or paused", status.as_str()),
+    }
+
+    let dir = machine_dir(name)?;
+    let snapshot_dir = dir.join("snapshot");
+    if snapshot_dir.exists() {
+        remove_runtime_dir_all(&snapshot_dir).await?;
+    }
+    fs::create_dir_all(&snapshot_dir)
+        .with_context(|| format!("create snapshot dir {}", snapshot_dir.display()))?;
+    let snapshot_url = format!(
+        "file://{}",
+        snapshot_dir
+            .to_str()
+            .ok_or_else(|| anyhow!("non-UTF-8 snapshot path {}", snapshot_dir.display()))?
+    );
+    cloud_hypervisor_control_args(name, &["snapshot", &snapshot_url]).await?;
+    fs::write(dir.join("state"), b"suspended\n")?;
+    stop_vm_process(name, Duration::from_secs(20)).await?;
+    Ok(())
+}
+
+pub(crate) async fn restore_suspended_vm(name: &str) -> Result<GuestVm> {
+    restore_suspended_vm_timed(name).await.map(|(vm, _)| vm)
+}
+
+pub(crate) async fn restore_suspended_vm_timed(name: &str) -> Result<(GuestVm, VmStartTiming)> {
+    restore_suspended_vm_timed_with_readiness(name, VmReadiness::Ssh).await
+}
+
+async fn restore_suspended_vm_timed_with_readiness(
+    name: &str,
+    readiness: VmReadiness,
+) -> Result<(GuestVm, VmStartTiming)> {
+    ensure_machine_exists(name)?;
+    let mut timing = VmStartTiming::default();
+    match vm_status(name).await? {
+        VmStatus::Running | VmStatus::Draining => {
+            let vm = GuestVm::new(name);
+            let spec = load_microvm_spec(name)?;
+            let started = Instant::now();
+            wait_for_vm_readiness(&vm, &spec, Duration::from_secs(90), readiness, &mut timing)
+                .await?;
+            if readiness == VmReadiness::Ssh {
+                timing.connect_ssh_ms = Some(started.elapsed().as_millis());
+            }
+            return Ok((vm, timing));
+        }
+        VmStatus::Paused => {
+            let started = Instant::now();
+            cloud_hypervisor_control(name, "resume").await?;
+            timing.ch_resume_ms = Some(started.elapsed().as_millis());
+            fs::write(machine_dir(name)?.join("state"), b"running\n")?;
+            let vm = GuestVm::new(name);
+            let spec = load_microvm_spec(name)?;
+            wait_for_vm_readiness(&vm, &spec, Duration::from_secs(30), readiness, &mut timing)
+                .await?;
+            return Ok((vm, timing));
+        }
+        VmStatus::Suspended => {}
+        status @ (VmStatus::Stopped | VmStatus::Crashed | VmStatus::Unknown) => {
+            bail!("VM {name} is {}, not suspended", status.as_str())
+        }
+        VmStatus::Missing => bail!("VM {name} does not exist"),
+    }
+    let snapshot_dir = machine_dir(name)?.join("snapshot");
+    if !snapshot_dir.exists() {
+        bail!(
+            "VM {name} is suspended but snapshot dir is missing: {}",
+            snapshot_dir.display()
+        );
+    }
+    let started = Instant::now();
+    refresh_vm_definition(name)?;
+    timing.refresh_definition_ms = Some(started.elapsed().as_millis());
+    let started = Instant::now();
+    systemctl(&["start", &format!("agentmom-microvm@{name}.service")]).await?;
+    timing.systemctl_start_ms = Some(started.elapsed().as_millis());
+    let started = Instant::now();
+    if let Err(error) = wait_for_systemd_active(name, FRESH_VM_SYSTEMD_ACTIVE_TIMEOUT).await {
+        let diagnostics = microvm_unit_diagnostics(name).await;
+        return Err(error.context(format!(
+            "microVM unit diagnostics for {name}:\n{diagnostics}"
+        )));
+    }
+    timing.systemd_active_ms = Some(started.elapsed().as_millis());
+    let started = Instant::now();
+    wait_for_cloud_hypervisor_api(name, Duration::from_secs(30)).await?;
+    timing.ch_api_ms = Some(started.elapsed().as_millis());
+    let vm = GuestVm::new(name);
+    let spec = load_microvm_spec(name)?;
+    let started = Instant::now();
+    prime_guest_network(&spec).await;
+    timing.net_prime_ms = Some(started.elapsed().as_millis());
+    wait_for_vm_readiness(&vm, &spec, Duration::from_secs(30), readiness, &mut timing).await?;
+    fs::write(machine_dir(name)?.join("state"), b"running\n")?;
+    Ok((vm, timing))
+}
+
+pub(crate) async fn resume_vm(name: &str) -> Result<GuestVm> {
+    ensure_machine_exists(name)?;
+    match vm_status(name).await? {
+        VmStatus::Running | VmStatus::Draining => {
+            let vm = GuestVm::new(name);
+            let spec = load_microvm_spec(name)?;
+            wait_for_ssh(&vm, &spec, Duration::from_secs(90)).await?;
+            return Ok(vm);
+        }
+        VmStatus::Suspended => return restore_suspended_vm(name).await,
+        VmStatus::Paused => {}
+        status @ (VmStatus::Stopped | VmStatus::Crashed | VmStatus::Unknown) => {
+            bail!("VM {name} is {}, not paused", status.as_str())
+        }
+        VmStatus::Missing => bail!("VM {name} does not exist"),
+    }
+    cloud_hypervisor_control(name, "resume").await?;
+    fs::write(machine_dir(name)?.join("state"), b"running\n")?;
+    let vm = GuestVm::new(name);
+    let spec = load_microvm_spec(name)?;
+    wait_for_tcp_port(&spec.guest_ip, 22, Duration::from_secs(30)).await?;
+    wait_for_ssh(&vm, &spec, Duration::from_secs(30)).await?;
     Ok(vm)
 }
 
@@ -288,10 +563,19 @@ pub(crate) async fn stop_vm(name: &str) -> Result<()> {
 
 pub(crate) async fn stop_vm_with_timeout(name: &str, timeout: Duration) -> Result<()> {
     ensure_machine_exists(name)?;
+    stop_vm_process(name, timeout).await?;
+    let snapshot_dir = machine_dir(name)?.join("snapshot");
+    if snapshot_dir.exists() {
+        remove_runtime_dir_all(&snapshot_dir).await?;
+    }
+    fs::write(machine_dir(name)?.join("state"), b"stopped\n")?;
+    Ok(())
+}
+
+async fn stop_vm_process(name: &str, timeout: Duration) -> Result<()> {
     let unit = format!("agentmom-microvm@{name}.service");
     systemctl(&["stop", "--job-mode=replace", &unit]).await?;
     wait_for_systemd_inactive(name, timeout).await?;
-    fs::write(machine_dir(name)?.join("state"), b"stopped\n")?;
     Ok(())
 }
 
@@ -327,10 +611,14 @@ pub(crate) async fn vm_status(name: &str) -> Result<VmStatus> {
             .await;
         if let Ok(output) = output {
             let active = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let state = fs::read_to_string(machine_dir(name)?.join("state")).unwrap_or_default();
             return Ok(match active.as_str() {
+                "active" | "activating" if state.trim() == "paused" => VmStatus::Paused,
+                "active" | "activating" if state.trim() == "suspended" => VmStatus::Draining,
                 "active" | "activating" => VmStatus::Running,
                 "deactivating" => VmStatus::Draining,
                 "failed" => VmStatus::Crashed,
+                "inactive" if state.trim() == "suspended" => VmStatus::Suspended,
                 "inactive" => VmStatus::Stopped,
                 _ => VmStatus::Unknown,
             });
@@ -341,6 +629,7 @@ pub(crate) async fn vm_status(name: &str) -> Result<VmStatus> {
         "running" => VmStatus::Running,
         "stopped" => VmStatus::Stopped,
         "paused" => VmStatus::Paused,
+        "suspended" => VmStatus::Suspended,
         "crashed" => VmStatus::Crashed,
         _ => VmStatus::Unknown,
     })
@@ -1133,6 +1422,147 @@ async fn require_success(command: &mut TokioCommand, description: &str) -> Resul
     Ok(())
 }
 
+async fn cloud_hypervisor_control(name: &str, command: &str) -> Result<()> {
+    if matches!(command, "pause" | "resume") {
+        return cloud_hypervisor_control_http(name, command).await;
+    }
+    cloud_hypervisor_control_args(name, &[command]).await
+}
+
+async fn cloud_hypervisor_control_http(name: &str, command: &str) -> Result<()> {
+    let stream = cloud_hypervisor_control_http_send(name, command).await?;
+    read_cloud_hypervisor_control_http_response(name, command, stream).await
+}
+
+async fn cloud_hypervisor_control_http_send(
+    name: &str,
+    command: &str,
+) -> Result<tokio::net::UnixStream> {
+    let api_socket = machine_dir(name)?.join("control.socket");
+    if !api_socket.exists() {
+        bail!(
+            "Cloud Hypervisor API socket for VM {name} is missing: {}",
+            api_socket.display()
+        );
+    }
+    let endpoint = match command {
+        "pause" => "vm.pause",
+        "resume" => "vm.resume",
+        _ => bail!("unsupported direct Cloud Hypervisor command {command}"),
+    };
+    let mut stream = tokio::net::UnixStream::connect(&api_socket)
+        .await
+        .with_context(|| format!("connect Cloud Hypervisor API socket for VM {name}"))?;
+    let request =
+        format!("PUT /api/v1/{endpoint} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .with_context(|| format!("send Cloud Hypervisor {command} request for VM {name}"))?;
+    Ok(stream)
+}
+
+async fn read_cloud_hypervisor_control_http_response(
+    name: &str,
+    command: &str,
+    mut stream: tokio::net::UnixStream,
+) -> Result<()> {
+    let mut response = vec![0; 1024];
+    let read = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut response))
+        .await
+        .with_context(|| format!("Cloud Hypervisor {command} response timed out for VM {name}"))?
+        .with_context(|| format!("read Cloud Hypervisor {command} response for VM {name}"))?;
+    let response = String::from_utf8_lossy(&response[..read]);
+    let status = response.lines().next().unwrap_or_default();
+    if status.contains(" 2") {
+        return Ok(());
+    }
+    bail!("Cloud Hypervisor {command} VM {name} failed: {status}");
+}
+
+async fn cloud_hypervisor_control_args(name: &str, args: &[&str]) -> Result<()> {
+    let ch_remote = find_ch_remote(name)?;
+    let api_socket = machine_dir(name)?.join("control.socket");
+    if !api_socket.exists() {
+        bail!(
+            "Cloud Hypervisor API socket for VM {name} is missing: {}",
+            api_socket.display()
+        );
+    }
+    require_success(
+        TokioCommand::new(ch_remote)
+            .args(["--api-socket"])
+            .arg(
+                api_socket
+                    .to_str()
+                    .ok_or_else(|| anyhow!("non-UTF-8 API socket path {}", api_socket.display()))?,
+            )
+            .args(args)
+            .stdin(Stdio::null()),
+        &format!("cloud-hypervisor {} VM {name}", args.join(" ")),
+    )
+    .await
+}
+
+async fn wait_for_cloud_hypervisor_api(name: &str, timeout: Duration) -> Result<()> {
+    let api_socket = machine_dir(name)?.join("control.socket");
+    let started = Instant::now();
+    loop {
+        if started.elapsed() > timeout {
+            bail!(
+                "timed out waiting for Cloud Hypervisor API socket for VM {name}: {}",
+                api_socket.display()
+            );
+        }
+        if api_socket.exists() && tokio::net::UnixStream::connect(&api_socket).await.is_ok() {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+fn find_ch_remote(name: &str) -> Result<PathBuf> {
+    let bin_dir = machine_dir(name)?.join("result/bin");
+    let mut scripts = Vec::new();
+    if bin_dir.exists() {
+        for entry in
+            fs::read_dir(&bin_dir).with_context(|| format!("read {}", bin_dir.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_file() {
+                scripts.push(path);
+            }
+        }
+    }
+    for script in scripts {
+        let Ok(contents) = fs::read_to_string(&script) else {
+            continue;
+        };
+        if let Some(path) = extract_store_binary(&contents, "ch-remote")
+            && path.exists()
+        {
+            return Ok(path);
+        }
+    }
+    bail!("could not find ch-remote in VM {name} runner scripts; start the VM once to build result")
+}
+
+fn extract_store_binary(contents: &str, binary: &str) -> Option<PathBuf> {
+    let needle = format!("/bin/{binary}");
+    let mut offset = 0;
+    while let Some(relative_end) = contents[offset..].find(&needle) {
+        let end = offset + relative_end + needle.len();
+        let start = contents[..end].rfind("/nix/store/")?;
+        let path = &contents[start..end];
+        if !path.chars().any(char::is_whitespace) {
+            return Some(PathBuf::from(path));
+        }
+        offset = end;
+    }
+    None
+}
+
 async fn wait_for_systemd_active(name: &str, timeout: Duration) -> Result<()> {
     let deadline = std::time::Instant::now() + timeout;
     loop {
@@ -1147,10 +1577,21 @@ async fn wait_for_systemd_active(name: &str, timeout: Duration) -> Result<()> {
 }
 
 async fn wait_for_systemd_inactive(name: &str, timeout: Duration) -> Result<()> {
+    let unit = format!("agentmom-microvm@{name}.service");
     let deadline = std::time::Instant::now() + timeout;
     loop {
-        if !vm_status(name).await?.is_running() {
-            return Ok(());
+        let output = TokioCommand::new("systemctl")
+            .args(["is-active", &unit])
+            .stdin(Stdio::null())
+            .output()
+            .await;
+        if let Ok(output) = output {
+            let active = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            match active.as_str() {
+                "active" | "activating" | "deactivating" => {}
+                "inactive" | "failed" => return Ok(()),
+                _ => {}
+            }
         }
         if std::time::Instant::now() >= deadline {
             bail!("timed out waiting for VM {name} systemd unit to stop");
@@ -1185,6 +1626,7 @@ async fn diagnostic_command_output(mut command: TokioCommand) -> String {
 }
 
 async fn wait_for_ssh(vm: &GuestVm, spec: &MicrovmSpec, timeout: Duration) -> Result<()> {
+    let started = std::time::Instant::now();
     let deadline = std::time::Instant::now() + timeout;
     loop {
         let output = TokioCommand::new("ssh")
@@ -1211,7 +1653,85 @@ async fn wait_for_ssh(vm: &GuestVm, spec: &MicrovmSpec, timeout: Duration) -> Re
                 }
             }
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        let delay = if started.elapsed() < Duration::from_secs(2) {
+            Duration::from_millis(25)
+        } else {
+            Duration::from_millis(200)
+        };
+        tokio::time::sleep(delay).await;
+    }
+}
+
+async fn wait_for_vm_readiness(
+    vm: &GuestVm,
+    spec: &MicrovmSpec,
+    timeout: Duration,
+    readiness: VmReadiness,
+    timing: &mut VmStartTiming,
+) -> Result<()> {
+    let started = Instant::now();
+    wait_for_tcp_port(&spec.guest_ip, 22, timeout).await?;
+    timing.tcp_22_ready_ms = Some(started.elapsed().as_millis());
+    if readiness == VmReadiness::Ssh {
+        wait_for_ssh(vm, spec, timeout).await?;
+        timing.ssh_ready_ms = Some(started.elapsed().as_millis());
+    }
+    Ok(())
+}
+
+async fn prime_guest_network(spec: &MicrovmSpec) {
+    let _ = TokioCommand::new("ip")
+        .args([
+            "neigh",
+            "replace",
+            &spec.guest_ip,
+            "lladdr",
+            &spec.mac,
+            "dev",
+            &spec.host_bridge,
+            "nud",
+            "reachable",
+        ])
+        .stdin(Stdio::null())
+        .status()
+        .await;
+    let _ = TokioCommand::new("bridge")
+        .args([
+            "fdb", "replace", &spec.mac, "dev", &spec.tap, "master", "static",
+        ])
+        .stdin(Stdio::null())
+        .status()
+        .await;
+}
+
+async fn wait_for_tcp_port(host: &str, port: u16, timeout: Duration) -> Result<()> {
+    let started = std::time::Instant::now();
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let connect = tokio::time::timeout(
+            Duration::from_millis(100),
+            tokio::net::TcpStream::connect((host, port)),
+        )
+        .await;
+        match connect {
+            Ok(Ok(_stream)) => return Ok(()),
+            Ok(Err(error)) => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(error).with_context(|| format!("wait for TCP {host}:{port}"));
+                }
+            }
+            Err(_elapsed) => {
+                if std::time::Instant::now() >= deadline {
+                    bail!("timed out waiting for TCP {host}:{port}");
+                }
+            }
+        }
+        let delay = if started.elapsed() < Duration::from_secs(2) {
+            Duration::from_millis(10)
+        } else {
+            Duration::from_millis(200)
+        };
+        tokio::time::sleep(delay).await;
     }
 }
 
@@ -1555,7 +2075,10 @@ mod tests {
         assert!(!template.contains("default_provider:"));
         assert!(template.contains("systemd.services.sshd-keygen.enable = lib.mkForce false;"));
         assert!(template.contains("PerSourcePenalties = \"no\";"));
-        assert!(template.contains("before = [ \"sshd.service\" ];"));
+        assert!(template.contains("environment.etc.\"ssh/ssh_host_ed25519_key\""));
+        assert!(template.contains("builtins.readFile ./guest-ssh/ssh_host_ed25519_key"));
+        assert!(template.contains("mode = \"0600\";"));
+        assert!(!template.contains("agentmom-ssh-host-key"));
         assert!(!template.contains("after = [ \"sshd-keygen.service\" ];"));
         assert!(!template.contains("requires = [ \"sshd-keygen.service\" ];"));
     }

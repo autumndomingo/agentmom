@@ -144,7 +144,7 @@ async fn api_create_job(
     Json(mut request): Json<CreateJobRequest>,
 ) -> Result<Json<JobResponse>, ApiError> {
     match request.kind.as_str() {
-        "start" | "warm" | "stop" | "execute" | "hermes" => {}
+        "start" | "warm" | "pause" | "suspend" | "resume" | "stop" | "execute" | "hermes" => {}
         "backup" | "restore" | "remove" => {
             auth::require_admin(&headers)?;
         }

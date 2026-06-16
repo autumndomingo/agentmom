@@ -479,6 +479,17 @@ function App({ userSession }) {
 
     socket.onopen = () => {
       if (cancelled) return;
+      const reusableSession = reusableChatSession(workspaceName);
+      if (reusableSession) {
+        setChatState(reusableSession.chatId, {
+          session_id: reusableSession.sessionId,
+          creatingSession: false,
+          loadingSession: false,
+          loaded: true,
+        });
+        setAcpConnectionState(workspaceName, { state: 'ready', phase: 'ready', error: null });
+        return;
+      }
       setAcpConnectionState(workspaceName, { state: 'initializing', phase: 'initialize', error: null });
       sendRpc(workspaceName, null, 'initialize', {
         protocolVersion: 1,
@@ -897,6 +908,35 @@ function App({ userSession }) {
         error: formatError(error),
       });
     }
+  }
+
+  function reusableChatSession(workspaceName) {
+    const activeId = activeChatIdRef.current;
+    const activeChat = chatsRef.current.find(
+      (chat) => chat.id === activeId && chat.workspaceName === workspaceName,
+    );
+    const activeState = activeId ? chatStatesRef.current[activeId] : null;
+    const activeSessionId =
+      activeState?.session_id ??
+      activeChat?.sessionId ??
+      activeChat?.acpSessionId ??
+      (!activeChat?.temporary ? activeChat?.id : null);
+    if (activeChat && activeSessionId) {
+      return { chatId: activeChat.id, sessionId: activeSessionId };
+    }
+
+    for (const chat of chatsRef.current) {
+      if (chat.workspaceName !== workspaceName || chat.temporary) continue;
+      const state = chatStatesRef.current[chat.id];
+      const sessionId = state?.session_id ?? chat.sessionId ?? chat.acpSessionId ?? chat.id;
+      if (sessionId) {
+        activeChatIdRef.current = chat.id;
+        setActiveChatId(chat.id);
+        return { chatId: chat.id, sessionId };
+      }
+    }
+
+    return null;
   }
 
   function loadChatSession(workspaceName, chatId) {
@@ -2416,7 +2456,7 @@ function friendlyStatus(status) {
   const lower = status.toLowerCase();
   if (lower === 'running' || lower === 'draining') return 'Ready';
   if (lower === 'stopped' || lower === 'idle-stopped') return 'Paused';
-  if (lower === 'paused') return 'Paused';
+  if (lower === 'paused' || lower === 'suspended') return 'Paused';
   if (lower === 'crashed') return 'Needs attention';
   return status;
 }
@@ -2428,7 +2468,7 @@ function isWorkspaceReady(workspace) {
 
 function isWorkspaceStartable(workspace) {
   const status = String(workspace?.status ?? '').toLowerCase();
-  return status === 'stopped' || status === 'idle-stopped' || status === 'paused';
+  return status === 'stopped' || status === 'idle-stopped' || status === 'paused' || status === 'suspended';
 }
 
 function emptyAcpState() {

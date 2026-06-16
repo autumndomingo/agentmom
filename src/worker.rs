@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Instant};
 
 use super::*;
 use axum::extract::ws::Message as AxumWsMessage;
@@ -656,9 +656,9 @@ async fn worker_hermes_acp_ws(
             .into_response());
     }
 
-    let vm = {
+    let (vm, bridge_timing) = {
         let _workspace_guard = state.api.workspace_locks.lock(&workspace.name).await;
-        workspace_running_vm_local(&state.api, &workspace)
+        workspace_running_vm_local_timed(&state.api, &workspace)
             .await
             .map_err(ApiError::Anyhow)?
     };
@@ -667,7 +667,7 @@ async fn worker_hermes_acp_ws(
     let vm_name = workspace.vm_name.clone();
     Ok(ws
         .on_upgrade(move |socket| {
-            acp::bridge_worker_socket(acp, workspace_name, vm_name, vm, socket)
+            acp::bridge_worker_socket(acp, workspace_name, vm_name, vm, socket, bridge_timing)
         })
         .into_response())
 }
@@ -948,6 +948,29 @@ async fn execute_job(api: &WorkerApi, job: &JobRecord) -> Result<Value> {
             ensure_workspace_running_local(api, &workspace).await?;
             Ok(json!({ "started": true }))
         }
+        "pause" => {
+            let workspace = api.workspace(&job.workspace_name).await?;
+            pause_workspace_local(api, &workspace).await?;
+            Ok(json!({ "paused": true }))
+        }
+        "suspend" => {
+            let workspace = api.workspace(&job.workspace_name).await?;
+            suspend_workspace_local(api, &workspace).await?;
+            Ok(json!({ "suspended": true }))
+        }
+        "resume" => {
+            let workspace = api.workspace(&job.workspace_name).await?;
+            api.update_workspace(
+                &workspace.name,
+                Some("starting"),
+                Some("running"),
+                true,
+                false,
+            )
+            .await?;
+            ensure_workspace_running_local(api, &workspace).await?;
+            Ok(json!({ "resumed": true }))
+        }
         "stop" => {
             let workspace = api.workspace(&job.workspace_name).await?;
             stop_workspace_local(api, &workspace).await?;
@@ -1108,11 +1131,35 @@ async fn worker_reconcile_workspace(
         }
     }
 
+    if record.desired_state == "suspended" && record.status != "suspended" {
+        if let Ok(handle) = get_vm(&record.vm_name).await
+            && matches!(
+                handle.status(),
+                VmStatus::Running | VmStatus::Draining | VmStatus::Paused
+            )
+        {
+            handle.suspend().await?;
+        }
+        api.update_workspace(&record.name, Some("suspended"), None, false, false)
+            .await?;
+        api.event(
+            &record.name,
+            "workspace_suspend_reconciled",
+            "succeeded",
+            "workspace desired-suspended state reconciled",
+            json!({ "vm": record.vm_name }),
+        )
+        .await?;
+    }
+
     if record.desired_state == "stopped"
         && !matches!(record.status.as_str(), "stopped" | "idle-stopped")
     {
         if let Ok(handle) = get_vm(&record.vm_name).await
-            && handle.status().is_running()
+            && matches!(
+                handle.status(),
+                VmStatus::Running | VmStatus::Draining | VmStatus::Paused | VmStatus::Suspended
+            )
         {
             handle.stop_with_timeout(Duration::from_secs(20)).await?;
         }
@@ -1248,6 +1295,34 @@ impl WorkerApi {
         Ok(())
     }
 
+    fn event_background(
+        &self,
+        name: &str,
+        event_type: &str,
+        status: &str,
+        message: &str,
+        metadata: Value,
+    ) {
+        let api = self.clone();
+        let name = name.to_string();
+        let event_type = event_type.to_string();
+        let status = status.to_string();
+        let message = message.to_string();
+        tokio::spawn(async move {
+            if let Err(error) = api
+                .event(&name, &event_type, &status, &message, metadata)
+                .await
+            {
+                log_record(
+                    "warn",
+                    "worker_background_event_failed",
+                    Some(&name),
+                    &format!("worker background event failed: {error:#}"),
+                );
+            }
+        });
+    }
+
     async fn record_backup(&self, name: &str, artifact: &BackupArtifact) -> Result<String> {
         let response = self
             .client
@@ -1347,6 +1422,58 @@ async fn create_workspace_local(
     Ok(())
 }
 
+async fn pause_workspace_local(api: &WorkerApi, workspace: &WorkspaceRecord) -> Result<()> {
+    if api.runtime.is_fake() {
+        return fake_pause_workspace(api, workspace).await;
+    }
+    api.update_workspace(&workspace.name, None, Some("paused"), false, false)
+        .await?;
+    let handle = get_vm(&workspace.vm_name)
+        .await
+        .with_context(|| format!("get VM '{}'", workspace.vm_name))?;
+    handle
+        .pause()
+        .await
+        .with_context(|| format!("pause VM '{}'", workspace.vm_name))?;
+    api.update_workspace(&workspace.name, Some("paused"), None, false, false)
+        .await?;
+    api.event(
+        &workspace.name,
+        "workspace_paused",
+        "succeeded",
+        "workspace vm paused",
+        json!({ "vm": workspace.vm_name }),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn suspend_workspace_local(api: &WorkerApi, workspace: &WorkspaceRecord) -> Result<()> {
+    if api.runtime.is_fake() {
+        return fake_suspend_workspace(api, workspace).await;
+    }
+    api.update_workspace(&workspace.name, None, Some("suspended"), false, false)
+        .await?;
+    let handle = get_vm(&workspace.vm_name)
+        .await
+        .with_context(|| format!("get VM '{}'", workspace.vm_name))?;
+    handle
+        .suspend()
+        .await
+        .with_context(|| format!("suspend VM '{}'", workspace.vm_name))?;
+    api.update_workspace(&workspace.name, Some("suspended"), None, false, false)
+        .await?;
+    api.event(
+        &workspace.name,
+        "workspace_suspended",
+        "succeeded",
+        "workspace vm snapshotted and suspended",
+        json!({ "vm": workspace.vm_name }),
+    )
+    .await?;
+    Ok(())
+}
+
 async fn stop_workspace_local(api: &WorkerApi, workspace: &WorkspaceRecord) -> Result<()> {
     if api.runtime.is_fake() {
         return fake_stop_workspace(api, workspace).await;
@@ -1354,7 +1481,10 @@ async fn stop_workspace_local(api: &WorkerApi, workspace: &WorkspaceRecord) -> R
     api.update_workspace(&workspace.name, None, Some("stopped"), false, false)
         .await?;
     if let Ok(handle) = get_vm(&workspace.vm_name).await
-        && handle.status().is_running()
+        && matches!(
+            handle.status(),
+            VmStatus::Running | VmStatus::Draining | VmStatus::Paused | VmStatus::Suspended
+        )
     {
         handle.stop_with_timeout(Duration::from_secs(10)).await?;
     }
@@ -1519,46 +1649,98 @@ async fn workspace_running_vm_local(
     api: &WorkerApi,
     workspace: &WorkspaceRecord,
 ) -> Result<GuestVm> {
+    workspace_running_vm_local_timed(api, workspace)
+        .await
+        .map(|(vm, _)| vm)
+}
+
+async fn workspace_running_vm_local_timed(
+    api: &WorkerApi,
+    workspace: &WorkspaceRecord,
+) -> Result<(GuestVm, acp::AcpBridgeTiming)> {
     if api.runtime.is_fake() {
         bail!("MOM_RUNTIME=fake does not support guest command execution yet");
     }
+    let started = Instant::now();
     match get_vm(&workspace.vm_name).await {
-        Ok(handle) => match handle.status() {
-            VmStatus::Running | VmStatus::Draining => handle
-                .connect_with_timeout(Duration::from_secs(30))
-                .await
-                .with_context(|| format!("connect to running vm '{}'", workspace.vm_name)),
-            VmStatus::Stopped | VmStatus::Crashed | VmStatus::Paused | VmStatus::Unknown => {
-                api.event(
-                    &workspace.name,
-                    "vm_starting",
-                    "running",
-                    "starting workspace vm",
-                    json!({ "vm": workspace.vm_name }),
-                )
-                .await?;
-                let vm = handle
-                    .start()
-                    .await
-                    .with_context(|| format!("start vm '{}'", workspace.vm_name))?;
-                api.update_workspace(&workspace.name, Some("running"), None, false, false)
+        Ok(handle) => {
+            let status = handle.status();
+            let mut runtime_timing = VmStartTiming::default();
+            let mut update_workspace_ms = None;
+            let vm = match status {
+                VmStatus::Running | VmStatus::Draining => {
+                    let connect_started = Instant::now();
+                    let vm = handle
+                        .connect_with_timeout(Duration::from_secs(30))
+                        .await
+                        .with_context(|| {
+                            format!("connect to running vm '{}'", workspace.vm_name)
+                        })?;
+                    runtime_timing.connect_ssh_ms = Some(connect_started.elapsed().as_millis());
+                    vm
+                }
+                VmStatus::Stopped
+                | VmStatus::Crashed
+                | VmStatus::Paused
+                | VmStatus::Suspended
+                | VmStatus::Unknown => {
+                    api.event_background(
+                        &workspace.name,
+                        "vm_starting",
+                        "running",
+                        "starting workspace vm",
+                        json!({ "vm": workspace.vm_name }),
+                    );
+                    let (vm, start_timing) = handle
+                        .start_acp_timed()
+                        .await
+                        .with_context(|| format!("start vm '{}'", workspace.vm_name))?;
+                    runtime_timing = start_timing;
+                    let update_started = Instant::now();
+                    api.update_workspace(
+                        &workspace.name,
+                        Some("running"),
+                        Some("running"),
+                        false,
+                        false,
+                    )
                     .await?;
-                api.event(
-                    &workspace.name,
-                    "vm_started",
-                    "succeeded",
-                    "workspace vm started",
-                    json!({ "vm": workspace.vm_name }),
-                )
-                .await?;
-                Ok(vm)
-            }
-            VmStatus::Missing => Err(anyhow!(
-                "workspace {} has no VM {}; recreate it",
-                workspace.name,
-                workspace.vm_name
-            )),
-        },
+                    update_workspace_ms = Some(update_started.elapsed().as_millis());
+                    api.event_background(
+                        &workspace.name,
+                        "vm_started",
+                        "succeeded",
+                        "workspace vm started",
+                        json!({ "vm": workspace.vm_name }),
+                    );
+                    vm
+                }
+                VmStatus::Missing => {
+                    return Err(anyhow!(
+                        "workspace {} has no VM {}; recreate it",
+                        workspace.name,
+                        workspace.vm_name
+                    ));
+                }
+            };
+            Ok((
+                vm,
+                acp::AcpBridgeTiming {
+                    worker_vm_status: Some(status.as_str().to_string()),
+                    worker_ensure_vm_ms: Some(started.elapsed().as_millis()),
+                    worker_vm_connect_ssh_ms: runtime_timing.connect_ssh_ms,
+                    worker_vm_refresh_definition_ms: runtime_timing.refresh_definition_ms,
+                    worker_vm_systemctl_start_ms: runtime_timing.systemctl_start_ms,
+                    worker_vm_systemd_active_ms: runtime_timing.systemd_active_ms,
+                    worker_vm_ch_api_ms: runtime_timing.ch_api_ms,
+                    worker_vm_net_prime_ms: runtime_timing.net_prime_ms,
+                    worker_vm_ch_resume_ms: runtime_timing.ch_resume_ms,
+                    worker_vm_tcp_22_ready_ms: runtime_timing.tcp_22_ready_ms,
+                    worker_vm_ssh_ready_ms: runtime_timing.ssh_ready_ms,
+                    worker_api_update_workspace_ms: update_workspace_ms,
+                },
+            ))
+        }
         Err(error) => Err(error).with_context(|| {
             format!(
                 "workspace {} has no vm {}; recreate it",
@@ -1579,8 +1761,9 @@ async fn backup_workspace_local(
     }
     let was_running = match get_vm(&workspace.vm_name).await {
         Ok(handle) => {
-            let running = handle.status().is_running();
-            if running {
+            let status = handle.status();
+            let running = status.is_running();
+            if status.is_started() {
                 api.event(
                     &workspace.name,
                     "backup_stop_started",
@@ -1669,7 +1852,7 @@ async fn restore_workspace_local(
             .await;
     }
     if let Ok(handle) = get_vm(&workspace.vm_name).await
-        && handle.status().is_running()
+        && handle.status().is_started()
     {
         handle.stop_with_timeout(Duration::from_secs(20)).await?;
     }
@@ -1798,6 +1981,50 @@ async fn fake_stop_workspace(api: &WorkerApi, workspace: &WorkspaceRecord) -> Re
         "workspace_stopped",
         "succeeded",
         "fake workspace stopped",
+        json!({ "runtime": "fake" }),
+    )
+    .await
+}
+
+async fn fake_pause_workspace(api: &WorkerApi, workspace: &WorkspaceRecord) -> Result<()> {
+    let dir = fake_workspace_dir(workspace)?;
+    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    fs::write(dir.join("state"), b"paused")?;
+    api.update_workspace(
+        &workspace.name,
+        Some("paused"),
+        Some("paused"),
+        false,
+        false,
+    )
+    .await?;
+    api.event(
+        &workspace.name,
+        "workspace_paused",
+        "succeeded",
+        "fake workspace paused",
+        json!({ "runtime": "fake" }),
+    )
+    .await
+}
+
+async fn fake_suspend_workspace(api: &WorkerApi, workspace: &WorkspaceRecord) -> Result<()> {
+    let dir = fake_workspace_dir(workspace)?;
+    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    fs::write(dir.join("state"), b"suspended")?;
+    api.update_workspace(
+        &workspace.name,
+        Some("suspended"),
+        Some("suspended"),
+        false,
+        false,
+    )
+    .await?;
+    api.event(
+        &workspace.name,
+        "workspace_suspended",
+        "succeeded",
+        "fake workspace suspended",
         json!({ "runtime": "fake" }),
     )
     .await

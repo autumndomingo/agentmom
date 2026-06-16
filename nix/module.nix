@@ -125,6 +125,9 @@ let
   // lib.optionalAttrs (cfg.cutoverWipeMarker != null) {
     MOM_CUTOVER_WIPE_MARKER = cfg.cutoverWipeMarker;
   }
+  // lib.optionalAttrs (cfg.microvm.restoreCloudHypervisor != null) {
+    MOM_MICROVM_RESTORE_CLOUD_HYPERVISOR = cfg.microvm.restoreCloudHypervisor;
+  }
   // {
     MOM_CONFIG = toString effectiveConfigFile;
   }
@@ -169,13 +172,17 @@ let
     name="$1"
     state_dir="${cfg.microvm.stateDir}/machines/$name"
     cd "$state_dir"
-    virtiofsd_pid=""
+      virtiofsd_pids=""
     vm_pid=""
     cleanup() {
       status="$?"
       trap - EXIT INT TERM
       if [ -n "$vm_pid" ]; then
-        if kill -0 "$vm_pid" >/dev/null 2>&1 && [ -x result/bin/microvm-shutdown ]; then
+        vm_state=""
+        if [ -f state ]; then
+          vm_state="$(cat state)"
+        fi
+        if [ "$vm_state" != "suspended" ] && kill -0 "$vm_pid" >/dev/null 2>&1 && [ -x result/bin/microvm-shutdown ]; then
           ${pkgs.coreutils}/bin/timeout 15s result/bin/microvm-shutdown >/dev/null 2>&1 || true
         fi
         if kill -0 "$vm_pid" >/dev/null 2>&1; then
@@ -183,9 +190,13 @@ let
         fi
         wait "$vm_pid" >/dev/null 2>&1 || true
       fi
-      if [ -n "$virtiofsd_pid" ]; then
-        kill "$virtiofsd_pid" >/dev/null 2>&1 || true
-        wait "$virtiofsd_pid" >/dev/null 2>&1 || true
+      if [ -n "$virtiofsd_pids" ]; then
+        for virtiofsd_pid in $virtiofsd_pids; do
+          kill "$virtiofsd_pid" >/dev/null 2>&1 || true
+        done
+        for virtiofsd_pid in $virtiofsd_pids; do
+          wait "$virtiofsd_pid" >/dev/null 2>&1 || true
+        done
       fi
       if [ -x result/bin/tap-down ]; then
         result/bin/tap-down >/dev/null 2>&1 || true
@@ -193,6 +204,15 @@ let
       exit "$status"
     }
     trap cleanup EXIT INT TERM
+    restore_suspended=false
+    if [ "$(cat state 2>/dev/null || true)" = "suspended" ] && [ -d snapshot ]; then
+      restore_suspended=true
+      if [ ! -x result/bin/microvm-run ]; then
+        echo "cannot restore suspended VM $name without existing result/bin/microvm-run" >&2
+        exit 1
+      fi
+    fi
+    rm -f control.socket
     runner_input_hash() {
       for input in flake.nix spec.json microvm-workspace.nix hermes-agent-package.nix; do
         if [ ! -f "$input" ]; then
@@ -210,21 +230,23 @@ let
         done
       } | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -d' ' -f1
     }
-    input_hash="$(runner_input_hash)"
-    built_hash=""
-    if [ -f .runner-input-hash ]; then
-      built_hash="$(cat .runner-input-hash)"
-    fi
-    if [ ! -x result/bin/microvm-run ] || [ "$input_hash" != "$built_hash" ]; then
-      ${pkgs.nix}/bin/nix build --no-write-lock-file --extra-experimental-features 'nix-command flakes' .#runner -o result
-      rebuilt_hash="$(runner_input_hash)"
-      if [ "$rebuilt_hash" != "$input_hash" ]; then
-        echo "microVM runner inputs changed while building $state_dir; retry the start" >&2
-        exit 1
+    if [ "$restore_suspended" = false ]; then
+      input_hash="$(runner_input_hash)"
+      built_hash=""
+      if [ -f .runner-input-hash ]; then
+        built_hash="$(cat .runner-input-hash)"
       fi
-      printf '%s\n' "$input_hash" > .runner-input-hash.tmp
-      mv .runner-input-hash.tmp .runner-input-hash
-      rm -f .runner-built
+      if [ ! -x result/bin/microvm-run ] || [ "$input_hash" != "$built_hash" ]; then
+        ${pkgs.nix}/bin/nix build --no-write-lock-file --extra-experimental-features 'nix-command flakes' .#runner -o result
+        rebuilt_hash="$(runner_input_hash)"
+        if [ "$rebuilt_hash" != "$input_hash" ]; then
+          echo "microVM runner inputs changed while building $state_dir; retry the start" >&2
+          exit 1
+        fi
+        printf '%s\n' "$input_hash" > .runner-input-hash.tmp
+        mv .runner-input-hash.tmp .runner-input-hash
+        rm -f .runner-built
+      fi
     fi
     if [ -x result/bin/tap-up ]; then
       result/bin/tap-up
@@ -234,16 +256,40 @@ let
         [ -e "$socket_file" ] || continue
         rm -f "$(cat "$socket_file")"
       done
-      result/bin/virtiofsd-run &
-      virtiofsd_pid="$!"
+      if [ "$restore_suspended" = true ]; then
+        supervisord_conf="$(${pkgs.gnused}/bin/sed -n 's/.*--configuration \([^ ]*\).*/\1/p' result/bin/virtiofsd-run | ${pkgs.coreutils}/bin/head -1)"
+        if [ -z "$supervisord_conf" ] || [ ! -f "$supervisord_conf" ]; then
+          echo "could not find virtiofsd supervisord config for suspended VM $name" >&2
+          exit 1
+        fi
+        while IFS= read -r command_line; do
+          case "$command_line" in
+            *virtiofsd-*)
+              ${pkgs.bash}/bin/bash -c "$command_line" &
+              virtiofsd_pids="$virtiofsd_pids $!"
+              ;;
+          esac
+        done < <(${pkgs.gnused}/bin/sed -n 's/^command=//p' "$supervisord_conf")
+        if [ -z "$virtiofsd_pids" ]; then
+          echo "could not find virtiofsd commands in $supervisord_conf for suspended VM $name" >&2
+          exit 1
+        fi
+      else
+        result/bin/virtiofsd-run &
+        virtiofsd_pids="$!"
+      fi
       for socket_file in result/share/microvm/virtiofs/*/socket; do
         [ -e "$socket_file" ] || continue
         socket="$(cat "$socket_file")"
+        socket_sleep=0.05
+        if [ "$restore_suspended" = true ]; then
+          socket_sleep=0.005
+        fi
         i=0
         while [ "$i" -lt 600 ]; do
           [ -S "$socket" ] && break
           i=$((i + 1))
-          sleep 0.05
+          sleep "$socket_sleep"
         done
         if [ ! -S "$socket" ]; then
           echo "timed out waiting for virtiofs socket $socket" >&2
@@ -251,7 +297,21 @@ let
         fi
       done
     fi
-    result/bin/microvm-run &
+    if [ "$restore_suspended" = true ]; then
+      cloud_hypervisor="''${MOM_MICROVM_RESTORE_CLOUD_HYPERVISOR:-}"
+      if [ -z "$cloud_hypervisor" ]; then
+        cloud_hypervisor="$(${pkgs.gnugrep}/bin/grep -Eo '/nix/store/[^[:space:]]+/bin/cloud-hypervisor' result/bin/microvm-run | ${pkgs.coreutils}/bin/head -1)"
+      fi
+      if [ -z "$cloud_hypervisor" ] || [ ! -x "$cloud_hypervisor" ]; then
+        echo "could not find cloud-hypervisor binary in result/bin/microvm-run for suspended VM $name" >&2
+        exit 1
+      fi
+      "$cloud_hypervisor" \
+        --api-socket control.socket \
+        --restore "source_url=file://$state_dir/snapshot,memory_restore_mode=ondemand,resume=true" &
+    else
+      result/bin/microvm-run &
+    fi
     vm_pid="$!"
     wait "$vm_pid"
   '';
@@ -360,6 +420,12 @@ in
         default = defaultHermesAgentUrl;
         defaultText = lib.literalExpression ''"path:/nix/store/...-source"'';
         description = "Hermes Agent flake URL used by generated workspace flakes.";
+      };
+
+      restoreCloudHypervisor = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Optional Cloud Hypervisor binary used only when restoring suspended VM snapshots.";
       };
 
     };

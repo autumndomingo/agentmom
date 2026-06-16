@@ -263,6 +263,30 @@ async fn fake_worker_start_stop_backup_jobs_update_central_state() -> Result<()>
         "running"
     );
 
+    let pause = create_job(&fleet.api_url, "alice", "pause").await?;
+    wait_for_job_status(&fleet.api_url, &pause, "succeeded").await?;
+    wait_for_workspace_status(&fleet.api_url, "alice", "paused").await?;
+    assert_eq!(
+        std::fs::read_to_string(node.runtime_home.path().join("fake/alice/state"))?,
+        "paused"
+    );
+
+    let suspend = create_job(&fleet.api_url, "alice", "suspend").await?;
+    wait_for_job_status(&fleet.api_url, &suspend, "succeeded").await?;
+    wait_for_workspace_status(&fleet.api_url, "alice", "suspended").await?;
+    assert_eq!(
+        std::fs::read_to_string(node.runtime_home.path().join("fake/alice/state"))?,
+        "suspended"
+    );
+
+    let resume = create_job(&fleet.api_url, "alice", "resume").await?;
+    wait_for_job_status(&fleet.api_url, &resume, "succeeded").await?;
+    wait_for_workspace_status(&fleet.api_url, "alice", "running").await?;
+    assert_eq!(
+        std::fs::read_to_string(node.runtime_home.path().join("fake/alice/state"))?,
+        "running"
+    );
+
     let backup = create_job(&fleet.api_url, "alice", "backup").await?;
     wait_for_job_status(&fleet.api_url, &backup, "succeeded").await?;
     wait_for_backup_count(fleet.api_state.path(), "alice", 1).await?;
@@ -1890,11 +1914,17 @@ async fn hermes_chat_websocket_routes_to_assigned_worker() -> Result<()> {
         .insert(COOKIE, HeaderValue::from_str(&cookie)?);
     let (mut socket, _) = connect_async(request).await?;
 
-    let status = socket
-        .next()
-        .await
-        .ok_or_else(|| anyhow!("chat websocket closed before status"))??;
-    let status = ws_text_json(status)?;
+    let status = loop {
+        let message = socket
+            .next()
+            .await
+            .ok_or_else(|| anyhow!("chat websocket closed before status"))??;
+        let message = ws_text_json(message)?;
+        if message["method"] == "mom/timing" {
+            continue;
+        }
+        break message;
+    };
     assert_eq!(status["method"], "mom/status");
     assert_eq!(status["params"]["state"], "connected");
     assert_eq!(status["params"]["workspace"], "chat");

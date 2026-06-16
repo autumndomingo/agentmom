@@ -1,4 +1,10 @@
-use std::{collections::HashMap, env, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    env,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Result, anyhow, bail};
 use axum::{
@@ -11,8 +17,9 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tokio::net::TcpStream;
 use tokio_tungstenite::{
-    connect_async,
+    MaybeTlsStream, WebSocketStream, connect_async,
     tungstenite::{
         Message as WorkerMessage,
         client::IntoClientRequest,
@@ -345,9 +352,10 @@ async fn chat_ws(
             workspace.name
         )
     })?)?;
+    let workspace_name = workspace.name.clone();
     Ok(ws
         .on_upgrade(move |socket| async move {
-            let _ = proxy_acp_websocket(socket, worker_ws, worker_token).await;
+            let _ = proxy_acp_websocket(socket, worker_ws, worker_token, workspace_name).await;
         })
         .into_response())
 }
@@ -397,7 +405,144 @@ async fn proxy_acp_websocket(
     mut browser_socket: axum::extract::ws::WebSocket,
     worker_ws_url: String,
     token: String,
+    workspace_name: String,
 ) -> Result<()> {
+    let mut worker_socket =
+        Some(connect_acp_worker_socket(&mut browser_socket, &worker_ws_url, &token).await?);
+
+    loop {
+        if worker_socket.is_none() {
+            let Some(message) = browser_socket.recv().await else {
+                break;
+            };
+            let message = message?;
+            if matches!(message, Message::Close(_)) {
+                break;
+            }
+            let _ = send_acp_timing(
+                &mut browser_socket,
+                "api_browser_message_received",
+                json!({ "api_worker_socket_present": false }),
+            )
+            .await;
+            let Some(worker_message) =
+                browser_message_to_worker(message, &mut browser_socket).await?
+            else {
+                continue;
+            };
+            let mut next_worker =
+                connect_acp_worker_socket(&mut browser_socket, &worker_ws_url, &token).await?;
+            next_worker.send(worker_message).await?;
+            worker_socket = Some(next_worker);
+            continue;
+        }
+
+        let worker = worker_socket.as_mut().expect("worker socket checked above");
+        tokio::select! {
+            biased;
+            worker_message = worker.next() => {
+                let Some(message) = worker_message else {
+                    worker_socket = None;
+                    let _ = send_acp_status(
+                        &mut browser_socket,
+                        "disconnected",
+                        "Hermes ACP worker websocket disconnected; it will reconnect on the next message.",
+                    )
+                    .await;
+                    continue;
+                };
+                let message = message?;
+                if !worker_message_to_browser(message, &mut browser_socket).await? {
+                    worker_socket = None;
+                    let _ = send_acp_status(
+                        &mut browser_socket,
+                        "disconnected",
+                        "Hermes ACP worker websocket disconnected; it will reconnect on the next message.",
+                    )
+                    .await;
+                    continue;
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_millis(25)) => {
+                if workspace_needs_worker_reconnect(&workspace_name) {
+                    if let Some(mut worker) = worker_socket.take() {
+                        let _ = worker.send(WorkerMessage::Close(None)).await;
+                    }
+                    let _ = send_acp_status(
+                        &mut browser_socket,
+                        "disconnected",
+                        "Hermes ACP worker websocket disconnected; it will reconnect on the next message.",
+                    )
+                    .await;
+                    continue;
+                }
+            }
+            browser_message = browser_socket.recv() => {
+                let Some(message) = browser_message else {
+                    break;
+                };
+                let message = message?;
+                if matches!(message, Message::Close(_)) {
+                    if let Some(mut worker) = worker_socket.take() {
+                        let _ = worker.send(WorkerMessage::Close(None)).await;
+                    }
+                    break;
+                }
+                let force_reconnect =
+                    message_uses_worker(&message) && workspace_needs_worker_reconnect(&workspace_name);
+                if force_reconnect {
+                    let _ = send_acp_timing(
+                        &mut browser_socket,
+                        "api_browser_message_received",
+                        json!({
+                            "api_worker_socket_present": true,
+                            "api_force_worker_reconnect": true,
+                        }),
+                    )
+                    .await;
+                }
+                let Some(worker_message) = browser_message_to_worker(message, &mut browser_socket).await? else {
+                    continue;
+                };
+                if force_reconnect {
+                    if let Some(mut worker) = worker_socket.take() {
+                        let _ = worker.send(WorkerMessage::Close(None)).await;
+                    }
+                    let mut next_worker =
+                        connect_acp_worker_socket(&mut browser_socket, &worker_ws_url, &token).await?;
+                    next_worker.send(worker_message).await?;
+                    worker_socket = Some(next_worker);
+                    continue;
+                }
+                if worker.send(worker_message).await.is_err() {
+                    worker_socket = None;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn message_uses_worker(message: &Message) -> bool {
+    matches!(message, Message::Text(_) | Message::Binary(_))
+}
+
+fn workspace_needs_worker_reconnect(workspace_name: &str) -> bool {
+    workspace_get(workspace_name).is_ok_and(|workspace| {
+        matches!(
+            workspace.status.as_str(),
+            "paused" | "suspended" | "stopped" | "idle-stopped"
+        )
+    })
+}
+
+async fn connect_acp_worker_socket(
+    browser_socket: &mut axum::extract::ws::WebSocket,
+    worker_ws_url: &str,
+    token: &str,
+) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>> {
+    let worker_connect_started = Instant::now();
     let mut request = worker_ws_url.into_client_request()?;
     request.headers_mut().insert(
         AUTHORIZATION,
@@ -407,7 +552,7 @@ async fn proxy_acp_websocket(
         Ok((socket, _)) => socket,
         Err(error) => {
             let _ = send_acp_status(
-                &mut browser_socket,
+                browser_socket,
                 "error",
                 &format!("Hermes ACP worker websocket failed: {error}"),
             )
@@ -415,64 +560,48 @@ async fn proxy_acp_websocket(
             return Err(error.into());
         }
     };
-    let (mut browser_tx, mut browser_rx) = browser_socket.split();
-    let (mut worker_tx, mut worker_rx) = worker_socket.split();
+    let _ = send_acp_timing(
+        browser_socket,
+        "api_worker_connected",
+        json!({ "api_worker_connect_ms": worker_connect_started.elapsed().as_millis() }),
+    )
+    .await;
+    Ok(worker_socket)
+}
 
-    let browser_to_worker = async {
-        while let Some(Ok(message)) = browser_rx.next().await {
-            let message = match message {
-                Message::Text(text) => WorkerMessage::Text(text.to_string().into()),
-                Message::Binary(bytes) => WorkerMessage::Binary(bytes),
-                Message::Ping(bytes) => WorkerMessage::Ping(bytes),
-                Message::Pong(bytes) => WorkerMessage::Pong(bytes),
-                Message::Close(frame) => {
-                    let close =
-                        frame.map(
-                            |frame| tokio_tungstenite::tungstenite::protocol::CloseFrame {
-                                code: frame.code.into(),
-                                reason: frame.reason.to_string().into(),
-                            },
-                        );
-                    let _ = worker_tx.send(WorkerMessage::Close(close)).await;
-                    break;
-                }
-            };
-            if worker_tx.send(message).await.is_err() {
-                break;
-            }
+async fn browser_message_to_worker(
+    message: Message,
+    browser_socket: &mut axum::extract::ws::WebSocket,
+) -> Result<Option<WorkerMessage>> {
+    Ok(match message {
+        Message::Text(text) => Some(WorkerMessage::Text(text.to_string().into())),
+        Message::Binary(bytes) => Some(WorkerMessage::Binary(bytes)),
+        Message::Ping(bytes) => {
+            browser_socket.send(Message::Pong(bytes)).await?;
+            None
         }
-        Ok::<(), anyhow::Error>(())
-    };
+        Message::Pong(_) => None,
+        Message::Close(_) => None,
+    })
+}
 
-    let worker_to_browser = async {
-        while let Some(Ok(message)) = worker_rx.next().await {
-            let message = match message {
-                WorkerMessage::Text(text) => Message::Text(text.to_string().into()),
-                WorkerMessage::Binary(bytes) => Message::Binary(bytes),
-                WorkerMessage::Ping(bytes) => Message::Ping(bytes),
-                WorkerMessage::Pong(bytes) => Message::Pong(bytes),
-                WorkerMessage::Close(frame) => {
-                    let close = frame.map(|frame| axum::extract::ws::CloseFrame {
-                        code: frame.code.into(),
-                        reason: frame.reason.to_string().into(),
-                    });
-                    let _ = browser_tx.send(Message::Close(close)).await;
-                    break;
-                }
-                WorkerMessage::Frame(_) => continue,
-            };
-            if browser_tx.send(message).await.is_err() {
-                break;
-            }
+async fn worker_message_to_browser(
+    message: WorkerMessage,
+    browser_socket: &mut axum::extract::ws::WebSocket,
+) -> Result<bool> {
+    let message = match message {
+        WorkerMessage::Text(text) => Message::Text(text.to_string().into()),
+        WorkerMessage::Binary(bytes) => Message::Binary(bytes),
+        WorkerMessage::Ping(bytes) => Message::Ping(bytes),
+        WorkerMessage::Pong(bytes) => Message::Pong(bytes),
+        WorkerMessage::Close(frame) => {
+            let _ = frame;
+            return Ok(false);
         }
-        Ok::<(), anyhow::Error>(())
+        WorkerMessage::Frame(_) => return Ok(true),
     };
-
-    tokio::select! {
-        result = browser_to_worker => result?,
-        result = worker_to_browser => result?,
-    }
-    Ok(())
+    browser_socket.send(message).await?;
+    Ok(true)
 }
 
 async fn proxy_tui_websocket(
@@ -576,6 +705,28 @@ async fn send_acp_status(
         ))
         .await
         .map_err(|error| anyhow!("send Hermes ACP websocket status: {error}"))
+}
+
+async fn send_acp_timing(
+    socket: &mut axum::extract::ws::WebSocket,
+    phase: &str,
+    mut params: Value,
+) -> Result<()> {
+    if let Some(params) = params.as_object_mut() {
+        params.insert("phase".to_string(), Value::String(phase.to_string()));
+    }
+    socket
+        .send(Message::Text(
+            json!({
+                "jsonrpc": "2.0",
+                "method": "mom/timing",
+                "params": params,
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .map_err(|error| anyhow!("send Hermes ACP websocket timing: {error}"))
 }
 
 async fn open_hermes_dashboard(name: &str) -> Result<Json<CommandResult>, UiError> {

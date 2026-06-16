@@ -25,6 +25,8 @@ mom workspace hermes alice -- --help
 mom workspace inspect alice
 mom workspace events alice --since 2h
 mom workspace backup alice
+mom workspace pause alice
+mom workspace resume alice
 mom workspace stop alice
 mom workspace rm alice --force
 mom node status
@@ -100,6 +102,10 @@ Backups use restic. Set `RESTIC_REPOSITORY` and the usual restic credentials in
 the worker service environment before enabling scheduled backups. Agent Mom
 stops a running workspace before backing up its host workspace directory, then
 starts it again if it was desired-running.
+
+`mom workspace pause` uses Cloud Hypervisor's control socket to pause a running
+VM process without tearing down the systemd unit. `mom workspace resume` resumes
+that paused VM and waits for guest SSH; use `stop` when the VM should fully exit.
 
 ## Development
 

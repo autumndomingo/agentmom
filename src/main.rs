@@ -117,6 +117,12 @@ enum WorkspaceCommand {
     },
     /// Mark a workspace desired-running and start it.
     Start { name: String },
+    /// Pause a running workspace VM without tearing down the process.
+    Pause { name: String },
+    /// Snapshot a running workspace VM and tear down the process.
+    Suspend { name: String },
+    /// Resume a paused or suspended workspace VM.
+    Resume { name: String },
     /// Mark a workspace desired-stopped and stop it.
     Stop { name: String },
     /// Run a command in a workspace VM and update its activity timestamp.
@@ -662,6 +668,9 @@ async fn workspace_command(command: WorkspaceCommand) -> Result<()> {
         WorkspaceCommand::Inspect { name } => workspace_inspect(&name).await,
         WorkspaceCommand::Events { name, since } => workspace_events_cmd(&name, &since),
         WorkspaceCommand::Start { name } => workspace_start(&name).await,
+        WorkspaceCommand::Pause { name } => workspace_pause(&name).await,
+        WorkspaceCommand::Suspend { name } => workspace_suspend(&name).await,
+        WorkspaceCommand::Resume { name } => workspace_resume(&name).await,
         WorkspaceCommand::Stop { name } => workspace_stop(&name).await,
         WorkspaceCommand::Exec { name, command } => {
             let workspace = workspace_get(&name)?;
@@ -1185,6 +1194,77 @@ async fn workspace_start(name: &str) -> Result<()> {
     workspace_ensure_running(&workspace).await
 }
 
+async fn workspace_pause(name: &str) -> Result<()> {
+    let workspace = workspace_get(name)?;
+    workspace_set_desired(name, "paused")?;
+    if !workspace_is_local(&workspace)? {
+        queue_assigned_workspace_job(&workspace, "pause", json!({})).await?;
+        return Ok(());
+    }
+    let handle = get_vm(&workspace.vm_name).await?;
+    handle.pause().await?;
+    workspace_mark_status(name, "paused")?;
+    record_workspace_event(
+        name,
+        "workspace_paused",
+        "succeeded",
+        "workspace vm paused",
+        json!({ "vm": workspace.vm_name }),
+    )?;
+    println!("paused workspace {name}");
+    Ok(())
+}
+
+async fn workspace_suspend(name: &str) -> Result<()> {
+    let workspace = workspace_get(name)?;
+    workspace_set_desired(name, "suspended")?;
+    if !workspace_is_local(&workspace)? {
+        queue_assigned_workspace_job(&workspace, "suspend", json!({})).await?;
+        return Ok(());
+    }
+    let handle = get_vm(&workspace.vm_name).await?;
+    handle.suspend().await?;
+    workspace_mark_status(name, "suspended")?;
+    record_workspace_event(
+        name,
+        "workspace_suspended",
+        "succeeded",
+        "workspace vm snapshotted and suspended",
+        json!({ "vm": workspace.vm_name }),
+    )?;
+    println!("suspended workspace {name}");
+    Ok(())
+}
+
+async fn workspace_resume(name: &str) -> Result<()> {
+    let workspace = workspace_get(name)?;
+    workspace_set_desired(name, "running")?;
+    workspace_touch(name)?;
+    record_workspace_event(
+        name,
+        "workspace_resume_requested",
+        "running",
+        "workspace desired state set to running",
+        json!({ "vm": workspace.vm_name }),
+    )?;
+    if !workspace_is_local(&workspace)? {
+        queue_assigned_workspace_job(&workspace, "resume", json!({})).await?;
+        return Ok(());
+    }
+    let handle = get_vm(&workspace.vm_name).await?;
+    let vm = handle.resume().await?;
+    workspace_mark_status(name, "running")?;
+    record_workspace_event(
+        name,
+        "workspace_resumed",
+        "succeeded",
+        "workspace vm resumed",
+        json!({ "vm": vm.name() }),
+    )?;
+    println!("resumed workspace {name}");
+    Ok(())
+}
+
 async fn workspace_stop(name: &str) -> Result<()> {
     let workspace = workspace_get(name)?;
     if !workspace_is_local(&workspace)? {
@@ -1193,7 +1273,10 @@ async fn workspace_stop(name: &str) -> Result<()> {
     }
     workspace_set_desired(name, "stopped")?;
     if let Ok(handle) = get_vm(&workspace.vm_name).await
-        && handle.status().is_running()
+        && matches!(
+            handle.status(),
+            VmStatus::Running | VmStatus::Draining | VmStatus::Paused | VmStatus::Suspended
+        )
     {
         handle.stop_with_timeout(Duration::from_secs(10)).await?;
     }
@@ -1454,7 +1537,11 @@ async fn workspace_running_vm(workspace: &WorkspaceRecord) -> Result<GuestVm> {
                 .connect_with_timeout(Duration::from_secs(30))
                 .await
                 .with_context(|| format!("connect to running vm '{}'", workspace.vm_name)),
-            VmStatus::Stopped | VmStatus::Crashed | VmStatus::Paused | VmStatus::Unknown => {
+            VmStatus::Stopped
+            | VmStatus::Crashed
+            | VmStatus::Paused
+            | VmStatus::Suspended
+            | VmStatus::Unknown => {
                 log_record(
                     "info",
                     "workspace_starting",

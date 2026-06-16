@@ -1,0 +1,389 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+workspace="${1:-blah-blah-com-blah-blah-12b72789b231}"
+vm_name="${2:-mom-blah-blah-com-blah-blah-12b72789b231}"
+api="${AGENTMOM_E2E_API_URL:-https://agentmom.xyz}"
+ctrl_ssh="${AGENTMOM_E2E_CTRL_SSH:-mom-ctrl}"
+worker_ssh="${AGENTMOM_E2E_WORKER_SSH:-mom-2}"
+mom_bin="${AGENTMOM_E2E_MOM_BIN:-}"
+if [ -z "$mom_bin" ]; then
+  mom_bin="$(
+    ssh "$ctrl_ssh" "systemctl show -P ExecStart agentmom-api.service" |
+      sed -n 's/.*path=\([^ ;]*\/bin\/mom\).*/\1/p' |
+      head -1
+  )"
+fi
+if [ -z "$mom_bin" ]; then
+  echo "Could not resolve mom binary; set AGENTMOM_E2E_MOM_BIN" >&2
+  exit 1
+fi
+
+cleanup() {
+  ssh "$ctrl_ssh" "sudo env \$(systemctl show -P Environment agentmom-api.service) $mom_bin workspace stop $workspace" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+make_cookie() {
+  local token hash
+  token="session_$(date +%s)_${RANDOM}_${RANDOM}_$(uuidgen | tr A-Z a-z)"
+  hash="$(
+    ssh "$ctrl_ssh" "sudo env TOKEN='$token' nix shell nixpkgs#openssl -c bash -c 'secret=\$(cat /run/agenix/agentmom-auth-secret); printf %s \"\$TOKEN\" | openssl dgst -sha256 -hmac \"\$secret\" -hex | awk '\\''{print \$2}'\\'''"
+  )"
+  ssh "$ctrl_ssh" "sudo nix shell nixpkgs#sqlite -c sqlite3 /var/lib/agentmom/fleet.db \"INSERT INTO sessions (user_id, token_hash, created_at, last_seen_at) VALUES (1, '$hash', strftime('%s','now'), strftime('%s','now'));\""
+  printf 'agentmom_session=%s' "$token"
+}
+
+cookie="$(make_cookie)"
+ws_url="wss://${api#https://}/api/workspaces/$workspace/chat/ws"
+
+ssh "$ctrl_ssh" "sudo env \$(systemctl show -P Environment agentmom-api.service) $mom_bin workspace start $workspace" >/dev/null
+
+env \
+  NIX_PATH=nixpkgs=flake:nixpkgs \
+  AGENTMOM_E2E_WORKSPACE="$workspace" \
+  AGENTMOM_E2E_VM_NAME="$vm_name" \
+  AGENTMOM_E2E_MOM_BIN="$mom_bin" \
+  AGENTMOM_E2E_CTRL_SSH="$ctrl_ssh" \
+  AGENTMOM_E2E_WORKER_SSH="$worker_ssh" \
+  AGENTMOM_E2E_COOKIE="$cookie" \
+  AGENTMOM_E2E_WS_URL="$ws_url" \
+  nix shell --impure --expr 'with import <nixpkgs> {}; python3.withPackages (ps: [ ps.websockets ])' -c python - <<'PY'
+import asyncio
+import json
+import os
+import subprocess
+import time
+
+import websockets
+
+workspace = os.environ["AGENTMOM_E2E_WORKSPACE"]
+vm_name = os.environ["AGENTMOM_E2E_VM_NAME"]
+mom_bin = os.environ["AGENTMOM_E2E_MOM_BIN"]
+ctrl_ssh = os.environ["AGENTMOM_E2E_CTRL_SSH"]
+worker_ssh = os.environ["AGENTMOM_E2E_WORKER_SSH"]
+cookie = os.environ["AGENTMOM_E2E_COOKIE"]
+ws_url = os.environ["AGENTMOM_E2E_WS_URL"]
+reuse_session = os.environ.get("AGENTMOM_E2E_REUSE_SESSION") == "1"
+skip_reconnect_initialize = os.environ.get("AGENTMOM_E2E_SKIP_RECONNECT_INITIALIZE") == "1"
+keep_ws_open = os.environ.get("AGENTMOM_E2E_KEEP_WS_OPEN") == "1"
+guest_ping = os.environ.get("AGENTMOM_E2E_GUEST_PING") == "1"
+
+rpc_id = 1
+timings = []
+statuses = []
+
+def run(command):
+    return subprocess.run(command, shell=True, check=True, text=True, capture_output=True)
+
+def now_ms(start):
+    return round((time.perf_counter() - start) * 1000)
+
+def ctrl_mom(args):
+    quoted = " ".join(args)
+    run(f"ssh {ctrl_ssh} 'sudo env $(systemctl show -P Environment agentmom-api.service) {mom_bin} {quoted}'")
+
+def vm_process_summary():
+    return run(
+        f"ssh {worker_ssh} "
+        + repr(
+            "pgrep -af "
+            + vm_name
+            + " | grep -E 'cloud-hypervisor|microvm@' | grep -v 'pgrep -af' | grep -v 'bash -c' || true"
+        )
+    ).stdout.strip()
+
+def wait_suspended():
+    deadline = time.perf_counter() + 60
+    last = ""
+    while time.perf_counter() < deadline:
+        inspect = run(
+            f"ssh {ctrl_ssh} 'sudo env $(systemctl show -P Environment agentmom-api.service) {mom_bin} workspace inspect {workspace}'"
+        ).stdout
+        status = ""
+        for line in inspect.splitlines():
+            if line.startswith("Status: "):
+                status = line.removeprefix("Status: ")
+                break
+        state = run(
+            f"ssh {worker_ssh} 'sudo cat /data/agentmom/microvms/machines/{vm_name}/state 2>/dev/null || true'"
+        ).stdout.strip()
+        unit = run(
+            f"ssh {worker_ssh} 'systemctl is-active agentmom-microvm@{vm_name}.service || true'"
+        ).stdout.strip()
+        proc = vm_process_summary()
+        last = f"status={status} vm_state={state} unit={unit} vm_process_present={bool(proc)}"
+        if status == "suspended" and state == "suspended" and unit == "inactive" and not proc:
+            return last
+        time.sleep(0.05)
+    raise RuntimeError(f"suspend wait failed {last}\nprocesses:\n{vm_process_summary()}")
+
+async def recv_json(websocket, phase, since=None, timeout=60):
+    raw = await asyncio.wait_for(websocket.recv(), timeout=timeout)
+    elapsed = now_ms(since) if since else None
+    try:
+        message = json.loads(raw)
+    except Exception:
+        message = {"raw": raw}
+    if message.get("method") == "mom/timing":
+        timings.append({"phase_seen": phase, "elapsed_ms": elapsed, **(message.get("params") or {})})
+    elif message.get("method") == "mom/status":
+        statuses.append({"phase_seen": phase, "elapsed_ms": elapsed, **(message.get("params") or {})})
+    return message, elapsed
+
+async def wait_for(websocket, predicate, phase, since=None, timeout=60):
+    while True:
+        message, elapsed = await recv_json(websocket, phase, since=since, timeout=timeout)
+        if predicate(message):
+            return message, elapsed
+
+async def send_rpc(websocket, method, params, phase, timeout=60):
+    global rpc_id
+    ident = rpc_id
+    rpc_id += 1
+    started = time.perf_counter()
+    await websocket.send(json.dumps({"jsonrpc": "2.0", "id": ident, "method": method, "params": params}))
+    message, elapsed = await wait_for(
+        websocket,
+        lambda value: value.get("id") == ident,
+        phase,
+        since=started,
+        timeout=timeout,
+    )
+    return ident, message, elapsed
+
+async def drain_pending(websocket, phase, quiet_ms=500, max_ms=5000):
+    drained = 0
+    deadline = time.perf_counter() + (max_ms / 1000)
+    while time.perf_counter() < deadline:
+        try:
+            await recv_json(websocket, phase, timeout=quiet_ms / 1000)
+            drained += 1
+        except asyncio.TimeoutError:
+            break
+    return drained
+
+async def main():
+    connect_started = time.perf_counter()
+    async with websockets.connect(
+        ws_url,
+        additional_headers={"Cookie": cookie},
+        open_timeout=20,
+        ping_interval=None,
+    ) as websocket:
+        await wait_for(
+            websocket,
+            lambda value: value.get("method") == "mom/status" and (value.get("params") or {}).get("state") == "connected",
+            "connect",
+            since=connect_started,
+            timeout=40,
+        )
+        print(f"connect_to_acp_connected_ms={now_ms(connect_started)}", flush=True)
+
+        _, initialize, initialize_ms = await send_rpc(
+            websocket,
+            "initialize",
+            {
+                "protocolVersion": 1,
+                "clientCapabilities": {},
+                "clientInfo": {"name": "agent-mom-suspend-latency", "version": "0.1.1"},
+            },
+            "initialize",
+            timeout=30,
+        )
+        print(f"initialize_response_ms={initialize_ms}", flush=True)
+
+        _, session_new, session_new_ms = await send_rpc(
+            websocket,
+            "session/new",
+            {"cwd": "/workspace", "mcpServers": []},
+            "session/new",
+            timeout=60,
+        )
+        session_id = (
+            (session_new.get("result") or {}).get("sessionId")
+            or (session_new.get("result") or {}).get("session_id")
+        )
+        if not session_id:
+            raise RuntimeError(f"session/new did not return a session id: {session_new}")
+        print(f"session_new_response_ms={session_new_ms} session_id={session_id}", flush=True)
+        drained = await drain_pending(websocket, "setup_drain")
+        print(f"setup_drain_messages={drained}", flush=True)
+
+        before = vm_process_summary()
+        print("before_suspend_processes=" + json.dumps(before), flush=True)
+        suspend_started = time.perf_counter()
+        ctrl_mom(["workspace", "suspend", workspace])
+        suspended = wait_suspended()
+        print(f"suspend_control_ms={now_ms(suspend_started)} {suspended}", flush=True)
+        print("after_suspend_processes=" + json.dumps(vm_process_summary()), flush=True)
+        if keep_ws_open:
+            drained = await drain_pending(websocket, "post_suspend_drain", quiet_ms=100, max_ms=1000)
+            print(f"post_suspend_drain_messages={drained}", flush=True)
+            prompt_id = rpc_id
+            send_started = time.perf_counter()
+            if guest_ping:
+                await websocket.send(json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": prompt_id,
+                    "method": "mom/test/guest-ping",
+                    "params": {},
+                }))
+            else:
+                prompt = {
+                    "sessionId": session_id,
+                    "messageId": f"agent-mom-suspend-open-ws-latency-{round(time.time() * 1000)}",
+                    "prompt": [{"type": "text", "text": "Reply with the single word pong."}],
+                }
+                await websocket.send(json.dumps({"jsonrpc": "2.0", "id": prompt_id, "method": "session/prompt", "params": prompt}))
+            globals()["rpc_id"] = prompt_id + 1
+
+            first_after_start = None
+            prompt_response = None
+            connected_after_send = None
+            deadline = time.perf_counter() + 90
+            while time.perf_counter() < deadline:
+                try:
+                    message, elapsed = await recv_json(websocket, "open_ws_after_prompt", since=send_started, timeout=15)
+                except asyncio.TimeoutError:
+                    print("open_ws_prompt_recv_timeout_ms=15000", flush=True)
+                    break
+                if message.get("method") == "mom/status" and (message.get("params") or {}).get("state") == "connected":
+                    connected_after_send = elapsed
+                    print(f"open_ws_prompt_to_acp_connected_ms={elapsed}", flush=True)
+                    continue
+                if message.get("method") == "mom/timing":
+                    continue
+                if first_after_start is None:
+                    first_after_start = (message, elapsed)
+                    print(f"open_ws_prompt_first_after_restore_ms={elapsed} method={message.get('method')} id={message.get('id')}", flush=True)
+                if message.get("id") == prompt_id:
+                    prompt_response = (message, elapsed)
+                    if guest_ping:
+                        result = message.get("result") or {}
+                        error = message.get("error")
+                        print(
+                            f"open_ws_guest_ping_response_ms={elapsed} "
+                            f"guest_ping_ms={result.get('guest_ping_ms')} "
+                            f"stdout={result.get('stdout')} "
+                            f"error={json.dumps(error, sort_keys=True) if error else 'null'}",
+                            flush=True,
+                        )
+                    else:
+                        print(f"open_ws_prompt_response_ms={elapsed}", flush=True)
+                    break
+                if first_after_start is not None and elapsed > 10000:
+                    break
+
+            print("timings=" + json.dumps(timings, sort_keys=True), flush=True)
+            print("statuses=" + json.dumps(statuses, sort_keys=True), flush=True)
+            if connected_after_send is None:
+                print("open_ws_prompt_to_acp_connected_ms=missing", flush=True)
+            if first_after_start is None:
+                print("open_ws_prompt_first_after_restore_ms=missing", flush=True)
+            if prompt_response is None:
+                if guest_ping:
+                    print("open_ws_guest_ping_response_ms=not_observed_within_probe", flush=True)
+                else:
+                    print("open_ws_prompt_response_ms=not_observed_within_probe", flush=True)
+            await websocket.close()
+            return
+        await websocket.close()
+
+    reconnect_started = time.perf_counter()
+    async with websockets.connect(
+        ws_url,
+        additional_headers={"Cookie": cookie},
+        open_timeout=20,
+        ping_interval=None,
+    ) as websocket:
+        await wait_for(
+            websocket,
+            lambda value: value.get("method") == "mom/status" and (value.get("params") or {}).get("state") == "connected",
+            "reconnect",
+            since=reconnect_started,
+            timeout=60,
+        )
+        print(f"reconnect_to_acp_connected_ms={now_ms(reconnect_started)}", flush=True)
+
+        if not skip_reconnect_initialize:
+            _, initialize, initialize_ms = await send_rpc(
+                websocket,
+                "initialize",
+                {
+                    "protocolVersion": 1,
+                    "clientCapabilities": {},
+                    "clientInfo": {"name": "agent-mom-suspend-latency-reconnect", "version": "0.1.1"},
+                },
+                "reconnect_initialize",
+                timeout=30,
+            )
+            print(f"reconnect_initialize_response_ms={initialize_ms}", flush=True)
+        else:
+            print("reconnect_initialize_response_ms=skipped", flush=True)
+
+        if reuse_session:
+            print(f"reconnect_session_new_response_ms=skipped_reuse session_id={session_id}", flush=True)
+            drained = await drain_pending(websocket, "reconnect_setup_drain", quiet_ms=100, max_ms=1000)
+        else:
+            _, session_new, session_new_ms = await send_rpc(
+                websocket,
+                "session/new",
+                {"cwd": "/workspace", "mcpServers": []},
+                "reconnect_session/new",
+                timeout=60,
+            )
+            session_id = (
+                (session_new.get("result") or {}).get("sessionId")
+                or (session_new.get("result") or {}).get("session_id")
+            )
+            if not session_id:
+                raise RuntimeError(f"reconnect session/new did not return a session id: {session_new}")
+            print(f"reconnect_session_new_response_ms={session_new_ms} session_id={session_id}", flush=True)
+            drained = await drain_pending(websocket, "reconnect_setup_drain")
+        print(f"reconnect_setup_drain_messages={drained}", flush=True)
+
+        prompt = {
+            "sessionId": session_id,
+            "messageId": f"agent-mom-suspend-latency-{round(time.time() * 1000)}",
+            "prompt": [{"type": "text", "text": "Reply with the single word pong."}],
+        }
+        prompt_id = rpc_id
+        send_started = time.perf_counter()
+        await websocket.send(json.dumps({"jsonrpc": "2.0", "id": prompt_id, "method": "session/prompt", "params": prompt}))
+        globals()["rpc_id"] = prompt_id + 1
+
+        first_after_start = None
+        prompt_response = None
+        deadline = time.perf_counter() + 90
+        while time.perf_counter() < deadline:
+            try:
+                message, elapsed = await recv_json(websocket, "after_prompt", since=send_started, timeout=15)
+            except asyncio.TimeoutError:
+                print("prompt_recv_timeout_ms=15000", flush=True)
+                break
+            if message.get("method") in {"mom/timing", "mom/status"}:
+                continue
+            if first_after_start is None:
+                first_after_start = (message, elapsed)
+                print(f"prompt_first_after_restore_ms={elapsed} method={message.get('method')} id={message.get('id')}", flush=True)
+            if message.get("id") == prompt_id:
+                prompt_response = (message, elapsed)
+                print(f"prompt_response_ms={elapsed}", flush=True)
+                break
+            if first_after_start is not None and elapsed > 10000:
+                break
+
+        print("timings=" + json.dumps(timings, sort_keys=True), flush=True)
+        print("statuses=" + json.dumps(statuses, sort_keys=True), flush=True)
+        if first_after_start is None:
+            print("prompt_first_after_restore_ms=missing", flush=True)
+        if prompt_response is None:
+            print("prompt_response_ms=not_observed_within_probe", flush=True)
+
+asyncio.run(main())
+PY
+
+cleanup
+trap - EXIT
+ssh "$worker_ssh" "systemctl is-active agentmom-microvm@$vm_name.service || true; sudo cat /data/agentmom/microvms/machines/$vm_name/state 2>/dev/null || true"
