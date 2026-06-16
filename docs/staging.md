@@ -1,13 +1,13 @@
 # Agent Mom Staging
 
-Staging source of truth is the `stage` branch in:
+Staging source of truth is `master` in:
 
 ```bash
-~/code/agentmom/worktrees/microvm-fast-resume-live
+~/code/agentmom
 ```
 
-Use this tree for stage-only runtime work until it is merged back to a mainline
-branch.
+Use short-lived branches for experiments, but merge validated stage runtime work
+back to `master` before handing it to other agents.
 
 ## Hosts
 
