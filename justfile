@@ -6,6 +6,14 @@ default:
 ui-build:
     npm --prefix ui run build
 
+pre-merge:
+    @if ! command -v cargo >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then exec nix develop --command just pre-merge; fi
+    cargo fmt --check
+    cargo check
+    cargo test
+    npm --prefix ui run build
+    bash -n scripts/measure-suspended-message-e2e
+
 dev:
     @if ! command -v lsof >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1 || ! command -v cargo >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1 || ! command -v iron-proxy >/dev/null 2>&1 || ! command -v playwright >/dev/null 2>&1; then exec nix develop --command just dev; fi
     @./scripts/dev-run
