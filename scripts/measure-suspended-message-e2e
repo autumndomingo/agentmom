@@ -279,13 +279,23 @@ async def main():
             print("statuses=" + json.dumps(statuses, sort_keys=True), flush=True)
             if connected_after_send is None:
                 print("open_ws_prompt_to_acp_connected_ms=missing", flush=True)
+                raise RuntimeError("ACP did not reconnect after the open-websocket prompt")
             if first_after_start is None:
                 print("open_ws_prompt_first_after_restore_ms=missing", flush=True)
+                raise RuntimeError("no post-restore websocket message observed")
             if prompt_response is None:
                 if guest_ping:
                     print("open_ws_guest_ping_response_ms=not_observed_within_probe", flush=True)
                 else:
                     print("open_ws_prompt_response_ms=not_observed_within_probe", flush=True)
+                raise RuntimeError("prompt response was not observed within the probe window")
+            prompt_message = prompt_response[0]
+            if prompt_message.get("error") is not None:
+                raise RuntimeError(f"prompt returned JSON-RPC error: {prompt_message['error']}")
+            if guest_ping:
+                result = prompt_message.get("result") or {}
+                if result.get("stdout") != "agentmom-guest-pong":
+                    raise RuntimeError(f"guest ping returned unexpected result: {result}")
             await websocket.close()
             return
         await websocket.close()

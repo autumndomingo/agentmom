@@ -48,6 +48,4 @@ stage-e2e-suspend-latency workspace="stage-e2e" vm="mom-stage-e2e":
     AGENTMOM_E2E_WORKER_SSH=justin@100.92.189.28 \
     AGENTMOM_E2E_KEEP_WS_OPEN=1 \
     AGENTMOM_E2E_GUEST_PING=1 \
-    AGENTMOM_E2E_REUSE_SESSION=1 \
-    AGENTMOM_E2E_SKIP_RECONNECT_INITIALIZE=1 \
     ./scripts/measure-suspended-message-e2e {{workspace}} {{vm}}
