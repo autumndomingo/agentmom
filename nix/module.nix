@@ -171,6 +171,10 @@ let
     set -eu
     name="$1"
     state_dir="${cfg.microvm.stateDir}/machines/$name"
+    if [ ! -d "$state_dir" ]; then
+      echo "microVM state dir $state_dir is missing; treating $name as stopped" >&2
+      exit 0
+    fi
     cd "$state_dir"
       virtiofsd_pids=""
     vm_pid=""

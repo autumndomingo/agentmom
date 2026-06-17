@@ -1,0 +1,403 @@
+diff --git a/virtio-devices/src/vhost_user/blk.rs b/virtio-devices/src/vhost_user/blk.rs
+index dbaab8b..cf2cbee 100644
+--- a/virtio-devices/src/vhost_user/blk.rs
++++ b/virtio-devices/src/vhost_user/blk.rs
+@@ -74,17 +74,18 @@ impl Blk {
+             vu_num_queues,
+             config,
+             paused,
+-            vring_bases,
++            pending_backend_restore,
+         ) = if let Some(state) = state {
+             info!("Restoring vhost-user-block {id}");
+ 
++            let mut state = state;
++            let pending_backend_restore = state.take_pending_backend_restore()?;
++
+             vu.set_protocol_features_vhost_user(
+                 state.acked_features,
+                 state.acked_protocol_features,
+             )?;
+ 
+-            vu.restore_state(&state)?;
+-
+             (
+                 state.avail_features,
+                 state.acked_features,
+@@ -92,7 +93,7 @@ impl Blk {
+                 state.vu_num_queues,
+                 state.config,
+                 true,
+-                state.vring_bases,
++                pending_backend_restore,
+             )
+         } else {
+             // Filling device and vring features VMM supports.
+@@ -187,7 +188,7 @@ impl Blk {
+                 acked_protocol_features,
+                 socket_path: vu_cfg.socket,
+                 vu_num_queues,
+-                vring_bases,
++                pending_backend_restore,
+                 ..Default::default()
+             },
+             id,
+diff --git a/virtio-devices/src/vhost_user/fs.rs b/virtio-devices/src/vhost_user/fs.rs
+index 31738a1..1040684 100644
+--- a/virtio-devices/src/vhost_user/fs.rs
++++ b/virtio-devices/src/vhost_user/fs.rs
+@@ -100,17 +100,18 @@ impl Fs {
+             vu_num_queues,
+             config,
+             paused,
+-            vring_bases,
++            pending_backend_restore,
+         ) = if let Some(state) = state {
+             info!("Restoring vhost-user-fs {id}");
+ 
++            let mut state = state;
++            let pending_backend_restore = state.take_pending_backend_restore()?;
++
+             vu.set_protocol_features_vhost_user(
+                 state.acked_features,
+                 state.acked_protocol_features,
+             )?;
+ 
+-            vu.restore_state(&state)?;
+-
+             (
+                 state.avail_features,
+                 state.acked_features,
+@@ -118,7 +119,7 @@ impl Fs {
+                 state.vu_num_queues,
+                 state.config,
+                 true,
+-                state.vring_bases,
++                pending_backend_restore,
+             )
+         } else {
+             // Filling device and vring features VMM supports.
+@@ -192,7 +193,7 @@ impl Fs {
+                 acked_protocol_features,
+                 socket_path: path.to_string(),
+                 vu_num_queues,
+-                vring_bases,
++                pending_backend_restore,
+                 ..Default::default()
+             },
+             id,
+diff --git a/virtio-devices/src/vhost_user/generic_vhost_user.rs b/virtio-devices/src/vhost_user/generic_vhost_user.rs
+index 5a302dc..35bbd0f 100644
+--- a/virtio-devices/src/vhost_user/generic_vhost_user.rs
++++ b/virtio-devices/src/vhost_user/generic_vhost_user.rs
+@@ -87,23 +87,25 @@ impl GenericVhostUser {
+             acked_protocol_features,
+             vu_num_queues,
+             paused,
+-            vring_bases,
++            pending_backend_restore,
+         ) = if let Some(state) = state {
+             info!("Restoring generic vhost-user {id}");
++
++            let mut state = state;
++            let pending_backend_restore = state.take_pending_backend_restore()?;
++
+             vu.set_protocol_features_vhost_user(
+                 state.acked_features,
+                 state.acked_protocol_features,
+             )?;
+ 
+-            vu.restore_state(&state)?;
+-
+             (
+                 state.avail_features,
+                 state.acked_features,
+                 state.acked_protocol_features,
+                 state.vu_num_queues,
+                 true,
+-                state.vring_bases,
++                pending_backend_restore,
+             )
+         } else {
+             let avail_protocol_features = VhostUserProtocolFeatures::CONFIG
+@@ -167,7 +169,7 @@ since the backend only supports {backend_num_queues}\n",
+                 acked_protocol_features,
+                 socket_path: path.to_string(),
+                 vu_num_queues,
+-                vring_bases,
++                pending_backend_restore,
+                 ..Default::default()
+             },
+             id,
+diff --git a/virtio-devices/src/vhost_user/mod.rs b/virtio-devices/src/vhost_user/mod.rs
+index babc823..891d96b 100644
+--- a/virtio-devices/src/vhost_user/mod.rs
++++ b/virtio-devices/src/vhost_user/mod.rs
+@@ -162,6 +162,18 @@ pub enum Error {
+     VringBasesCountMismatch(usize, usize),
+     #[error("Backend state and vring bases must both be present or both be absent")]
+     InconsistentBackendState,
++    #[error("Backend restore state was already consumed")]
++    BackendRestoreAlreadyConsumed,
++    #[error(
++        "Restored vhost-user features {restored:#x} are not supported by destination backend {backend:#x}"
++    )]
++    RestoredFeaturesNotSupported { restored: u64, backend: u64 },
++    #[error("Restored vhost-user protocol features contain unknown bits {0:#x}")]
++    InvalidRestoredProtocolFeatures(u64),
++    #[error(
++        "Restored vhost-user protocol features {restored:#x} are not supported by destination backend {backend:#x}"
++    )]
++    RestoredProtocolFeaturesNotSupported { restored: u64, backend: u64 },
+     #[error("Failed to create timerfd")]
+     TimerFdCreate(#[source] io::Error),
+     #[error("Failed to arm timerfd")]
+@@ -451,6 +463,44 @@ impl<C> VhostUserState<C> {
+         }
+         Ok(())
+     }
++
++    pub fn take_pending_backend_restore(&mut self) -> Result<Option<PendingBackendRestore>> {
++        match (self.vring_bases.take(), self.backend_state.take()) {
++            (Some(vring_bases), Some(backend_state)) => {
++                Ok(Some(PendingBackendRestore::new(vring_bases, backend_state)))
++            }
++            (None, None) => Ok(None),
++            _ => Err(Error::InconsistentBackendState),
++        }
++    }
++}
++
++pub struct PendingBackendRestore {
++    vring_bases: Vec<u64>,
++    backend_state: Option<Vec<u8>>,
++}
++
++impl PendingBackendRestore {
++    fn new(vring_bases: Vec<u64>, backend_state: Vec<u8>) -> Self {
++        Self {
++            vring_bases,
++            backend_state: Some(backend_state),
++        }
++    }
++
++    pub fn vring_bases(&self) -> &[u64] {
++        &self.vring_bases
++    }
++
++    pub fn consume_backend_state(&mut self) -> Result<Vec<u8>> {
++        self.backend_state
++            .take()
++            .ok_or(Error::BackendRestoreAlreadyConsumed)
++    }
++
++    pub fn is_consumed(&self) -> bool {
++        self.backend_state.is_none()
++    }
+ }
+ 
+ #[derive(Default)]
+@@ -462,10 +512,10 @@ pub struct VhostUserCommon {
+     pub vu_num_queues: usize,
+     pub migration_started: bool,
+     pub server: bool,
+-    pub vring_bases: Option<Vec<u64>>,
+     pub epoll_thread: Option<thread::JoinHandle<()>>,
+     /// Indicates that the backend is no longer reachable. Shared with EPollHandler.
+     pub disconnected: Arc<AtomicBool>,
++    pub pending_backend_restore: Option<PendingBackendRestore>,
+ }
+ 
+ impl VhostUserCommon {
+@@ -505,19 +555,26 @@ impl VhostUserCommon {
+             .iter()
+             .map(|(i, q, e)| (*i, vm_virtio::clone_queue(q), e.try_clone().unwrap()))
+             .collect::<Vec<_>>();
+-        let vring_bases = self.vring_bases.take();
+-        vu.lock()
+-            .unwrap()
+-            .setup_vhost_user(
+-                &mem.memory(),
+-                &queues,
+-                interrupt_cb.as_ref(),
+-                acked_features,
+-                &backend_req_handler,
+-                inflight.as_mut(),
+-                vring_bases.as_deref(),
+-            )
+-            .map_err(ActivateError::VhostUserSetup)?;
++        let setup_result = vu.lock().unwrap().setup_vhost_user(
++            &mem.memory(),
++            &queues,
++            interrupt_cb.as_ref(),
++            acked_features,
++            &backend_req_handler,
++            inflight.as_mut(),
++            self.pending_backend_restore.as_mut(),
++        );
++        if let Err(error) = setup_result {
++            if self
++                .pending_backend_restore
++                .as_ref()
++                .is_some_and(PendingBackendRestore::is_consumed)
++            {
++                self.disconnected.store(true, Ordering::Relaxed);
++            }
++            return Err(ActivateError::VhostUserSetup(error));
++        }
++        self.pending_backend_restore = None;
+ 
+         Ok(VhostUserEpollHandler {
+             vu: vu.clone(),
+diff --git a/virtio-devices/src/vhost_user/net.rs b/virtio-devices/src/vhost_user/net.rs
+index eed7c82..b9ece04 100644
+--- a/virtio-devices/src/vhost_user/net.rs
++++ b/virtio-devices/src/vhost_user/net.rs
+@@ -84,10 +84,13 @@ impl Net {
+             vu_num_queues,
+             config,
+             paused,
+-            vring_bases,
++            pending_backend_restore,
+         ) = if let Some(state) = state {
+             info!("Restoring vhost-user-net {id}");
+ 
++            let mut state = state;
++            let pending_backend_restore = state.take_pending_backend_restore()?;
++
+             // The backend acknowledged features must not contain
+             // VIRTIO_NET_F_MAC since we don't expect the backend
+             // to handle it.
+@@ -98,8 +101,6 @@ impl Net {
+                 state.acked_protocol_features,
+             )?;
+ 
+-            vu.restore_state(&state)?;
+-
+             // If the control queue feature has been negotiated, let's
+             // increase the number of queues.
+             if state.acked_features & (1 << VIRTIO_NET_F_CTRL_VQ) != 0 {
+@@ -113,7 +114,7 @@ impl Net {
+                 state.vu_num_queues,
+                 state.config,
+                 true,
+-                state.vring_bases,
++                pending_backend_restore,
+             )
+         } else {
+             // Filling device and vring features VMM supports.
+@@ -216,7 +217,7 @@ impl Net {
+                 socket_path: vu_cfg.socket,
+                 vu_num_queues,
+                 server,
+-                vring_bases,
++                pending_backend_restore,
+                 ..Default::default()
+             },
+             config,
+diff --git a/virtio-devices/src/vhost_user/vu_common_ctrl.rs b/virtio-devices/src/vhost_user/vu_common_ctrl.rs
+index 23a37c3..c66954e 100644
+--- a/virtio-devices/src/vhost_user/vu_common_ctrl.rs
++++ b/virtio-devices/src/vhost_user/vu_common_ctrl.rs
+@@ -29,7 +29,7 @@ use vmm_sys_util::epoll::{ControlOperation, Epoll, EpollEvent, EventSet};
+ use vmm_sys_util::eventfd::EventFd;
+ use vmm_sys_util::timerfd::TimerFd;
+ 
+-use super::{Error, Result, VhostUserState};
++use super::{Error, PendingBackendRestore, Result};
+ use crate::vhost_user::Inflight;
+ use crate::{
+     GuestMemoryMmap, GuestRegionMmap, MmapRegion, VirtioInterrupt, VirtioInterruptType,
+@@ -168,8 +168,13 @@ impl VhostUserHandle {
+         acked_features: u64,
+         backend_req_handler: &Option<FrontendReqHandler<S>>,
+         inflight: Option<&mut Inflight>,
+-        vring_bases: Option<&[u64]>,
++        pending_backend_restore: Option<&mut PendingBackendRestore>,
+     ) -> Result<()> {
++        let vring_bases = pending_backend_restore
++            .as_ref()
++            .map(|restore| restore.vring_bases());
++        let restoring_backend_state = pending_backend_restore.is_some();
++
+         if let Some(bases) = &vring_bases
+             && bases.len() != queues.len()
+         {
+@@ -285,9 +290,22 @@ impl VhostUserHandle {
+             self.queue_indexes.push(*queue_index);
+         }
+ 
++        let mut backend_request_fd_set = false;
++        if restoring_backend_state && let Some(backend_req_handler) = backend_req_handler {
++            self.vu
++                .set_backend_request_fd(&backend_req_handler.get_tx_raw_fd())
++                .map_err(Error::VhostUserSetBackendRequestFd)?;
++            backend_request_fd_set = true;
++        }
++
++        if let Some(restore) = pending_backend_restore {
++            let state = restore.consume_backend_state()?;
++            self.restore_backend_state(&state)?;
++        }
++
+         self.enable_vhost_user_vrings(self.queue_indexes.clone(), true)?;
+ 
+-        if let Some(backend_req_handler) = backend_req_handler {
++        if !backend_request_fd_set && let Some(backend_req_handler) = backend_req_handler {
+             self.vu
+                 .set_backend_request_fd(&backend_req_handler.get_tx_raw_fd())
+                 .map_err(Error::VhostUserSetBackendRequestFd)?;
+@@ -330,14 +348,33 @@ impl VhostUserHandle {
+         acked_protocol_features: u64,
+     ) -> Result<()> {
+         self.vu.set_owner().map_err(Error::VhostUserSetOwner)?;
+-        self.vu
++        let backend_features = self
++            .vu
+             .get_features()
+             .map_err(Error::VhostUserGetFeatures)?;
++        if acked_features & !backend_features != 0 {
++            return Err(Error::RestoredFeaturesNotSupported {
++                restored: acked_features,
++                backend: backend_features,
++            });
++        }
++
++        if acked_features & VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits() != 0 {
++            let acked_protocol_features =
++                VhostUserProtocolFeatures::from_bits(acked_protocol_features).ok_or(
++                    Error::InvalidRestoredProtocolFeatures(acked_protocol_features),
++                )?;
++            let backend_protocol_features = self
++                .vu
++                .get_protocol_features()
++                .map_err(Error::VhostUserGetProtocolFeatures)?;
++            if !backend_protocol_features.contains(acked_protocol_features) {
++                return Err(Error::RestoredProtocolFeaturesNotSupported {
++                    restored: acked_protocol_features.bits(),
++                    backend: backend_protocol_features.bits(),
++                });
++            }
+ 
+-        if acked_features & VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits() != 0
+-            && let Some(acked_protocol_features) =
+-                VhostUserProtocolFeatures::from_bits(acked_protocol_features)
+-        {
+             self.vu
+                 .set_protocol_features(acked_protocol_features)
+                 .map_err(Error::VhostUserSetProtocolFeatures)?;
+@@ -567,14 +604,6 @@ impl VhostUserHandle {
+         Ok((state, vring_bases))
+     }
+ 
+-    pub fn restore_state<C>(&mut self, state: &VhostUserState<C>) -> Result<()> {
+-        state.validate()?;
+-        if let Some(backend_state) = &state.backend_state {
+-            self.restore_backend_state(backend_state)?;
+-        }
+-        Ok(())
+-    }
+-
+     /// Restore backend device state via the SET_DEVICE_STATE_FD protocol.
+     /// Sends the saved opaque state blob to the backend via a socket.
+     pub fn restore_backend_state(&mut self, state: &[u8]) -> Result<()> {
