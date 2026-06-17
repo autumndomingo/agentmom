@@ -205,6 +205,9 @@ let
       if [ -x result/bin/tap-down ]; then
         result/bin/tap-down >/dev/null 2>&1 || true
       fi
+      if [ "$(cat state 2>/dev/null || true)" != "suspended" ]; then
+        printf 'stopped\n' > state
+      fi
       exit "$status"
     }
     trap cleanup EXIT INT TERM
@@ -301,6 +304,7 @@ let
         fi
       done
     fi
+    printf 'running\n' > state
     if [ "$restore_suspended" = true ]; then
       cloud_hypervisor="''${MOM_MICROVM_RESTORE_CLOUD_HYPERVISOR:-}"
       if [ -z "$cloud_hypervisor" ]; then
