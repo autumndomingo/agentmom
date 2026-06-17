@@ -1,6 +1,17 @@
 { pkgs, inputs }:
 
 let
+  hermes-agent-src = pkgs.applyPatches {
+    name = "hermes-agent-patched-source";
+    src = inputs.hermes-agent;
+    patches = [ ];
+    postPatch = ''
+      substituteInPlace nix/lib.nix \
+        --replace-fail 'npmDepsHash = "sha256-m9cjbjzi4SaFCjODfdrawS5e+1ag+MpRn528/upSNqo=";' \
+                       'npmDepsHash = "sha256-kbjJksq7limRIYqP3DwI+GNgCXkG96tXcsQqmuEedxo=";'
+    '';
+  };
+
   npm-lockfile-fix = pkgs.python312Packages.buildPythonApplication {
     pname = "npm-lockfile-fix";
     version = "0.1.0";
@@ -16,7 +27,7 @@ let
     meta.mainProgram = "npm-lockfile-fix";
   };
 in
-pkgs.callPackage "${inputs.hermes-agent}/nix/hermes-agent.nix" {
+pkgs.callPackage "${hermes-agent-src}/nix/hermes-agent.nix" {
   inherit (inputs.hermes-agent.inputs) uv2nix pyproject-nix pyproject-build-systems;
   inherit npm-lockfile-fix;
   extraDependencyGroups = [ "messaging" ];

@@ -371,6 +371,7 @@
             PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright.browsers}";
             PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1";
             RUST_BACKTRACE = "1";
+            MOM_HERMES_AGENT_URL = "path:${hermes-agent.outPath}";
           };
         });
     };

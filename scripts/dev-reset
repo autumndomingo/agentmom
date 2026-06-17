@@ -55,6 +55,7 @@ utm_fallback_key="${utm_state_dir}/id_ed25519"
 utm_bundle="${HOME}/Library/Containers/com.utmapp.UTM/Data/Documents/${utm_name}.utm"
 utm_ssh_args=()
 preserved_utm_state=""
+first_utm_state=""
 
 kill_pid() {
   local pid="${1:-}"
@@ -213,7 +214,8 @@ if [ -f "${pid_file}" ]; then
 fi
 
 stop_microvm_units
-if compgen -G "${local_state_dir}/dev-utm*" >/dev/null; then
+first_utm_state="$(find "${local_state_dir}" -maxdepth 1 -type d -name 'dev-utm*' -print -quit 2>/dev/null || true)"
+if [ -n "${first_utm_state}" ]; then
   preserved_utm_state="$(mktemp -d "${TMPDIR:-/tmp}/agentmom-dev-utm-state.XXXXXX")"
   find "${local_state_dir}" -maxdepth 1 -type d -name 'dev-utm*' -exec cp -pR {} "${preserved_utm_state}/" \;
 fi

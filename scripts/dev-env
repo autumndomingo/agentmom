@@ -41,6 +41,7 @@ microvm_cidr="${MOM_MICROVM_CIDR:-192.168.84.0/24}"
 microvm_host_ip="${MOM_MICROVM_HOST_IP:-192.168.84.1}"
 proxy_bind="${MOM_PROXY_BIND:-${microvm_host_ip}:1080}"
 microvm_systemd_template="${MOM_MICROVM_SYSTEMD_TEMPLATE:-agentmom-dev-microvm@.service}"
+hermes_agent_url="${MOM_HERMES_AGENT_URL:-}"
 
 mkdir -p .state/mom .state/logs dev/iron-proxy "${microvm_state}/machines" "${microvm_workspaces}"
 dev_ca_cert="${repo_root}/dev/iron-proxy/ca.crt"
@@ -91,6 +92,9 @@ env_file=".state/dev.env"
   printf 'MOM_MICROVM_HOST_IP=%q\n' "${microvm_host_ip}"
   printf 'MOM_PROXY_BIND=%q\n' "${proxy_bind}"
   printf 'MOM_MICROVM_SYSTEMD_TEMPLATE=%q\n' "${microvm_systemd_template}"
+  if [ -n "${hermes_agent_url}" ]; then
+    printf 'MOM_HERMES_AGENT_URL=%q\n' "${hermes_agent_url}"
+  fi
   printf 'MOM_RUNTIME_SUDO=%q\n' "${MOM_RUNTIME_SUDO:-1}"
   printf 'MOM_WORKER_TOKEN_FILE=%q\n' "${repo_root}/dev/secrets/worker-token"
   printf 'MOM_UI_DIST=%q\n' "${repo_root}/ui/dist"
