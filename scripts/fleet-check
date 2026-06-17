@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+env_name="${1:-}"
+case "${env_name}" in
+  prod)
+    api_url="https://agentmom.xyz"
+    ctrl_ssh="mom-ctrl"
+    worker_ssh="mom-1"
+    expected_node="mom-1"
+    ;;
+  stage)
+    api_url="https://stage.agentmom.xyz"
+    ctrl_ssh="justin@204.168.131.33"
+    worker_ssh="mom-stage-1"
+    expected_node="mom-stage-1"
+    ;;
+  *)
+    echo "usage: $0 prod|stage" >&2
+    exit 2
+    ;;
+esac
+
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "${tmpdir}"' EXIT
+failures=0
+pids=()
+names=()
+
+print_file() {
+  local path="$1"
+  sed 's/^/  /' "${path}"
+  if [ -n "$(tail -c 1 "${path}")" ]; then
+    printf '\n'
+  fi
+}
+
+run_check() {
+  local name="$1"
+  shift
+  names+=("${name}")
+  (
+    set -euo pipefail
+    "$@"
+  ) >"${tmpdir}/${name}.out" 2>"${tmpdir}/${name}.err" &
+  pids+=("$!")
+}
+
+run_check api-ready curl -fsS "${api_url}/health/ready"
+run_check ui-health curl -fsS "${api_url}/api/ui/health"
+run_check ctrl-units ssh "${ctrl_ssh}" systemctl --no-pager --failed
+run_check worker-units ssh "${worker_ssh}" systemctl --no-pager --failed
+run_check worker-health ssh "${worker_ssh}" 'curl -fsS http://127.0.0.1:9090/worker/health'
+run_check monitor ssh "${ctrl_ssh}" 'set -euo pipefail; mom_bin=$(systemctl show -P ExecStart agentmom-api.service | sed -n "s/.*path=\([^ ;]*\/bin\/mom\).*/\1/p" | head -1); sudo env $(systemctl show -P Environment agentmom-api.service) "$mom_bin" monitor check'
+run_check node-list ssh "${ctrl_ssh}" 'set -euo pipefail; mom_bin=$(systemctl show -P ExecStart agentmom-api.service | sed -n "s/.*path=\([^ ;]*\/bin\/mom\).*/\1/p" | head -1); sudo env $(systemctl show -P Environment agentmom-api.service) "$mom_bin" node list'
+
+for i in "${!pids[@]}"; do
+  name="${names[$i]}"
+  if wait "${pids[$i]}"; then
+    printf '[ok] %s\n' "${name}"
+    if [ -s "${tmpdir}/${name}.out" ]; then
+      print_file "${tmpdir}/${name}.out"
+    fi
+  else
+    printf '[failed] %s\n' "${name}" >&2
+    if [ -s "${tmpdir}/${name}.out" ]; then
+      print_file "${tmpdir}/${name}.out" >&2
+    fi
+    if [ -s "${tmpdir}/${name}.err" ]; then
+      print_file "${tmpdir}/${name}.err" >&2
+    fi
+    failures=$((failures + 1))
+  fi
+done
+
+if ! grep -q "^${expected_node}[[:space:]]" "${tmpdir}/node-list.out"; then
+  echo "[failed] node-list did not include ${expected_node}" >&2
+  failures=$((failures + 1))
+fi
+
+if [ "${failures}" -ne 0 ]; then
+  echo "${env_name} checks failed: ${failures}" >&2
+  exit 1
+fi
+
+echo "${env_name} checks passed"

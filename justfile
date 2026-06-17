@@ -12,6 +12,8 @@ pre-merge:
     cargo check
     cargo test
     npm --prefix ui run build
+    bash -n scripts/fleet-check
+    bash -n scripts/fleet-reset-state
     bash -n scripts/measure-suspended-message-e2e
 
 dev:
@@ -70,6 +72,31 @@ deploy-stage:
 deploy-prod:
     just deploy @prod
 
+deploy-stage-ctrl:
+    just deploy @stage-ctrl
+
+deploy-stage-workers:
+    just deploy @stage-worker
+
+deploy-prod-ctrl:
+    just deploy @prod-ctrl
+
+deploy-prod-workers:
+    just deploy @prod-worker
+
+deploy-stage-and-check:
+    just deploy-stage
+    just check-stage
+
+deploy-prod-and-check:
+    just deploy-prod
+    just check-prod
+
+deploy-prod-ordered-and-check:
+    just deploy-prod-ctrl
+    just deploy-prod-workers
+    just check-prod
+
 deploy-workers:
     just deploy @worker
 
@@ -81,6 +108,18 @@ deploy-node node:
 
 fleet-status selector="@agentmom":
     nix develop --command colmena exec --on {{selector}} -- systemctl --no-pager --failed
+
+check-stage:
+    ./scripts/fleet-check stage
+
+check-prod:
+    ./scripts/fleet-check prod
+
+reset-stage-state:
+    ./scripts/fleet-reset-state stage
+
+reset-prod-state:
+    ./scripts/fleet-reset-state prod
 
 real-fleet-test-prod:
     AGENTMOM_REAL_NODE_A=mom-1 AGENTMOM_REAL_WORKER_TOKEN="$(ssh mom-ctrl 'sudo cat /run/agenix/agentmom-worker-token-mom-1')" just real-fleet-test

@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+env_name="${1:-}"
+case "${env_name}" in
+  prod)
+    ctrl_ssh="mom-ctrl"
+    worker_ssh="mom-1"
+    ctrl_state="/var/lib/agentmom"
+    worker_state="/var/lib/agentmom"
+    ;;
+  stage)
+    ctrl_ssh="justin@204.168.131.33"
+    worker_ssh="mom-stage-1"
+    ctrl_state="/var/lib/agentmom"
+    worker_state="/data/agentmom"
+    ;;
+  *)
+    echo "usage: $0 prod|stage" >&2
+    exit 2
+    ;;
+esac
+
+reset_ctrl() {
+  ssh "${ctrl_ssh}" sudo env AGENTMOM_RESET_STATE="${ctrl_state}" bash -s <<'EOF_RESET_CTRL'
+set -euo pipefail
+
+state="${AGENTMOM_RESET_STATE}"
+stamp="$(date +%Y%m%d%H%M%S)"
+
+systemctl stop \
+  agentmom-monitor-check.timer \
+  agentmom-monitor-check.service \
+  agentmom-catalog-backup.timer \
+  agentmom-catalog-backup.service \
+  agentmom-api.service >/dev/null 2>&1 || true
+
+rm -f \
+  /run/systemd/system/agentmom-api.service.d/fast-resume-test.conf \
+  /run/systemd/system/agentmom-api.service.d/fast-suspend-test.conf
+rmdir --ignore-fail-on-non-empty /run/systemd/system/agentmom-api.service.d 2>/dev/null || true
+systemctl daemon-reload
+
+mkdir -p "${state}/reset-archives"
+for file in "${state}/fleet.db" "${state}/fleet.db-wal" "${state}/fleet.db-shm"; do
+  if [ -e "${file}" ]; then
+    mv "${file}" "${state}/reset-archives/$(basename "${file}").reset-${stamp}"
+  fi
+done
+
+systemctl reset-failed \
+  agentmom-monitor-check.service \
+  agentmom-catalog-backup.service \
+  agentmom-api.service >/dev/null 2>&1 || true
+
+echo "reset controller state on $(hostname) at ${stamp}"
+EOF_RESET_CTRL
+}
+
+reset_worker() {
+  ssh "${worker_ssh}" sudo env AGENTMOM_RESET_STATE="${worker_state}" bash -s <<'EOF_RESET_WORKER'
+set -euo pipefail
+
+state="${AGENTMOM_RESET_STATE}"
+stamp="$(date +%Y%m%d%H%M%S)"
+
+systemctl stop agentmom-worker.service >/dev/null 2>&1 || true
+systemctl list-units --all --no-legend 'agentmom-microvm@*.service' 2>/dev/null |
+  awk '{ print $1 }' |
+  while read -r unit; do
+    [ -n "${unit}" ] || continue
+    systemctl stop "${unit}" >/dev/null 2>&1 || true
+  done
+
+mkdir -p "${state}/reset-archives"
+if [ -d "${state}/microvms" ]; then
+  mv "${state}/microvms" "${state}/reset-archives/microvms.reset-${stamp}"
+fi
+for file in "${state}/fleet.db" "${state}/fleet.db-wal" "${state}/fleet.db-shm"; do
+  if [ -e "${file}" ]; then
+    mv "${file}" "${state}/reset-archives/$(basename "${file}").reset-${stamp}"
+  fi
+done
+
+systemctl reset-failed agentmom-worker.service >/dev/null 2>&1 || true
+
+echo "reset worker state on $(hostname) at ${stamp}"
+EOF_RESET_WORKER
+}
+
+reset_ctrl &
+ctrl_pid="$!"
+reset_worker &
+worker_pid="$!"
+
+failures=0
+wait "${ctrl_pid}" || failures=$((failures + 1))
+wait "${worker_pid}" || failures=$((failures + 1))
+
+if [ "${failures}" -ne 0 ]; then
+  echo "${env_name} state reset failed: ${failures}" >&2
+  exit 1
+fi
+
+echo "${env_name} state reset; run just deploy-${env_name} to recreate services"
