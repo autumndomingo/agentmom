@@ -7,6 +7,13 @@ cd "${repo_root}"
 pid_file="${repo_root}/.state/dev.pid"
 local_state_dir="${repo_root}/.state"
 
+if [ -f "${repo_root}/.state/dev.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${repo_root}/.state/dev.env"
+  set +a
+fi
+
 kill_pid() {
   local pid="${1:-}"
   case "${pid}" in
@@ -27,11 +34,18 @@ kill_pid_hard() {
 
 stop_microvm_units() {
   local machines_dir="${repo_root}/.state/microvms/machines"
-  [ -d "${machines_dir}" ] || return 0
   command -v systemctl >/dev/null 2>&1 || return 0
+
+  local unit
+  while read -r unit _; do
+    [ -n "${unit}" ] || continue
+    sudo -n systemctl stop "${unit}" >/dev/null 2>&1 || systemctl stop "${unit}" >/dev/null 2>&1 || true
+  done < <(systemctl list-units --all --plain --no-legend 'agentmom-dev-microvm@*.service' 2>/dev/null || true)
+
+  [ -d "${machines_dir}" ] || return 0
   command -v systemd-escape >/dev/null 2>&1 || return 0
 
-  local machine name unit
+  local machine name
   for machine in "${machines_dir}"/*; do
     [ -d "${machine}" ] || continue
     name="$(basename "${machine}")"
