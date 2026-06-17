@@ -266,11 +266,11 @@ single shared worker token:
 ```nix
 services.agentmom.workerNodeTokenFiles = {
   mom-1 = "/run/secrets/agentmom-worker-token-mom-1";
-  mom-2 = "/run/secrets/agentmom-worker-token-mom-2";
+  mom-worker-n = "/run/secrets/agentmom-worker-token-mom-worker-n";
 };
 services.agentmom.workerUrlAllowlist = [
   "http://100.81.250.67:9090"
-  "http://100.92.189.28:9090"
+  "http://100.64.0.42:9090"
 ];
 ```
 

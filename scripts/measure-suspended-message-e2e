@@ -5,7 +5,7 @@ workspace="${1:-blah-blah-com-blah-blah-12b72789b231}"
 vm_name="${2:-mom-blah-blah-com-blah-blah-12b72789b231}"
 api="${AGENTMOM_E2E_API_URL:-https://agentmom.xyz}"
 ctrl_ssh="${AGENTMOM_E2E_CTRL_SSH:-mom-ctrl}"
-worker_ssh="${AGENTMOM_E2E_WORKER_SSH:-mom-2}"
+worker_ssh="${AGENTMOM_E2E_WORKER_SSH:-mom-1}"
 mom_bin="${AGENTMOM_E2E_MOM_BIN:-}"
 if [ -z "$mom_bin" ]; then
   mom_bin="$(

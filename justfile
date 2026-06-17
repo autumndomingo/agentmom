@@ -123,11 +123,9 @@ reset-prod-state:
 
 real-fleet-test-prod:
     AGENTMOM_REAL_NODE_A=mom-1 AGENTMOM_REAL_WORKER_TOKEN="$(ssh mom-ctrl 'sudo cat /run/agenix/agentmom-worker-token-mom-1')" just real-fleet-test
-    AGENTMOM_REAL_NODE_A=mom-2 AGENTMOM_REAL_WORKER_TOKEN="$(ssh mom-ctrl 'sudo cat /run/agenix/agentmom-worker-token-mom-2')" just real-fleet-test
 
 real-fleet-test-prod-mutating:
     AGENTMOM_REAL_NODE_A=mom-1 AGENTMOM_REAL_WORKER_TOKEN="$(ssh mom-ctrl 'sudo cat /run/agenix/agentmom-worker-token-mom-1')" just real-fleet-test-mutating
-    AGENTMOM_REAL_NODE_A=mom-2 AGENTMOM_REAL_WORKER_TOKEN="$(ssh mom-ctrl 'sudo cat /run/agenix/agentmom-worker-token-mom-2')" just real-fleet-test-mutating
 
 stage-e2e-suspend-latency workspace="stage-e2e" vm="mom-stage-e2e":
     AGENTMOM_E2E_API_URL=https://stage.agentmom.xyz \

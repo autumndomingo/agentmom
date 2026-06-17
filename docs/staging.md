@@ -63,7 +63,6 @@ Expected good signal:
 ## Caveats
 
 - Stage uses the same auth secret, invite code, and worker token material as prod.
-- `mom-stage-1` is the old `mom-2` dedicated host.
 - `mom-stage-1` currently boots BIOS GRUB from `nvme1n1`; keep bootloader config
   aligned with that disk or `nixos-rebuild switch` will not persist across reboot.
 - Keep `MOM_ENABLE_TEST_ENDPOINTS=1` stage-only.
