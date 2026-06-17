@@ -612,16 +612,7 @@ pub(crate) async fn vm_status(name: &str) -> Result<VmStatus> {
         if let Ok(output) = output {
             let active = String::from_utf8_lossy(&output.stdout).trim().to_string();
             let state = fs::read_to_string(machine_dir(name)?.join("state")).unwrap_or_default();
-            return Ok(match active.as_str() {
-                "active" | "activating" if state.trim() == "paused" => VmStatus::Paused,
-                "active" | "activating" if state.trim() == "suspended" => VmStatus::Draining,
-                "active" | "activating" => VmStatus::Running,
-                "deactivating" => VmStatus::Draining,
-                "failed" => VmStatus::Crashed,
-                "inactive" if state.trim() == "suspended" => VmStatus::Suspended,
-                "inactive" => VmStatus::Stopped,
-                _ => VmStatus::Unknown,
-            });
+            return Ok(vm_status_from_systemd(&active, state.trim()));
         }
     }
     let state = fs::read_to_string(machine_dir(name)?.join("state")).unwrap_or_default();
@@ -633,6 +624,21 @@ pub(crate) async fn vm_status(name: &str) -> Result<VmStatus> {
         "crashed" => VmStatus::Crashed,
         _ => VmStatus::Unknown,
     })
+}
+
+fn vm_status_from_systemd(active: &str, state: &str) -> VmStatus {
+    match active {
+        "active" | "activating" if state == "paused" => VmStatus::Paused,
+        "active" | "activating" if state == "suspended" => VmStatus::Draining,
+        "active" | "activating" if state == "running" => VmStatus::Running,
+        "active" | "activating" if state == "stopped" => VmStatus::Stopped,
+        "active" | "activating" => VmStatus::Unknown,
+        "deactivating" => VmStatus::Draining,
+        "failed" => VmStatus::Crashed,
+        "inactive" if state == "suspended" => VmStatus::Suspended,
+        "inactive" => VmStatus::Stopped,
+        _ => VmStatus::Unknown,
+    }
 }
 
 pub(crate) async fn ensure_runtime(config: &MomConfig) -> Result<()> {
@@ -1958,6 +1964,26 @@ mod tests {
 
         assert!(!path.exists());
         Ok(())
+    }
+
+    #[test]
+    fn active_runner_with_stopped_state_is_not_ready() {
+        assert_eq!(
+            vm_status_from_systemd("active", "stopped"),
+            VmStatus::Stopped
+        );
+        assert_eq!(
+            vm_status_from_systemd("activating", "stopped"),
+            VmStatus::Stopped
+        );
+        assert_eq!(
+            vm_status_from_systemd("active", "running"),
+            VmStatus::Running
+        );
+        assert_eq!(
+            vm_status_from_systemd("active", "suspended"),
+            VmStatus::Draining
+        );
     }
 
     #[test]

@@ -84,6 +84,11 @@ enum Command {
         #[command(subcommand)]
         command: DbCommand,
     },
+    /// Manage signup authentication helpers.
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommand,
+    },
     /// Run lightweight health checks for alerting.
     Monitor {
         #[command(subcommand)]
@@ -235,6 +240,36 @@ enum DbCommand {
 enum ConfigCommand {
     /// Validate the configured file and print the redacted effective config.
     Doctor,
+}
+
+#[derive(Debug, Subcommand)]
+enum AuthCommand {
+    /// Generate signup invite codes in the fleet catalog.
+    Invite {
+        #[command(subcommand)]
+        command: AuthInviteCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AuthInviteCommand {
+    /// Generate a non-admin user invite code.
+    User(AuthInviteCreateArgs),
+    /// Generate an admin invite code.
+    Admin(AuthInviteCreateArgs),
+}
+
+#[derive(Debug, Args)]
+struct AuthInviteCreateArgs {
+    /// Human-readable label for admin invite tracking.
+    #[arg(long)]
+    label: Option<String>,
+    /// Optional admin-facing description.
+    #[arg(long, default_value = "")]
+    description: String,
+    /// Maximum number of signups allowed for this code.
+    #[arg(long)]
+    max_uses: Option<i64>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -657,6 +692,7 @@ async fn main() -> Result<()> {
         Command::Node { command } => node_command(command).await,
         Command::Fleet { command } => fleet_command(command).await,
         Command::Db { command } => db_command(command),
+        Command::Auth { command } => auth_command(command),
         Command::Monitor { command } => monitor_command(command).await,
         Command::Config { command } => config_command(command),
         Command::Api(args) => api::api(args).await,
@@ -788,6 +824,31 @@ fn config_command(command: ConfigCommand) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn auth_command(command: AuthCommand) -> Result<()> {
+    match command {
+        AuthCommand::Invite { command } => auth_invite_command(command),
+    }
+}
+
+fn auth_invite_command(command: AuthInviteCommand) -> Result<()> {
+    let (role, args) = match command {
+        AuthInviteCommand::User(args) => (auth::InviteRole::User, args),
+        AuthInviteCommand::Admin(args) => (auth::InviteRole::Admin, args),
+    };
+    let label = args
+        .label
+        .unwrap_or_else(|| format!("CLI {} invite", role.as_str()));
+    let created = auth::create_invite(auth::InviteCreate {
+        label,
+        description: args.description,
+        role,
+        max_uses: args.max_uses,
+        created_by_user_id: None,
+    })?;
+    println!("{}", created.code);
+    Ok(())
 }
 
 fn node_list() -> Result<()> {

@@ -52,6 +52,36 @@ real-fleet-test:
 real-fleet-test-mutating:
     cargo test --test real_fleet -- --ignored --test-threads=1
 
+fleet-build selector="@agentmom":
+    nix develop --command colmena build --on {{selector}}
+
+fleet-build-stage:
+    just fleet-build @stage
+
+fleet-build-prod:
+    just fleet-build @prod
+
+deploy selector:
+    nix develop --command colmena apply --on {{selector}}
+
+deploy-stage:
+    just deploy @stage
+
+deploy-prod:
+    just deploy @prod
+
+deploy-workers:
+    just deploy @worker
+
+deploy-ctrl:
+    just deploy @ctrl
+
+deploy-node node:
+    just deploy {{node}}
+
+fleet-status selector="@agentmom":
+    nix develop --command colmena exec --on {{selector}} -- systemctl --no-pager --failed
+
 real-fleet-test-prod:
     AGENTMOM_REAL_NODE_A=mom-1 AGENTMOM_REAL_WORKER_TOKEN="$(ssh mom-ctrl 'sudo cat /run/agenix/agentmom-worker-token-mom-1')" just real-fleet-test
     AGENTMOM_REAL_NODE_A=mom-2 AGENTMOM_REAL_WORKER_TOKEN="$(ssh mom-ctrl 'sudo cat /run/agenix/agentmom-worker-token-mom-2')" just real-fleet-test

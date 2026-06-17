@@ -131,7 +131,23 @@ pub(crate) async fn worker(args: WorkerArgs) -> Result<()> {
         worker_url: worker_url.clone(),
     });
     let worker_http = tokio::spawn(run_worker_http(listener, state));
-    register_worker(&client, &api_url, &node, &worker_url).await?;
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+    let shutdown_task = tokio::spawn(async move {
+        shutdown_signal().await;
+        let _ = shutdown_tx.send(true);
+    });
+    if !register_worker_until_ready(&client, &api_url, &node, &worker_url, &mut shutdown_rx).await?
+    {
+        log_record(
+            "info",
+            "worker_shutdown",
+            None,
+            "Agent Mom worker shutting down before registration",
+        );
+        worker_http.abort();
+        shutdown_task.abort();
+        return Ok(());
+    }
     let (wake_tx, mut wake_rx) = mpsc::channel::<()>(32);
     let sse_url = api_url.clone();
     let sse_node = node.clone();
@@ -140,11 +156,6 @@ pub(crate) async fn worker(args: WorkerArgs) -> Result<()> {
     });
 
     log_record("info", "worker_start", None, "Agent Mom worker starting");
-    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-    let shutdown_task = tokio::spawn(async move {
-        shutdown_signal().await;
-        let _ = shutdown_tx.send(true);
-    });
     loop {
         if *shutdown_rx.borrow() {
             log_record(
@@ -690,6 +701,40 @@ async fn register_worker(
         .await?
         .error_for_status()?;
     Ok(())
+}
+
+async fn register_worker_until_ready(
+    client: &reqwest::Client,
+    api_url: &str,
+    node: &str,
+    worker_url: &str,
+    shutdown_rx: &mut watch::Receiver<bool>,
+) -> Result<bool> {
+    let mut delay = Duration::from_secs(1);
+    loop {
+        match register_worker(client, api_url, node, worker_url).await {
+            Ok(()) => return Ok(true),
+            Err(error) => {
+                log_record(
+                    "error",
+                    "worker_register_retry",
+                    None,
+                    &format!("worker registration failed; retrying: {error:#}"),
+                );
+            }
+        }
+
+        tokio::select! {
+            changed = shutdown_rx.changed() => {
+                changed.context("worker shutdown watcher closed before registration")?;
+                if *shutdown_rx.borrow() {
+                    return Ok(false);
+                }
+            }
+            _ = tokio::time::sleep(delay) => {}
+        }
+        delay = std::cmp::min(delay.saturating_mul(2), Duration::from_secs(10));
+    }
 }
 
 async fn worker_sse_loop(

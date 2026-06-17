@@ -12,13 +12,25 @@
       url = "github:microvm-nix/microvm.nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    disko = {
+      url = "github:nix-community/disko";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    agenix = {
+      url = "github:ryantm/agenix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    colmena = {
+      url = "github:nix-community/colmena";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
     hermes-agent = {
       url = "github:NousResearch/hermes-agent";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
 
-  outputs = { self, nixpkgs, crane, rust-overlay, microvm, hermes-agent }:
+  outputs = { self, nixpkgs, crane, rust-overlay, microvm, disko, colmena, hermes-agent, ... } @ inputs:
     let
       systems = [
         "aarch64-darwin"
@@ -29,6 +41,9 @@
       eachSystem = nixpkgs.lib.genAttrs systems;
       nixpkgsInputUrl = "path:${nixpkgs.outPath}";
       microvmInputUrl = "path:${microvm.outPath}";
+      fleet = import ./nix/fleet {
+        inherit self inputs nixpkgs colmena disko microvm;
+      };
       devUtmGuestModule = { config, lib, pkgs, modulesPath, ... }:
         let
           sshPubkey = builtins.getEnv "AGENTMOM_DEV_UTM_SSH_PUBKEY";
@@ -289,11 +304,15 @@
         });
       nixosModules.agentmom = self.nixosModules.default;
 
-      nixosConfigurations.agentmom-dev-utm = nixpkgs.lib.nixosSystem {
-        system = "aarch64-linux";
-        modules = [
-          devUtmGuestModule
-        ];
+      colmenaHive = fleet.colmenaHive;
+
+      nixosConfigurations = fleet.nixosConfigurations // {
+        agentmom-dev-utm = nixpkgs.lib.nixosSystem {
+          system = "aarch64-linux";
+          modules = [
+            devUtmGuestModule
+          ];
+        };
       };
 
       devShells = eachSystem (system:
@@ -333,6 +352,7 @@
                 momDev
                 rustToolchain
                 pkgs.cargo-nextest
+                colmena.packages.${system}.colmena
                 pkgs.curl
                 self.packages.${system}.iron-proxy
                 pkgs.just

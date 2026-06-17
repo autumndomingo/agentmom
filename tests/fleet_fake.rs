@@ -184,6 +184,172 @@ async fn first_signup_becomes_admin_and_users_login_with_passwords() -> Result<(
 }
 
 #[tokio::test]
+async fn cli_generates_user_and_admin_invites_for_signup() -> Result<()> {
+    let fleet = TestFleet::start().await?;
+    let client = reqwest::Client::new();
+
+    client
+        .post(format!("{}/api/auth/signup", fleet.api_url))
+        .json(&json!({
+            "full_name": "Bootstrap Admin",
+            "email": "bootstrap-admin@example.com",
+            "password": "correct horse battery staple"
+        }))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let user_code = cli_invite_code(fleet.api_state.path(), "user", "CLI user invite")?;
+    let user = client
+        .post(format!("{}/api/auth/signup", fleet.api_url))
+        .json(&json!({
+            "full_name": "CLI User",
+            "email": "cli-user@example.com",
+            "code": user_code,
+            "password": "participant password"
+        }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Value>()
+        .await?;
+    assert_eq!(user["user"]["role"], "user");
+
+    let admin_code = cli_invite_code(fleet.api_state.path(), "admin", "CLI admin invite")?;
+    let admin = client
+        .post(format!("{}/api/auth/signup", fleet.api_url))
+        .json(&json!({
+            "full_name": "CLI Admin",
+            "email": "cli-admin@example.com",
+            "code": admin_code,
+            "password": "participant password"
+        }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Value>()
+        .await?;
+    assert_eq!(admin["user"]["role"], "admin");
+
+    Ok(())
+}
+
+#[test]
+fn current_schema_without_vm_version_is_repaired() -> Result<()> {
+    let api_state = tempfile::tempdir()?;
+    let db = Connection::open(api_state.path().join("fleet.db"))?;
+    db.execute_batch(
+        r#"
+CREATE TABLE schema_version (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    version INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE workspaces (
+    name TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL UNIQUE,
+    slug TEXT NOT NULL UNIQUE,
+    display_name TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    owner_user_id INTEGER,
+    agent_name TEXT,
+    vm_name TEXT NOT NULL UNIQUE,
+    workspace_dir_name TEXT NOT NULL UNIQUE,
+    node_id TEXT,
+    desired_state TEXT NOT NULL,
+    cpus INTEGER NOT NULL,
+    memory_mib INTEGER NOT NULL,
+    workspace_quota_mib INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    idle_timeout_secs INTEGER NOT NULL,
+    backup_interval_secs INTEGER NOT NULL,
+    last_used_at INTEGER NOT NULL,
+    last_backup_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE workspace_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_name TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    message TEXT NOT NULL,
+    metadata_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+
+INSERT INTO schema_version (id, version, updated_at)
+VALUES (1, 5, 1000);
+
+INSERT INTO workspaces (
+    name, workspace_id, slug, display_name, user_id, owner_user_id, agent_name,
+    vm_name, workspace_dir_name, node_id, desired_state, cpus, memory_mib,
+    workspace_quota_mib, status, idle_timeout_secs, backup_interval_secs,
+    last_used_at, last_backup_at, created_at, updated_at
+) VALUES (
+    'legacy-workspace', 'ws_legacy_workspace', 'legacy-workspace',
+    'Legacy Workspace', 'legacy-user', NULL, 'codex',
+    'mom-legacy-workspace', 'mom-legacy-workspace-dir', 'mom-1', 'running',
+    1, 2048, 10240, 'stopped', 1800, 0, 1000, NULL, 1000, 1000
+);
+
+INSERT INTO workspace_events (
+    workspace_name, node_id, event_type, status, message, metadata_json, created_at
+) VALUES (
+    'legacy-workspace', 'mom-1', 'workspace_created', 'succeeded',
+    'legacy workspace created', '{"version":"0.1.0-legacy"}', 1001
+);
+"#,
+    )?;
+    drop(db);
+
+    run_mom(api_state.path(), &["node", "list"])?;
+
+    let db = Connection::open(api_state.path().join("fleet.db"))?;
+    let has_vm_version: i64 = db.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('workspaces') WHERE name = 'vm_version'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(has_vm_version, 1);
+    let vm_version: String = db.query_row(
+        "SELECT vm_version FROM workspaces WHERE name = 'legacy-workspace'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(vm_version, "0.1.0-legacy");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn worker_retries_registration_until_api_is_ready() -> Result<()> {
+    let _guard = fleet_test_guard().await;
+    let api_state = tempfile::tempdir()?;
+    let api_addr = free_addr()?;
+    let api_url = format!("http://{api_addr}");
+    let node = spawn_worker("retry-node", &api_url)?;
+
+    wait_until("worker HTTP starts before API", || async {
+        reqwest::get(format!("{}/worker/health", node.worker_url))
+            .await
+            .ok()
+            .filter(|response| response.status().is_success())
+            .is_some()
+    })
+    .await?;
+
+    let _api = spawn_api(api_state.path(), &api_addr, &[])?;
+    wait_ready(&api_url).await?;
+    wait_for_node(api_state.path(), "retry-node").await?;
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn admin_infra_overview_returns_fleet_snapshot() -> Result<()> {
     let _guard = fleet_test_guard().await;
     let fleet = TestFleet::start().await?;
@@ -2156,6 +2322,30 @@ fn spawn_api(state_dir: &Path, bind: &str, envs: &[(&str, &str)]) -> Result<Chil
     }
     let child = command.spawn().context("spawn mom api")?;
     Ok(ChildGuard { child })
+}
+
+fn cli_invite_code(state_dir: &Path, role: &str, label: &str) -> Result<String> {
+    let output = Command::new(MOM_BIN)
+        .args(["auth", "invite", role, "--label", label])
+        .env("MOM_STATE_DIR", state_dir)
+        .output()
+        .context("run mom auth invite")?;
+    if !output.status.success() {
+        bail!(
+            "mom auth invite failed with {}: stdout={} stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let code = String::from_utf8(output.stdout)
+        .context("invite code output was not valid UTF-8")?
+        .trim()
+        .to_string();
+    if code.len() != 8 {
+        bail!("unexpected invite code output: {code}");
+    }
+    Ok(code)
 }
 
 fn spawn_worker(node: &str, api_url: &str) -> Result<TestNode> {

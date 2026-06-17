@@ -171,9 +171,7 @@ CREATE INDEX IF NOT EXISTS idx_service_tunnels_workspace
 ON service_tunnels (workspace_name, service);
 "#,
     )?;
-    if current == 3 || current == 4 {
-        ensure_workspace_vm_version_column(&db)?;
-    }
+    ensure_workspace_vm_version_column(&db)?;
     if current == 3 {
         reset_auth_schema_for_password_auth(&db)?;
     }

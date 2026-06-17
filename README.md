@@ -35,6 +35,8 @@ mom node inspect mom-1
 mom node cordon mom-1
 mom node drain mom-1
 mom node uncordon mom-1
+mom auth invite user --label "Teammate invite" --max-uses 1
+mom auth invite admin --label "Admin invite" --max-uses 1
 mom db status
 mom db backup
 mom monitor check
@@ -177,6 +179,9 @@ caches.
 ## NixOS Service
 
 The flake exports `nixosModules.agentmom`.
+
+The production and staging NixOS fleet is deployed from this repo with Colmena.
+See [docs/fleet-deploy.md](docs/fleet-deploy.md).
 
 ```nix
 {

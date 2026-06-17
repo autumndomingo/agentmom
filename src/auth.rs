@@ -40,6 +40,46 @@ struct InviteRecord {
     created_at: i64,
 }
 
+#[derive(Debug)]
+pub(crate) struct InviteCreate {
+    pub(crate) label: String,
+    pub(crate) description: String,
+    pub(crate) role: InviteRole,
+    pub(crate) max_uses: Option<i64>,
+    pub(crate) created_by_user_id: Option<i64>,
+}
+
+#[derive(Debug)]
+pub(crate) struct CreatedInvite {
+    pub(crate) id: i64,
+    pub(crate) code: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum InviteRole {
+    Admin,
+    User,
+}
+
+impl InviteRole {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Admin => "admin",
+            Self::User => "user",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, AuthError> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "admin" => Ok(Self::Admin),
+            "user" | "non-admin" | "non_admin" => Ok(Self::User),
+            _ => Err(AuthError::BadRequest(
+                "invite role must be admin or user".to_string(),
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct LoginRequest {
     email: String,
@@ -68,6 +108,8 @@ struct CreateInviteRequest {
     description: String,
     #[serde(default)]
     max_uses: Option<i64>,
+    #[serde(default = "default_invite_role")]
+    role: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -436,41 +478,17 @@ async fn admin_create_invite(
     Json(request): Json<CreateInviteRequest>,
 ) -> Result<Json<InviteCreatedResponse>, AuthError> {
     let admin = require_admin(&headers)?;
-    let label = request.label.trim();
-    if label.is_empty() {
-        return Err(AuthError::BadRequest(
-            "invite label is required".to_string(),
-        ));
-    }
-    if request.max_uses.is_some_and(|value| value < 1) {
-        return Err(AuthError::BadRequest(
-            "max uses must be positive".to_string(),
-        ));
-    }
-    let code = generate_access_code();
-    let code = normalize_access_code(&code);
-    let now = now_epoch()?;
-    let db = fleet_db()?;
-    db.execute(
-        r#"
-INSERT INTO invites (
-    label, description, code, role, max_uses, used_count,
-    active, created_by_user_id, created_at
-) VALUES (?1, ?2, ?3, 'user', ?4, 0, 1, ?5, ?6)
-"#,
-        params![
-            label,
-            request.description.trim(),
-            code,
-            request.max_uses,
-            admin.id,
-            now,
-        ],
-    )?;
-    let id = db.last_insert_rowid();
+    let role = InviteRole::parse(&request.role)?;
+    let created = create_invite(InviteCreate {
+        label: request.label,
+        description: request.description,
+        role,
+        max_uses: request.max_uses,
+        created_by_user_id: Some(admin.id),
+    })?;
     Ok(Json(InviteCreatedResponse {
-        invite: invite_get(id)?,
-        code,
+        invite: invite_get(created.id)?,
+        code: created.code,
     }))
 }
 
@@ -500,6 +518,56 @@ async fn admin_disable_invite(
         return Err(AuthError::NotFound);
     }
     Ok(Json(invite_get(id)?))
+}
+
+pub(crate) fn create_invite(input: InviteCreate) -> Result<CreatedInvite, AuthError> {
+    ensure_fleet_schema()?;
+    let label = input.label.trim();
+    if label.is_empty() {
+        return Err(AuthError::BadRequest(
+            "invite label is required".to_string(),
+        ));
+    }
+    if input.max_uses.is_some_and(|value| value < 1) {
+        return Err(AuthError::BadRequest(
+            "max uses must be positive".to_string(),
+        ));
+    }
+
+    let description = input.description.trim();
+    let now = now_epoch()?;
+    let db = fleet_db()?;
+    for attempt in 0..8 {
+        let code = normalize_access_code(&generate_access_code());
+        let result = db.execute(
+            r#"
+INSERT INTO invites (
+    label, description, code, role, max_uses, used_count,
+    active, created_by_user_id, created_at
+) VALUES (?1, ?2, ?3, ?4, ?5, 0, 1, ?6, ?7)
+"#,
+            params![
+                label,
+                description,
+                code,
+                input.role.as_str(),
+                input.max_uses,
+                input.created_by_user_id,
+                now,
+            ],
+        );
+        match result {
+            Ok(_) => {
+                return Ok(CreatedInvite {
+                    id: db.last_insert_rowid(),
+                    code,
+                });
+            }
+            Err(error) if attempt < 7 && is_constraint_violation(&error) => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    unreachable!("invite code generation loop always returns before exhaustion")
 }
 
 async fn admin_delete_user(
@@ -832,6 +900,10 @@ ORDER BY workspaces.name
         .collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+fn default_invite_role() -> String {
+    InviteRole::User.as_str().to_string()
+}
+
 fn invite_all() -> Result<Vec<InviteRecord>, AuthError> {
     let db = fleet_db()?;
     let mut stmt = db.prepare(
@@ -886,6 +958,14 @@ fn invite_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<InviteRecord> {
         created_by_user_id: row.get(8)?,
         created_at: row.get(9)?,
     })
+}
+
+fn is_constraint_violation(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(failure, _)
+            if failure.code == rusqlite::ErrorCode::ConstraintViolation
+    )
 }
 
 fn normalize_email(email: &str) -> Result<String, AuthError> {
@@ -1051,6 +1131,23 @@ impl From<rusqlite::Error> for AuthError {
     }
 }
 
+impl std::fmt::Display for AuthError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AuthError::Unauthorized => write!(formatter, "invalid email or password"),
+            AuthError::InvalidSignupCode => write!(formatter, "invalid signup code"),
+            AuthError::Forbidden => write!(formatter, "admin access is required"),
+            AuthError::NotFound => write!(formatter, "not found"),
+            AuthError::Unavailable(error)
+            | AuthError::BadRequest(error)
+            | AuthError::Config(error) => write!(formatter, "{error}"),
+            AuthError::Anyhow(error) => write!(formatter, "{error:#}"),
+        }
+    }
+}
+
+impl std::error::Error for AuthError {}
+
 impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
         let (status, error) = match self {
@@ -1088,5 +1185,22 @@ mod tests {
         assert!(!bool_flag_enabled("0"));
         assert!(!bool_flag_enabled("false"));
         assert!(!bool_flag_enabled(""));
+    }
+
+    #[test]
+    fn invite_role_parse_accepts_admin_and_user_aliases() {
+        assert!(matches!(
+            InviteRole::parse("admin").unwrap(),
+            InviteRole::Admin
+        ));
+        assert!(matches!(
+            InviteRole::parse("USER").unwrap(),
+            InviteRole::User
+        ));
+        assert!(matches!(
+            InviteRole::parse("non-admin").unwrap(),
+            InviteRole::User
+        ));
+        assert!(InviteRole::parse("owner").is_err());
     }
 }
