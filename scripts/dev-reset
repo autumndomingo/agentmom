@@ -7,65 +7,13 @@ cd "${repo_root}"
 pid_file="${repo_root}/.state/dev.pid"
 local_state_dir="${repo_root}/.state"
 
-utm_instance="${MOM_DEV_UTM_INSTANCE:-dev}"
-case "${utm_instance}" in
-  ""|*[!a-z0-9-]*|-*|*-)
-    echo "MOM_DEV_UTM_INSTANCE must use lowercase letters, numbers, and internal dashes only" >&2
-    exit 1
-    ;;
-esac
-
-if [ "${utm_instance}" = "dev" ]; then
-  default_utm_name="AgentMom-Dev"
-  default_utm_guest_hostname="agentmom-dev-utm"
-  default_utm_guest_dir="/home/mom/agentmom"
-  default_utm_microvm_state_dir="/home/mom/.local/state/agentmom/microvms"
-  default_utm_state_dir="${repo_root}/.state/dev-utm"
-else
-  default_utm_name="AgentMom-${utm_instance}"
-  default_utm_guest_hostname="agentmom-${utm_instance}"
-  default_utm_guest_dir="/home/mom/agentmom-${utm_instance}"
-  default_utm_microvm_state_dir="/home/mom/.local/state/agentmom-${utm_instance}/microvms"
-  default_utm_state_dir="${repo_root}/.state/dev-utm-${utm_instance}"
-fi
-
-if [ "${#default_utm_guest_hostname}" -gt 63 ]; then
-  echo "MOM_DEV_UTM_INSTANCE is too long for a guest hostname" >&2
-  exit 1
-fi
-
-utm_name="${MOM_DEV_UTM_NAME:-${default_utm_name}}"
-utm_guest_hostname="${MOM_DEV_UTM_GUEST_HOSTNAME:-${default_utm_guest_hostname}}"
-case "${utm_guest_hostname}" in
-  ""|*[!a-z0-9-]*|-*|*-)
-    echo "MOM_DEV_UTM_GUEST_HOSTNAME must use lowercase letters, numbers, and internal dashes only" >&2
-    exit 1
-    ;;
-esac
-if [ "${#utm_guest_hostname}" -gt 63 ]; then
-  echo "MOM_DEV_UTM_GUEST_HOSTNAME is too long" >&2
-  exit 1
-fi
-utm_guest_host="${MOM_DEV_UTM_HOST:-${utm_guest_hostname}.local}"
-utm_guest_user="${MOM_DEV_UTM_USER:-mom}"
-utm_guest_dir="${MOM_DEV_UTM_GUEST_DIR:-${default_utm_guest_dir}}"
-utm_microvm_state_dir="${MOM_DEV_UTM_MICROVM_STATE_DIR:-${default_utm_microvm_state_dir}}"
-utm_state_dir="${MOM_DEV_UTM_STATE_DIR:-${default_utm_state_dir}}"
-utm_fallback_key="${utm_state_dir}/id_ed25519"
-utm_bundle="${HOME}/Library/Containers/com.utmapp.UTM/Data/Documents/${utm_name}.utm"
-utm_ssh_args=()
-preserved_utm_state=""
-first_utm_state=""
-
 kill_pid() {
   local pid="${1:-}"
   case "${pid}" in
     ''|*[!0-9]*) return 0 ;;
   esac
 
-  if kill -0 "${pid}" >/dev/null 2>&1; then
-    kill "${pid}" >/dev/null 2>&1 || true
-  fi
+  kill "${pid}" >/dev/null 2>&1 || true
 }
 
 kill_pid_hard() {
@@ -74,9 +22,7 @@ kill_pid_hard() {
     ''|*[!0-9]*) return 0 ;;
   esac
 
-  if kill -0 "${pid}" >/dev/null 2>&1; then
-    kill -KILL "${pid}" >/dev/null 2>&1 || true
-  fi
+  kill -KILL "${pid}" >/dev/null 2>&1 || true
 }
 
 stop_microvm_units() {
@@ -93,108 +39,6 @@ stop_microvm_units() {
     sudo -n systemctl stop "${unit}" >/dev/null 2>&1 || systemctl stop "${unit}" >/dev/null 2>&1 || true
   done
 }
-
-select_utm_ssh_args() {
-  utm_ssh_args=(
-    -o BatchMode=yes
-    -o ConnectTimeout=5
-    -o ControlMaster=no
-    -o ControlPath=none
-    -o StrictHostKeyChecking=accept-new
-    -o UserKnownHostsFile="${utm_state_dir}/known_hosts"
-  )
-
-  if [ ! -f "${HOME}/.ssh/id_ed25519.pub" ] &&
-    [ ! -f "${HOME}/.ssh/id_ecdsa.pub" ] &&
-    [ ! -f "${HOME}/.ssh/id_rsa.pub" ] &&
-    [ -f "${utm_fallback_key}" ]; then
-    utm_ssh_args=(-i "${utm_fallback_key}" "${utm_ssh_args[@]}")
-  fi
-}
-
-reset_utm_guest_state() {
-  local ip
-
-  [ "${MOM_DEV_RESET_SKIP_UTM:-0}" != "1" ] || return 0
-  [ "${MOM_DEV_RESET_UTM:-1}" != "0" ] || return 0
-  [ -e "${utm_bundle}" ] || return 0
-  command -v ssh >/dev/null 2>&1 || return 0
-
-  mkdir -p "${utm_state_dir}"
-  select_utm_ssh_args
-  ip="$(utmctl ip-address "${utm_name}" 2>/dev/null | awk '/^[0-9]+\./ { print; exit }' || true)"
-  if [ -n "${ip}" ]; then
-    utm_guest_host="${ip}"
-  fi
-  if ! ssh "${utm_ssh_args[@]}" "${utm_guest_user}@${utm_guest_host}" true >/dev/null 2>&1; then
-    printf 'UTM guest not reachable; skipped UTM guest state reset\n'
-    return 0
-  fi
-
-  printf 'resetting UTM dev state...'
-  if ssh "${utm_ssh_args[@]}" \
-    "${utm_guest_user}@${utm_guest_host}" \
-    env \
-    MOM_DEV_RESET_SKIP_UTM=1 \
-    AGENTMOM_RESET_GUEST_DIR="${utm_guest_dir}" \
-    AGENTMOM_RESET_MICROVM_STATE_DIR="${utm_microvm_state_dir}" \
-    bash -s <<'EOF_RESET_UTM'
-set -euo pipefail
-
-guest_dir="${AGENTMOM_RESET_GUEST_DIR}"
-microvm_state_dir="${AGENTMOM_RESET_MICROVM_STATE_DIR}"
-
-if [ -d "${guest_dir}" ]; then
-  cd "${guest_dir}"
-  if [ -x ./scripts/dev-reset ]; then
-    MOM_DEV_RESET_SKIP_UTM=1 ./scripts/dev-reset >/dev/null
-  else
-    rm -rf .state dev/iron-proxy
-  fi
-fi
-
-if command -v systemctl >/dev/null 2>&1; then
-  systemctl list-units --all --plain --no-legend 'agentmom-microvm@*.service' 2>/dev/null |
-    awk '{ print $1 }' |
-    while read -r unit; do
-      [ -n "${unit}" ] || continue
-      sudo -n systemctl stop "${unit}" >/dev/null 2>&1 || systemctl stop "${unit}" >/dev/null 2>&1 || true
-    done
-fi
-
-if command -v sudo >/dev/null 2>&1; then
-  sudo -n rm -rf "${microvm_state_dir}" || rm -rf "${microvm_state_dir}"
-else
-  rm -rf "${microvm_state_dir}"
-fi
-
-maybe_gc_nix_store() {
-  [ "${MOM_DEV_RESET_GC:-1}" != "0" ] || return 0
-  command -v nix >/dev/null 2>&1 || return 0
-  command -v df >/dev/null 2>&1 || return 0
-
-  local avail_kib min_free_kib
-  avail_kib="$(df -Pk / | awk 'NR == 2 { print $4 }')"
-  min_free_kib="${MOM_DEV_RESET_MIN_FREE_KIB:-5242880}"
-  case "${avail_kib}:${min_free_kib}" in
-    *[!0-9:]* | :* | *:) return 0 ;;
-  esac
-  if [ "${avail_kib}" -lt "${min_free_kib}" ]; then
-    nix store gc >/dev/null
-  fi
-}
-
-maybe_gc_nix_store
-EOF_RESET_UTM
-  then
-    printf 'ok\n'
-  else
-    printf 'failed\n'
-    exit 1
-  fi
-}
-
-reset_utm_guest_state
 
 if [ -f "${pid_file}" ]; then
   # shellcheck disable=SC1090
@@ -214,16 +58,6 @@ if [ -f "${pid_file}" ]; then
 fi
 
 stop_microvm_units
-first_utm_state="$(find "${local_state_dir}" -maxdepth 1 -type d -name 'dev-utm*' -print -quit 2>/dev/null || true)"
-if [ -n "${first_utm_state}" ]; then
-  preserved_utm_state="$(mktemp -d "${TMPDIR:-/tmp}/agentmom-dev-utm-state.XXXXXX")"
-  find "${local_state_dir}" -maxdepth 1 -type d -name 'dev-utm*' -exec cp -pR {} "${preserved_utm_state}/" \;
-fi
 rm -rf "${local_state_dir}" "${repo_root}/dev/iron-proxy"
-if [ -n "${preserved_utm_state}" ]; then
-  mkdir -p "${local_state_dir}"
-  find "${preserved_utm_state}" -maxdepth 1 -type d -name 'dev-utm*' -exec cp -pR {} "${local_state_dir}/" \;
-  rm -rf "${preserved_utm_state}"
-fi
 
 printf 'dev state reset\n'

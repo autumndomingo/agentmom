@@ -4,19 +4,16 @@ Read `~/configs/GLOBAL-AGENTS.md` (fallback: https://raw.githubusercontent.com/j
 
 ## Development
 
-Run the local development environment with `just dev`. Do not start the UI/API
-or worker with ad hoc `cargo run` commands unless you are intentionally
-debugging the process startup path. The `just dev` recipe builds the UI, chooses
-available localhost ports, writes `.state/config.dev.json`, starts `mom api` and
-`mom worker`, and uses the real microvm.nix runtime on Linux/KVM hosts.
-
-For UTM-backed dev, use one instance per concurrent stack:
+Run the development environment with `just dev` on a Linux/KVM host. For remote
+real-runtime work, use `lab`:
 
 ```sh
-MOM_DEV_UTM_INSTANCE=<name> just dev-utm
+ssh lab
+cd ~/code/agentmom
+just dev
 ```
 
-The default `just dev-utm` uses `AgentMom-Dev`. Named instances use separate UTM
-VMs, hostnames, host state/log dirs, guest checkout dirs, and guest microVM
-state. Instance names must use lowercase letters, numbers, and internal dashes.
-List them with `just dev-utm-list`.
+Do not start the UI/API or worker with ad hoc `cargo run` commands unless you
+are intentionally debugging the process startup path. The `just dev` recipe
+builds the UI, chooses available localhost ports, writes `.state/config.dev.json`,
+starts `mom api` and `mom worker`, and uses the real microvm.nix runtime.

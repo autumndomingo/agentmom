@@ -2,7 +2,7 @@
 
 Read when you need a real Agent Mom dev loop on `mom-stage-1` with Cloud Hypervisor, systemd, the host bridge, and the credential proxy.
 
-This is the preferred replacement for UTM when testing runtime behavior. It is intentionally simple: run API and worker binaries from a checkout in a tmux session on `mom-stage-1`, while reusing the installed stage host runtime services.
+Prefer `lab` plus `just dev` for normal development. This stage-specific flow is for testing against the installed stage host runtime services: run API and worker binaries from a checkout in a tmux session on `mom-stage-1`.
 
 ## Why
 

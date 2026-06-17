@@ -131,27 +131,32 @@ just dev
 
 `just dev` writes `.state/dev.env`, builds the UI, chooses available localhost
 ports, starts iron-proxy on host port `1080`, starts `mom api`, and starts
-`mom worker`. Runtime state stays under `.state/microvms`.
+`mom worker`. On Linux/KVM hosts it also prepares a transient systemd microVM
+runner under `/run/systemd/system` and uses the real microvm.nix runtime.
+Runtime state stays under `.state/microvms`.
 
-For UTM-backed dev, one instance maps to one UTM VM. The default instance keeps
-the historical `AgentMom-Dev` VM and paths:
+When developing from a Mac, use the shared Linux dev host:
 
 ```sh
-just dev-utm
+ssh lab
+cd ~/code/agentmom
+just dev
 ```
 
-Run another isolated VM by naming the instance:
+The host should only provide durable capabilities: KVM, systemd, Nix, the dev
+bridge, and sudo policy. The checkout owns the API, worker, proxy, generated
+config, generated VM definitions, and disposable `.state` contents.
+
+Install or refresh the host-side microVM prerequisites with:
 
 ```sh
-MOM_DEV_UTM_INSTANCE=signup just dev-utm
+just dev-host-setup
 ```
 
-Non-default instances use `AgentMom-$instance`, `.state/dev-utm-$instance`,
-`.state/logs/dev-utm-$instance`, `/home/mom/agentmom-$instance`, and isolated
-guest microVM state. List known Agent Mom UTM VMs with:
+Reset a dev run with:
 
 ```sh
-just dev-utm-list
+just dev-reset
 ```
 
 ### Web App Previews

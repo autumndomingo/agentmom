@@ -10,6 +10,6 @@
 - [x] Disable conflicting guest SSH host-key generation when Agent Mom installs pinned keys.
 - [x] Add focused local tests and run local checks.
 - [x] Remove the legacy Rust Hermes config writer and `workspace refresh-config`; rebuild/recreate with the Nix guest definition instead.
-- [x] Add and run UTM e2e coverage for first-user login, workspace lifecycle, proxy smoke, Hermes dashboard, previews, TUI sessions, OpenRouter inference, failed-command status, and cleanup.
-- [x] Align the dev UTM proxy allowlist with production for Hermes metadata hosts.
+- [x] Add and run real-runtime e2e coverage for first-user login, workspace lifecycle, proxy smoke, Hermes dashboard, previews, TUI sessions, OpenRouter inference, failed-command status, and cleanup.
+- [x] Align the dev proxy allowlist with production for Hermes metadata hosts.
 - [ ] Package or disable Hermes lazy provider/plugin dependencies so production guests do not install from PyPI at inference time.
