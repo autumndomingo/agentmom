@@ -13,7 +13,7 @@ if [ ! -e /dev/kvm ]; then
   exit 1
 fi
 
-for command in ip modprobe sudo systemctl; do
+for command in getent ip modprobe sudo systemctl; do
   if ! command -v "${command}" >/dev/null 2>&1; then
     echo "${command} is required" >&2
     exit 1
@@ -80,6 +80,16 @@ sudo -v
 sudo install -d -m 0755 "$(dirname "${unit_path}")"
 sudo install -m 0644 "${tmp_unit}" "${unit_path}"
 sudo systemctl daemon-reload
+if ! getent group microvm >/dev/null 2>&1; then
+  sudo groupadd --system microvm
+fi
+if ! getent passwd microvm >/dev/null 2>&1; then
+  nologin_shell="$(command -v nologin || true)"
+  if [ -z "${nologin_shell}" ]; then
+    nologin_shell="/run/current-system/sw/bin/nologin"
+  fi
+  sudo useradd --system --gid microvm --no-create-home --shell "${nologin_shell}" microvm
+fi
 sudo modprobe bridge || true
 sudo modprobe tap || true
 sudo modprobe tun || true
