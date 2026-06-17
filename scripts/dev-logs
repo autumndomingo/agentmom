@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${repo_root}"
+
+log_dir="${MOM_DEV_LOG_DIR:-${repo_root}/.state/logs}"
+lines="${MOM_DEV_LOG_LINES:-80}"
+include_journal=auto
+
+usage() {
+  cat <<'EOF'
+usage: just dev-logs [--no-journal] [--lines N]
+
+Tails Agent Mom dev logs with stable prefixes.
+
+Environment:
+  MOM_DEV_LOG_LINES=N       Initial lines per log file. Default: 80.
+  MOM_DEV_JOURNAL=0|1|auto  Include dev microVM journal. Default: auto.
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --no-journal)
+      include_journal=0
+      shift
+      ;;
+    --journal)
+      include_journal=1
+      shift
+      ;;
+    --lines)
+      lines="${2:?--lines requires a value}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "unknown dev-logs option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+case "${lines}" in
+  ''|*[!0-9]*)
+    echo "MOM_DEV_LOG_LINES must be a non-negative integer, got: ${lines}" >&2
+    exit 2
+    ;;
+esac
+
+prefix() {
+  local label="$1"
+  awk -v label="${label}" '{ print "[" label "] " $0; fflush(); }'
+}
+
+tail_log() {
+  local label="$1"
+  local file="$2"
+
+  (
+    while [ ! -e "${file}" ]; do
+      sleep 0.5
+    done
+    tail -n "${lines}" -F "${file}" 2>/dev/null
+  ) | prefix "${label}" &
+  pids="${pids} $!"
+}
+
+pids=""
+start_bg() {
+  "$@" &
+  pids="${pids} $!"
+}
+
+cleanup() {
+  trap - INT TERM EXIT
+  for pid in ${pids}; do
+    kill "${pid}" >/dev/null 2>&1 || true
+  done
+  wait ${pids} >/dev/null 2>&1 || true
+}
+trap cleanup INT TERM EXIT
+
+mkdir -p "${log_dir}"
+
+cat <<EOF
+Tailing Agent Mom dev logs from ${log_dir}
+Initial lines per stream: ${lines}
+EOF
+
+tail_log api "${log_dir}/api.log"
+tail_log worker "${log_dir}/worker.log"
+tail_log proxy "${log_dir}/iron-proxy.log"
+tail_log runtime "${log_dir}/ensure-runtime.log"
+tail_log config "${log_dir}/config-doctor.log"
+tail_log ui "${log_dir}/ui-build.log"
+tail_log build "${log_dir}/cargo-build.log"
+tail_log node "${log_dir}/node-inspect.log"
+tail_log env "${log_dir}/dev-env.log"
+
+if [ "${include_journal}" = auto ]; then
+  if [ "${MOM_DEV_JOURNAL:-auto}" = "0" ]; then
+    include_journal=0
+  elif command -v journalctl >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1; then
+    include_journal=1
+  else
+    include_journal=0
+  fi
+fi
+
+if [ "${include_journal}" = "1" ]; then
+  start_bg bash -c "journalctl --no-pager -n '${lines}' -f -u 'agentmom-dev-microvm@*.service' -o short-iso 2>/dev/null | awk '{ print \"[microvm] \" \$0; fflush(); }'"
+fi
+
+wait

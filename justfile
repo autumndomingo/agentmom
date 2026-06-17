@@ -27,6 +27,9 @@ dev-host-setup:
 dev-reset:
     @./scripts/dev-reset
 
+dev-logs *args:
+    @./scripts/dev-logs {{args}}
+
 dev-smoke:
     @./scripts/dev-smoke
 
