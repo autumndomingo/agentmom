@@ -310,7 +310,7 @@ struct WorkspaceCreateArgs {
     #[arg(long, default_value_t = 1800)]
     idle_timeout: u64,
     /// Back up at most this often. Set 0 to disable worker-scheduled backups.
-    #[arg(long, default_value_t = 900)]
+    #[arg(long, default_value_t = 0)]
     backup_interval: u64,
 }
 
