@@ -1,0 +1,22 @@
+{pkgs}:
+with pkgs; [
+  vim
+  git
+  htop
+  tmux
+  lsof
+  netcat
+  strace
+  pstree
+  iftop
+  ncdu
+  bat
+  ripgrep
+  fd
+  jq
+  curl
+  wget
+  fzf
+  just
+  rsync
+]

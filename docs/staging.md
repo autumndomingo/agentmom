@@ -18,19 +18,19 @@ back to `master` before handing it to other agents.
 
 ## Deploy
 
-Deploy both stage roles from configs:
+Deploy both stage roles from the Agent Mom fleet hive:
 
 ```bash
-cd ~/configs
-just agentmom-stage-switch
+cd ~/code/agentmom
+just deploy-stage
 ```
 
 Deploy only the controller or worker:
 
 ```bash
-cd ~/configs
-just switch mom-stage-ctrl
-just switch mom-stage-1
+cd ~/code/agentmom
+just deploy-node mom-stage-ctrl
+just deploy-node mom-stage-1
 ```
 
 Stage is allowed to skip the expensive worker `mom node ensure-runtime` prestart
@@ -63,8 +63,7 @@ Expected good signal:
 ## Caveats
 
 - Stage uses the same auth secret, invite code, and worker token material as prod.
-- `mom-stage-1` is the old `mom-2` dedicated host; the configs path is still
-  `~/configs/hosts/hetzner`.
+- `mom-stage-1` is the old `mom-2` dedicated host.
 - `mom-stage-1` currently boots BIOS GRUB from `nvme1n1`; keep bootloader config
   aligned with that disk or `nixos-rebuild switch` will not persist across reboot.
 - Keep `MOM_ENABLE_TEST_ENDPOINTS=1` stage-only.

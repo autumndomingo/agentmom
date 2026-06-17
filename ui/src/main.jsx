@@ -1699,15 +1699,28 @@ function TuiPage({ userSession }) {
     () => workspaces.find((workspace) => workspace.name === selectedName) ?? workspaces[0] ?? null,
     [selectedName, workspaces],
   );
+  const workspaceReady = isWorkspaceReady(selectedWorkspace);
 
   useEffect(() => {
     refreshWorkspaces().catch((loadError) => setError(formatError(loadError)));
   }, []);
 
   useEffect(() => {
+    if (!selectedWorkspace || workspaceReady) return undefined;
+    const interval = window.setInterval(() => {
+      refreshWorkspaces().catch((loadError) => setError(formatError(loadError)));
+    }, 3_000);
+    return () => window.clearInterval(interval);
+  }, [selectedWorkspace?.name, selectedWorkspace?.status, workspaceReady]);
+
+  useEffect(() => {
     if (!selectedWorkspace?.name) return;
+    if (!workspaceReady) {
+      setSessions([]);
+      return;
+    }
     refreshSessions(selectedWorkspace.name).catch((loadError) => setError(formatError(loadError)));
-  }, [selectedWorkspace?.name]);
+  }, [selectedWorkspace?.name, workspaceReady]);
 
   async function refreshWorkspaces() {
     setBusy(true);
@@ -1734,6 +1747,12 @@ function TuiPage({ userSession }) {
 
   async function refreshSessions(workspaceName = selectedWorkspace?.name) {
     if (!workspaceName) return [];
+    const workspace =
+      workspaces.find((candidate) => candidate.name === workspaceName) ?? selectedWorkspace;
+    if (!isWorkspaceReady(workspace)) {
+      setSessions([]);
+      return [];
+    }
     setBusy(true);
     setError('');
     try {
@@ -1814,7 +1833,7 @@ function TuiPage({ userSession }) {
           </select>
         </div>
 
-        <button className="launchButton" type="button" onClick={startSession} disabled={!selectedWorkspace}>
+        <button className="launchButton" type="button" onClick={startSession} disabled={!selectedWorkspace || !workspaceReady}>
           <Terminal size={18} />
           New TUI
         </button>
@@ -1822,7 +1841,7 @@ function TuiPage({ userSession }) {
         <div className="tuiSessionList">
           <div className="tuiSessionHeader">
             <h2>Sessions</h2>
-            <button type="button" onClick={() => refreshSessions()} disabled={!selectedWorkspace || busy}>
+            <button type="button" onClick={() => refreshSessions()} disabled={!selectedWorkspace || !workspaceReady || busy}>
               <RefreshCcw size={15} />
             </button>
           </div>
@@ -1848,7 +1867,15 @@ function TuiPage({ userSession }) {
           onNavClick={backToChat}
           title={selectedWorkspace ? workspaceDisplayName(selectedWorkspace) : 'Hermes TUI'}
           status={selectedWorkspace ? friendlyStatus(selectedWorkspace.status) : 'No workspace selected'}
-          meta={activeSessionId ? `Hermes TUI: resuming ${activeSessionId.slice(0, 8)}` : 'Hermes TUI: new session'}
+          meta={
+            !selectedWorkspace
+              ? null
+              : workspaceReady
+                ? activeSessionId
+                  ? `Hermes TUI: resuming ${activeSessionId.slice(0, 8)}`
+                  : 'Hermes TUI: new session'
+                : 'Hermes TUI: waiting for workspace'
+          }
           metaClassName="headerMeta ready"
         >
           {userSession.role === 'admin' && (
@@ -1857,7 +1884,7 @@ function TuiPage({ userSession }) {
               Admin
             </button>
           )}
-          <button className="refreshButton" type="button" onClick={launchHermes} disabled={!selectedWorkspace || busy}>
+          <button className="refreshButton" type="button" onClick={launchHermes} disabled={!selectedWorkspace || !workspaceReady || busy}>
             <ExternalLink size={17} />
             Hermes
           </button>
@@ -1867,12 +1894,17 @@ function TuiPage({ userSession }) {
           </button>
         </WorkspaceHeader>
         {error ? <div className="tuiError">{error}</div> : null}
-        {selectedWorkspace ? (
+        {selectedWorkspace && workspaceReady ? (
           <TerminalPane
             key={`${selectedWorkspace.name}-${activeSessionId || 'new'}-${terminalKey}`}
             workspaceName={selectedWorkspace.name}
             sessionId={activeSessionId}
           />
+        ) : selectedWorkspace ? (
+          <div className="previewEmpty">
+            <strong>Workspace is starting</strong>
+            <span>Hermes TUI will be available when the VM is ready.</span>
+          </div>
         ) : (
           <div className="previewEmpty">
             <strong>No workspace</strong>
@@ -2539,7 +2571,7 @@ function isWorkspaceStartable(workspace) {
 
 function emptyAcpState() {
   return {
-    state: 'starting',
+    state: 'idle',
     phase: 'idle',
     error: null,
     capabilities: {},
