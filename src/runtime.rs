@@ -1315,6 +1315,10 @@ fn microvm_systemd_unit_from_template(template: &str, name: &str) -> String {
     }
 }
 
+fn generated_flake_ref(dir: &Path, attr: &str) -> String {
+    format!("path:{}#{attr}", dir.display())
+}
+
 fn hermes_agent_package_nix() -> &'static str {
     include_str!("../nix/hermes-agent-package.nix")
 }
@@ -1422,7 +1426,7 @@ async fn ensure_probe_runner_builds(config: &MomConfig) -> Result<()> {
                 "build",
                 "--extra-experimental-features",
                 "nix-command flakes",
-                ".#runner",
+                &generated_flake_ref(&dir, "runner"),
                 "--no-link",
             ])
             .current_dir(&dir)
@@ -2152,6 +2156,17 @@ mod tests {
         assert_eq!(
             microvm_systemd_unit_from_template("agentmom-dev-microvm", "mom-dev-preview"),
             "agentmom-dev-microvm@mom-dev-preview.service"
+        );
+    }
+
+    #[test]
+    fn generated_flake_ref_forces_plain_path_source() {
+        assert_eq!(
+            generated_flake_ref(
+                Path::new("/tmp/agentmom/.state/microvms/host-check"),
+                "runner"
+            ),
+            "path:/tmp/agentmom/.state/microvms/host-check#runner"
         );
     }
 

@@ -101,7 +101,7 @@ if [ "${restore_suspended}" = false ]; then
     built_hash="$(cat .runner-input-hash)"
   fi
   if [ ! -x result/bin/microvm-run ] || [ "${input_hash}" != "${built_hash}" ]; then
-    nix build --no-write-lock-file --extra-experimental-features 'nix-command flakes' .#runner -o result
+    nix build --no-write-lock-file --extra-experimental-features 'nix-command flakes' "path:${state_dir}#runner" -o result
     rebuilt_hash="$(runner_input_hash)"
     if [ "${rebuilt_hash}" != "${input_hash}" ]; then
       echo "microVM runner inputs changed while building ${state_dir}; retry the start" >&2
