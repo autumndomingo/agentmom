@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+set -eu
+
+name="${1:?microVM name is required}"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if [ -f "${repo_root}/.state/dev.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . "${repo_root}/.state/dev.env"
+  set +a
+fi
+
+: "${MOM_MICROVM_STATE_DIR:?MOM_MICROVM_STATE_DIR is required}"
+: "${MOM_MICROVM_BRIDGE:=agentmom-dev0}"
+: "${MOM_MICROVM_CIDR:=192.168.84.0/24}"
+: "${MOM_MICROVM_HOST_IP:=192.168.84.1}"
+
+state_dir="${MOM_MICROVM_STATE_DIR}/machines/${name}"
+if [ ! -d "${state_dir}" ]; then
+  echo "microVM state dir ${state_dir} is missing; treating ${name} as stopped" >&2
+  exit 0
+fi
+
+bridge_prefix="${MOM_MICROVM_CIDR#*/}"
+if ! ip link show "${MOM_MICROVM_BRIDGE}" >/dev/null 2>&1; then
+  ip link add "${MOM_MICROVM_BRIDGE}" type bridge
+fi
+ip addr replace "${MOM_MICROVM_HOST_IP}/${bridge_prefix}" dev "${MOM_MICROVM_BRIDGE}"
+ip link set "${MOM_MICROVM_BRIDGE}" up
+
+cd "${state_dir}"
+
+virtiofsd_pids=""
+vm_pid=""
+
+cleanup() {
+  status="$?"
+  trap - EXIT INT TERM
+  if [ -n "${vm_pid}" ]; then
+    vm_state=""
+    if [ -f state ]; then
+      vm_state="$(cat state)"
+    fi
+    if [ "${vm_state}" != "suspended" ] && kill -0 "${vm_pid}" >/dev/null 2>&1 && [ -x result/bin/microvm-shutdown ]; then
+      timeout 15s result/bin/microvm-shutdown >/dev/null 2>&1 || true
+    fi
+    if kill -0 "${vm_pid}" >/dev/null 2>&1; then
+      kill "${vm_pid}" >/dev/null 2>&1 || true
+    fi
+    wait "${vm_pid}" >/dev/null 2>&1 || true
+  fi
+  if [ -n "${virtiofsd_pids}" ]; then
+    for virtiofsd_pid in ${virtiofsd_pids}; do
+      kill "${virtiofsd_pid}" >/dev/null 2>&1 || true
+    done
+    for virtiofsd_pid in ${virtiofsd_pids}; do
+      wait "${virtiofsd_pid}" >/dev/null 2>&1 || true
+    done
+  fi
+  if [ -x result/bin/tap-down ]; then
+    result/bin/tap-down >/dev/null 2>&1 || true
+  fi
+  exit "${status}"
+}
+trap cleanup EXIT INT TERM
+
+restore_suspended=false
+if [ "$(cat state 2>/dev/null || true)" = "suspended" ] && [ -d snapshot ]; then
+  restore_suspended=true
+  if [ ! -x result/bin/microvm-run ]; then
+    echo "cannot restore suspended VM ${name} without existing result/bin/microvm-run" >&2
+    exit 1
+  fi
+fi
+
+rm -f control.socket
+
+runner_input_hash() {
+  for input in flake.nix spec.json microvm-workspace.nix hermes-agent-package.nix; do
+    if [ ! -f "${input}" ]; then
+      echo "missing required microVM runner input ${state_dir}/${input}" >&2
+      return 1
+    fi
+  done
+  {
+    for input in flake.nix flake.lock spec.json microvm-workspace.nix hermes-agent-package.nix agentmom-proxy.crt; do
+      if [ -e "${input}" ]; then
+        sha256sum "${input}"
+      else
+        printf 'missing  %s\n' "${input}"
+      fi
+    done
+  } | sha256sum | cut -d' ' -f1
+}
+
+if [ "${restore_suspended}" = false ]; then
+  input_hash="$(runner_input_hash)"
+  built_hash=""
+  if [ -f .runner-input-hash ]; then
+    built_hash="$(cat .runner-input-hash)"
+  fi
+  if [ ! -x result/bin/microvm-run ] || [ "${input_hash}" != "${built_hash}" ]; then
+    nix build --no-write-lock-file --extra-experimental-features 'nix-command flakes' .#runner -o result
+    rebuilt_hash="$(runner_input_hash)"
+    if [ "${rebuilt_hash}" != "${input_hash}" ]; then
+      echo "microVM runner inputs changed while building ${state_dir}; retry the start" >&2
+      exit 1
+    fi
+    printf '%s\n' "${input_hash}" > .runner-input-hash.tmp
+    mv .runner-input-hash.tmp .runner-input-hash
+    rm -f .runner-built
+  fi
+fi
+
+if [ -x result/bin/tap-up ]; then
+  result/bin/tap-up
+fi
+
+if [ -x result/bin/virtiofsd-run ]; then
+  for socket_file in result/share/microvm/virtiofs/*/socket; do
+    [ -e "${socket_file}" ] || continue
+    rm -f "$(cat "${socket_file}")"
+  done
+  if [ "${restore_suspended}" = true ]; then
+    supervisord_conf="$(sed -n 's/.*--configuration \([^ ]*\).*/\1/p' result/bin/virtiofsd-run | head -1)"
+    if [ -z "${supervisord_conf}" ] || [ ! -f "${supervisord_conf}" ]; then
+      echo "could not find virtiofsd supervisord config for suspended VM ${name}" >&2
+      exit 1
+    fi
+    while IFS= read -r command_line; do
+      case "${command_line}" in
+        *virtiofsd-*)
+          bash -c "${command_line}" &
+          virtiofsd_pids="${virtiofsd_pids} $!"
+          ;;
+      esac
+    done < <(sed -n 's/^command=//p' "${supervisord_conf}")
+    if [ -z "${virtiofsd_pids}" ]; then
+      echo "could not find virtiofsd commands in ${supervisord_conf} for suspended VM ${name}" >&2
+      exit 1
+    fi
+  else
+    result/bin/virtiofsd-run &
+    virtiofsd_pids="$!"
+  fi
+  for socket_file in result/share/microvm/virtiofs/*/socket; do
+    [ -e "${socket_file}" ] || continue
+    socket="$(cat "${socket_file}")"
+    socket_sleep=0.05
+    if [ "${restore_suspended}" = true ]; then
+      socket_sleep=0.005
+    fi
+    i=0
+    while [ "${i}" -lt 600 ]; do
+      [ -S "${socket}" ] && break
+      i=$((i + 1))
+      sleep "${socket_sleep}"
+    done
+    if [ ! -S "${socket}" ]; then
+      echo "timed out waiting for virtiofs socket ${socket}" >&2
+      exit 1
+    fi
+  done
+fi
+
+if [ "${restore_suspended}" = true ]; then
+  cloud_hypervisor="${MOM_MICROVM_RESTORE_CLOUD_HYPERVISOR:-}"
+  if [ -z "${cloud_hypervisor}" ]; then
+    cloud_hypervisor="$(grep -Eo '/nix/store/[^[:space:]]+/bin/cloud-hypervisor' result/bin/microvm-run | head -1)"
+  fi
+  if [ -z "${cloud_hypervisor}" ] || [ ! -x "${cloud_hypervisor}" ]; then
+    echo "could not find cloud-hypervisor binary in result/bin/microvm-run for suspended VM ${name}" >&2
+    exit 1
+  fi
+  "${cloud_hypervisor}" \
+    --api-socket control.socket \
+    --restore "source_url=file://${state_dir}/snapshot,memory_restore_mode=ondemand,resume=true" &
+else
+  result/bin/microvm-run &
+fi
+
+vm_pid="$!"
+wait "${vm_pid}"

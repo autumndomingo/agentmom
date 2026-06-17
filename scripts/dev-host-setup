@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${repo_root}"
+
+if [ "$(uname -s)" != "Linux" ]; then
+  echo "dev-host-setup only applies to Linux/KVM hosts" >&2
+  exit 1
+fi
+if [ ! -e /dev/kvm ]; then
+  echo "/dev/kvm is missing; real microVM dev cannot run here" >&2
+  exit 1
+fi
+
+for command in ip modprobe sudo systemctl; do
+  if ! command -v "${command}" >/dev/null 2>&1; then
+    echo "${command} is required" >&2
+    exit 1
+  fi
+done
+
+if [ ! -f .state/dev.env ]; then
+  ./scripts/dev-env >/dev/null
+fi
+
+set -a
+# shellcheck disable=SC1091
+. .state/dev.env
+set +a
+
+: "${MOM_MICROVM_STATE_DIR:?MOM_MICROVM_STATE_DIR is required}"
+: "${MOM_MICROVM_WORKSPACE_DIR:?MOM_MICROVM_WORKSPACE_DIR is required}"
+: "${MOM_MICROVM_BRIDGE:?MOM_MICROVM_BRIDGE is required}"
+: "${MOM_MICROVM_CIDR:?MOM_MICROVM_CIDR is required}"
+: "${MOM_MICROVM_HOST_IP:?MOM_MICROVM_HOST_IP is required}"
+: "${MOM_MICROVM_SYSTEMD_TEMPLATE:=agentmom-dev-microvm@.service}"
+
+case "${MOM_MICROVM_SYSTEMD_TEMPLATE}" in
+  agentmom-dev-microvm@.service) ;;
+  *)
+    echo "refusing to install unexpected dev systemd template: ${MOM_MICROVM_SYSTEMD_TEMPLATE}" >&2
+    exit 1
+    ;;
+esac
+
+unit_path="/etc/systemd/system/${MOM_MICROVM_SYSTEMD_TEMPLATE}"
+tmp_unit="$(mktemp "${TMPDIR:-/tmp}/agentmom-dev-microvm.XXXXXX")"
+cleanup() {
+  rm -f "${tmp_unit}"
+}
+trap cleanup EXIT
+
+cat >"${tmp_unit}" <<EOF_UNIT
+[Unit]
+Description=Agent Mom dev microVM %i
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=${MOM_MICROVM_STATE_DIR} ${MOM_MICROVM_WORKSPACE_DIR}
+
+[Service]
+Type=simple
+User=root
+Group=root
+EnvironmentFile=${repo_root}/.state/dev.env
+Environment=PATH=${PATH}
+ExecStart=${repo_root}/scripts/dev-microvm-runner %i
+WorkingDirectory=${MOM_MICROVM_STATE_DIR}
+KillMode=mixed
+Restart=on-failure
+RestartSec=2s
+SuccessExitStatus=143
+TimeoutStartSec=30min
+TimeoutStopSec=90s
+EOF_UNIT
+
+echo "dev-host-setup may ask for your sudo password."
+sudo -v
+sudo install -d -m 0755 "$(dirname "${unit_path}")"
+sudo install -m 0644 "${tmp_unit}" "${unit_path}"
+sudo systemctl daemon-reload
+sudo modprobe bridge || true
+sudo modprobe tap || true
+sudo modprobe tun || true
+sudo modprobe vhost_net || true
+
+bridge_prefix="${MOM_MICROVM_CIDR#*/}"
+if ! ip link show "${MOM_MICROVM_BRIDGE}" >/dev/null 2>&1; then
+  sudo ip link add "${MOM_MICROVM_BRIDGE}" type bridge
+fi
+sudo ip addr replace "${MOM_MICROVM_HOST_IP}/${bridge_prefix}" dev "${MOM_MICROVM_BRIDGE}"
+sudo ip link set "${MOM_MICROVM_BRIDGE}" up
+
+mkdir -p "${MOM_MICROVM_STATE_DIR}/machines" "${MOM_MICROVM_WORKSPACE_DIR}"
+if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+  echo "warning: /dev/kvm is not writable by $(id -un); microVMs run as root via systemd, so this is usually ok." >&2
+fi
+
+echo "dev host ready: ${MOM_MICROVM_BRIDGE} ${MOM_MICROVM_HOST_IP}/${bridge_prefix}, ${MOM_MICROVM_SYSTEMD_TEMPLATE}"

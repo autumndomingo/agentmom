@@ -88,8 +88,8 @@ stop_microvm_units() {
   for machine in "${machines_dir}"/*; do
     [ -d "${machine}" ] || continue
     name="$(basename "${machine}")"
-    unit="$(systemd-escape --template=agentmom-microvm@.service "${name}")"
-    systemctl stop "${unit}" >/dev/null 2>&1 || true
+    unit="$(systemd-escape --template="${MOM_MICROVM_SYSTEMD_TEMPLATE:-agentmom-dev-microvm@.service}" "${name}")"
+    sudo -n systemctl stop "${unit}" >/dev/null 2>&1 || systemctl stop "${unit}" >/dev/null 2>&1 || true
   done
 }
 
@@ -201,12 +201,14 @@ if [ -f "${pid_file}" ]; then
   kill_pid "${worker_pid:-}"
   kill_pid "${api_pid:-}"
   kill_pid "${proxy_pid:-}"
+  kill_pid "${sudo_keepalive_pid:-}"
   kill_pid "${dev_run_pid:-}"
 
   sleep 1
   kill_pid_hard "${worker_pid:-}"
   kill_pid_hard "${api_pid:-}"
   kill_pid_hard "${proxy_pid:-}"
+  kill_pid_hard "${sudo_keepalive_pid:-}"
   kill_pid_hard "${dev_run_pid:-}"
 fi
 

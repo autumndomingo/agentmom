@@ -44,6 +44,7 @@ write_pid_file() {
     printf 'proxy_pid=%s\n' "${proxy_pid:-}"
     printf 'api_pid=%s\n' "${api_pid:-}"
     printf 'worker_pid=%s\n' "${worker_pid:-}"
+    printf 'sudo_keepalive_pid=%s\n' "${sudo_keepalive_pid:-}"
   } >"${pid_file}"
 }
 
@@ -137,7 +138,10 @@ stop_children() {
   if [ -n "${proxy_pid:-}" ] && kill -0 "${proxy_pid}" >/dev/null 2>&1; then
     kill "${proxy_pid}" >/dev/null 2>&1 || true
   fi
-  wait "${worker_pid:-}" "${api_pid:-}" "${proxy_pid:-}" >/dev/null 2>&1 || true
+  if [ -n "${sudo_keepalive_pid:-}" ] && kill -0 "${sudo_keepalive_pid}" >/dev/null 2>&1; then
+    kill "${sudo_keepalive_pid}" >/dev/null 2>&1 || true
+  fi
+  wait "${worker_pid:-}" "${api_pid:-}" "${proxy_pid:-}" "${sudo_keepalive_pid:-}" >/dev/null 2>&1 || true
   rm -f "${pid_file}"
   rm -rf "${lock_dir}"
   exit "${status}"
@@ -151,6 +155,20 @@ run_step "writing dev env" "${log_dir}/dev-env.log" ./scripts/dev-env
 set -a
 source .state/dev.env
 set +a
+
+if [ "${MOM_DEV_HOST_SETUP:-1}" != "0" ] && [ "$(uname -s)" = "Linux" ] && [ -e /dev/kvm ]; then
+  ./scripts/dev-host-setup
+  if [ "${MOM_RUNTIME_SUDO:-}" = "1" ]; then
+    (
+      while true; do
+        sudo -n -v >/dev/null 2>&1 || exit 0
+        sleep 60
+      done
+    ) &
+    sudo_keepalive_pid=$!
+    write_pid_file
+  fi
+fi
 
 if [ -z "${OPENROUTER_API_KEY:-}" ]; then
   cat >&2 <<'EOF_PROXY_WARN'

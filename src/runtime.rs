@@ -382,7 +382,7 @@ async fn start_vm_timed_with_readiness(
     refresh_vm_definition(name)?;
     timing.refresh_definition_ms = Some(started.elapsed().as_millis());
     let started = Instant::now();
-    systemctl(&["start", &format!("agentmom-microvm@{name}.service")]).await?;
+    systemctl(&["start", &microvm_systemd_unit(name)]).await?;
     timing.systemctl_start_ms = Some(started.elapsed().as_millis());
     let vm = GuestVm::new(name);
     let spec = load_microvm_spec(name)?;
@@ -509,7 +509,7 @@ async fn restore_suspended_vm_timed_with_readiness(
     refresh_vm_definition(name)?;
     timing.refresh_definition_ms = Some(started.elapsed().as_millis());
     let started = Instant::now();
-    systemctl(&["start", &format!("agentmom-microvm@{name}.service")]).await?;
+    systemctl(&["start", &microvm_systemd_unit(name)]).await?;
     timing.systemctl_start_ms = Some(started.elapsed().as_millis());
     let started = Instant::now();
     if let Err(error) = wait_for_systemd_active(name, FRESH_VM_SYSTEMD_ACTIVE_TIMEOUT).await {
@@ -573,7 +573,7 @@ pub(crate) async fn stop_vm_with_timeout(name: &str, timeout: Duration) -> Resul
 }
 
 async fn stop_vm_process(name: &str, timeout: Duration) -> Result<()> {
-    let unit = format!("agentmom-microvm@{name}.service");
+    let unit = microvm_systemd_unit(name);
     systemctl(&["stop", "--job-mode=replace", &unit]).await?;
     wait_for_systemd_inactive(name, timeout).await?;
     Ok(())
@@ -603,7 +603,7 @@ pub(crate) async fn vm_status(name: &str) -> Result<VmStatus> {
         return Ok(VmStatus::Missing);
     }
     if command_exists("systemctl").await {
-        let unit = format!("agentmom-microvm@{name}.service");
+        let unit = microvm_systemd_unit(name);
         let output = TokioCommand::new("systemctl")
             .args(["is-active", &unit])
             .stdin(Stdio::null())
@@ -1292,6 +1292,23 @@ fn microvm_workspace_nix() -> &'static str {
     include_str!("../nix/microvm-workspace.nix")
 }
 
+fn microvm_systemd_template() -> String {
+    env::var("MOM_MICROVM_SYSTEMD_TEMPLATE")
+        .unwrap_or_else(|_| "agentmom-microvm@.service".to_string())
+}
+
+fn microvm_systemd_unit(name: &str) -> String {
+    microvm_systemd_unit_from_template(&microvm_systemd_template(), name)
+}
+
+fn microvm_systemd_unit_from_template(template: &str, name: &str) -> String {
+    if template.contains("@.") {
+        template.replace("@.", &format!("@{name}."))
+    } else {
+        format!("{}@{name}.service", template.trim_end_matches(".service"))
+    }
+}
+
 fn hermes_agent_package_nix() -> &'static str {
     include_str!("../nix/hermes-agent-package.nix")
 }
@@ -1308,11 +1325,13 @@ async fn ensure_microvm_host_ready(config: &MomConfig) -> Result<()> {
     if !Path::new("/dev/kvm").exists() {
         bail!("/dev/kvm is required for the microvm.nix runtime");
     }
+    let template = microvm_systemd_template();
+    let template_description = format!("find systemd template {template}");
     require_success(
         TokioCommand::new("systemctl")
-            .args(["cat", "agentmom-microvm@.service"])
+            .args(["cat", &template])
             .stdin(Stdio::null()),
-        "find systemd template agentmom-microvm@.service",
+        &template_description,
     )
     .await?;
     ensure_bridge_ready().await?;
@@ -1577,7 +1596,7 @@ async fn wait_for_systemd_active(name: &str, timeout: Duration) -> Result<()> {
 }
 
 async fn wait_for_systemd_inactive(name: &str, timeout: Duration) -> Result<()> {
-    let unit = format!("agentmom-microvm@{name}.service");
+    let unit = microvm_systemd_unit(name);
     let deadline = std::time::Instant::now() + timeout;
     loop {
         let output = TokioCommand::new("systemctl")
@@ -1601,7 +1620,7 @@ async fn wait_for_systemd_inactive(name: &str, timeout: Duration) -> Result<()> 
 }
 
 async fn microvm_unit_diagnostics(name: &str) -> String {
-    let unit = format!("agentmom-microvm@{name}.service");
+    let unit = microvm_systemd_unit(name);
     let mut status_cmd = TokioCommand::new("systemctl");
     status_cmd.args(["status", "--no-pager", "--full", &unit]);
     let status = diagnostic_command_output(status_cmd).await;
@@ -2092,6 +2111,22 @@ mod tests {
             "mom workspace preview register \"$MOM_WORKSPACE_NAME\" --preview web --port <port>"
         ));
         assert!(template.contains("This is a host-side Agent Mom command"));
+    }
+
+    #[test]
+    fn microvm_systemd_unit_supports_dev_template() {
+        assert_eq!(
+            microvm_systemd_unit_from_template("agentmom-microvm@.service", "mom-dev-preview"),
+            "agentmom-microvm@mom-dev-preview.service"
+        );
+        assert_eq!(
+            microvm_systemd_unit_from_template("agentmom-dev-microvm@.service", "mom-dev-preview"),
+            "agentmom-dev-microvm@mom-dev-preview.service"
+        );
+        assert_eq!(
+            microvm_systemd_unit_from_template("agentmom-dev-microvm", "mom-dev-preview"),
+            "agentmom-dev-microvm@mom-dev-preview.service"
+        );
     }
 
     #[test]

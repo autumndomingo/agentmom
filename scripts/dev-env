@@ -36,6 +36,11 @@ else
 fi
 microvm_state="${MOM_MICROVM_STATE_DIR:-${repo_root}/.state/microvms}"
 microvm_workspaces="${MOM_MICROVM_WORKSPACE_DIR:-${microvm_state}/workspaces}"
+microvm_bridge="${MOM_MICROVM_BRIDGE:-agentmom-dev0}"
+microvm_cidr="${MOM_MICROVM_CIDR:-192.168.84.0/24}"
+microvm_host_ip="${MOM_MICROVM_HOST_IP:-192.168.84.1}"
+proxy_bind="${MOM_PROXY_BIND:-${microvm_host_ip}:1080}"
+microvm_systemd_template="${MOM_MICROVM_SYSTEMD_TEMPLATE:-agentmom-dev-microvm@.service}"
 
 mkdir -p .state/mom .state/logs dev/iron-proxy "${microvm_state}/machines" "${microvm_workspaces}"
 dev_ca_cert="${repo_root}/dev/iron-proxy/ca.crt"
@@ -58,16 +63,35 @@ if [ ! -s "${dev_ca_cert}" ] || [ ! -s "${dev_ca_key}" ]; then
   trap - EXIT
 fi
 
+config_file=".state/config.dev.json"
+cat >"${config_file}" <<EOF_CONFIG
+{
+  "schema_version": 1,
+  "credentials": {
+    "proxy_url": "http://${microvm_host_ip}:1080",
+    "proxy_ca_path": "${repo_root}/dev/iron-proxy/ca.crt"
+  },
+  "guest": {
+    "model": "${MOM_DEV_GUEST_MODEL:-openai/gpt-4o-mini}"
+  },
+  "auth": {
+    "secret_file": "${repo_root}/dev/secrets/auth-secret"
+  }
+}
+EOF_CONFIG
+
 env_file=".state/dev.env"
 {
-  printf 'MOM_CONFIG=%q\n' "${repo_root}/config.dev.json"
+  printf 'MOM_CONFIG=%q\n' "${repo_root}/${config_file}"
   printf 'MOM_STATE_DIR=%q\n' "${repo_root}/.state/mom"
   printf 'MOM_MICROVM_STATE_DIR=%q\n' "${microvm_state}"
   printf 'MOM_MICROVM_WORKSPACE_DIR=%q\n' "${microvm_workspaces}"
-  printf 'MOM_MICROVM_BRIDGE=%q\n' "agentmom0"
-  printf 'MOM_MICROVM_CIDR=%q\n' "192.168.83.0/24"
-  printf 'MOM_MICROVM_HOST_IP=%q\n' "192.168.83.1"
-  printf 'MOM_PROXY_BIND=%q\n' "192.168.83.1:1080"
+  printf 'MOM_MICROVM_BRIDGE=%q\n' "${microvm_bridge}"
+  printf 'MOM_MICROVM_CIDR=%q\n' "${microvm_cidr}"
+  printf 'MOM_MICROVM_HOST_IP=%q\n' "${microvm_host_ip}"
+  printf 'MOM_PROXY_BIND=%q\n' "${proxy_bind}"
+  printf 'MOM_MICROVM_SYSTEMD_TEMPLATE=%q\n' "${microvm_systemd_template}"
+  printf 'MOM_RUNTIME_SUDO=%q\n' "${MOM_RUNTIME_SUDO:-1}"
   printf 'MOM_WORKER_TOKEN_FILE=%q\n' "${repo_root}/dev/secrets/worker-token"
   printf 'MOM_UI_DIST=%q\n' "${repo_root}/ui/dist"
   printf 'MOM_NODE_ID=%q\n' "dev-node"

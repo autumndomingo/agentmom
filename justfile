@@ -18,6 +18,10 @@ dev:
     @if ! command -v lsof >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1 || ! command -v cargo >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1 || ! command -v iron-proxy >/dev/null 2>&1 || ! command -v playwright >/dev/null 2>&1; then exec nix develop --command just dev; fi
     @./scripts/dev-run
 
+dev-host-setup:
+    @if ! command -v ip >/dev/null 2>&1 || ! command -v systemctl >/dev/null 2>&1; then exec nix develop --command just dev-host-setup; fi
+    @./scripts/dev-host-setup
+
 dev-utm:
     @if ! command -v lsof >/dev/null 2>&1 || ! command -v rsync >/dev/null 2>&1 || ! command -v ssh >/dev/null 2>&1 || ! command -v utmctl >/dev/null 2>&1; then exec nix develop --command just dev-utm; fi
     @./scripts/dev-utm
