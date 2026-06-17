@@ -292,8 +292,8 @@ run_as_service env MOM_STATE_DIR="$tmpdir" "$mom_bin" db status
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("Schema version: 4"),
-        "remote drill should report schema version 4, got {stdout:?}"
+        stdout.contains("Schema version: 5"),
+        "remote drill should report schema version 5, got {stdout:?}"
     );
     Ok(())
 }

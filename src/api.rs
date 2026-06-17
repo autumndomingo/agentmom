@@ -145,7 +145,7 @@ async fn api_create_job(
 ) -> Result<Json<JobResponse>, ApiError> {
     match request.kind.as_str() {
         "start" | "warm" | "pause" | "suspend" | "resume" | "stop" | "execute" | "hermes" => {}
-        "backup" | "restore" | "remove" => {
+        "backup" | "restore" | "remove" | "upgrade" => {
             auth::require_admin(&headers)?;
         }
         other => {
@@ -402,6 +402,9 @@ async fn api_worker_workspace_state(
         request.touch,
         request.mark_backup,
     )?;
+    if let Some(version) = request.vm_version.as_deref() {
+        workspace_mark_vm_version(&name, version)?;
+    }
     Ok(Json(json!({ "ok": true })))
 }
 

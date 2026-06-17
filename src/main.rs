@@ -362,6 +362,7 @@ struct WorkspaceRecord {
     user_id: String,
     owner_user_id: Option<i64>,
     agent_name: Option<String>,
+    vm_version: String,
     vm_name: String,
     workspace_dir_name: String,
     node_id: Option<String>,
@@ -576,6 +577,8 @@ struct WorkerWorkspaceStateRequest {
     status: Option<String>,
     #[serde(default)]
     desired_state: Option<String>,
+    #[serde(default)]
+    vm_version: Option<String>,
     #[serde(default)]
     touch: bool,
     #[serde(default)]
@@ -1061,7 +1064,11 @@ async fn workspace_create(args: WorkspaceCreateArgs) -> Result<()> {
         "workspace_created",
         "succeeded",
         "workspace VM created and stopped with persistent workspace directory",
-        json!({ "vm": vm_name, "workspace_dir": workspace_dir_name }),
+        json!({
+            "vm": vm_name,
+            "workspace_dir": workspace_dir_name,
+            "mom.version": env!("CARGO_PKG_VERSION")
+        }),
     )?;
     println!("workspace {name} ready with workspace_dir {workspace_dir_name}");
     Ok(())

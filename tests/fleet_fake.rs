@@ -241,6 +241,13 @@ async fn fake_worker_start_stop_backup_jobs_update_central_state() -> Result<()>
     let create = create_workspace(&fleet.api_url, "alice", "node-a", 0).await?;
     wait_for_job_status(&fleet.api_url, &create, "succeeded").await?;
     wait_for_workspace_status(&fleet.api_url, "alice", "running").await?;
+    assert_eq!(
+        workspace(&fleet.api_url, "alice")
+            .await?
+            .get("vm_version")
+            .and_then(Value::as_str),
+        Some(env!("CARGO_PKG_VERSION"))
+    );
     let cookie = admin_cookie(&fleet.api_url).await?;
 
     reqwest::Client::new()
@@ -285,6 +292,45 @@ async fn fake_worker_start_stop_backup_jobs_update_central_state() -> Result<()>
     assert_eq!(
         std::fs::read_to_string(node.runtime_home.path().join("fake/alice/state"))?,
         "running"
+    );
+
+    reqwest::Client::new()
+        .post(format!("{}/api/workspaces/alice/pause", fleet.api_url))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await?
+        .error_for_status()?;
+    wait_for_workspace_status(&fleet.api_url, "alice", "paused").await?;
+
+    reqwest::Client::new()
+        .post(format!("{}/api/workspaces/alice/resume", fleet.api_url))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await?
+        .error_for_status()?;
+    wait_for_workspace_status(&fleet.api_url, "alice", "running").await?;
+
+    reqwest::Client::new()
+        .post(format!("{}/api/workspaces/alice/suspend", fleet.api_url))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await?
+        .error_for_status()?;
+    wait_for_workspace_status(&fleet.api_url, "alice", "suspended").await?;
+
+    reqwest::Client::new()
+        .post(format!("{}/api/workspaces/alice/upgrade", fleet.api_url))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await?
+        .error_for_status()?;
+    wait_for_workspace_status(&fleet.api_url, "alice", "stopped").await?;
+    assert_eq!(
+        workspace(&fleet.api_url, "alice")
+            .await?
+            .get("vm_version")
+            .and_then(Value::as_str),
+        Some(env!("CARGO_PKG_VERSION"))
     );
 
     let backup = create_job(&fleet.api_url, "alice", "backup").await?;
@@ -2517,14 +2563,15 @@ fn insert_workspace_with_memory(
     db.execute(
         r#"
 	INSERT INTO workspaces (
-	    name, workspace_id, slug, display_name, user_id, vm_name, workspace_dir_name, node_id, desired_state, cpus, memory_mib,
-	    workspace_quota_mib, status, idle_timeout_secs, backup_interval_secs,
-	    last_used_at, last_backup_at, created_at, updated_at
-) VALUES (?1, ?2, ?1, ?1, ?1, ?3, ?4, ?5, ?6, 1, ?7, 10240, ?8, 1800, 0, ?9, NULL, ?9, ?9)
-	"#,
+		    name, workspace_id, slug, display_name, user_id, vm_version, vm_name, workspace_dir_name, node_id, desired_state, cpus, memory_mib,
+		    workspace_quota_mib, status, idle_timeout_secs, backup_interval_secs,
+		    last_used_at, last_backup_at, created_at, updated_at
+	) VALUES (?1, ?2, ?1, ?1, ?1, ?3, ?4, ?5, ?6, ?7, 1, ?8, 10240, ?9, 1800, 0, ?10, NULL, ?10, ?10)
+		"#,
         (
             name,
             workspace_id,
+            env!("CARGO_PKG_VERSION"),
             format!("mom-{name}"),
             format!("mom-{name}-workspace"),
             node,
@@ -2581,14 +2628,15 @@ fn insert_unassigned_workspace(api_state: &Path, name: &str) -> Result<()> {
     db.execute(
         r#"
 INSERT INTO workspaces (
-    name, workspace_id, slug, display_name, user_id, vm_name, workspace_dir_name, node_id, desired_state, cpus, memory_mib,
+    name, workspace_id, slug, display_name, user_id, vm_version, vm_name, workspace_dir_name, node_id, desired_state, cpus, memory_mib,
     workspace_quota_mib, status, idle_timeout_secs, backup_interval_secs,
     last_used_at, last_backup_at, created_at, updated_at
-) VALUES (?1, ?2, ?1, ?1, ?1, ?3, ?4, NULL, 'running', 1, 2048, 10240, 'running', 1800, 0, ?5, NULL, ?5, ?5)
+) VALUES (?1, ?2, ?1, ?1, ?1, ?3, ?4, ?5, NULL, 'running', 1, 2048, 10240, 'running', 1800, 0, ?6, NULL, ?6, ?6)
 "#,
         (
             name,
             workspace_id,
+            env!("CARGO_PKG_VERSION"),
             format!("mom-{name}"),
             format!("mom-{name}-workspace"),
             now,

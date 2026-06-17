@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use super::*;
 
-pub(crate) const FLEET_SCHEMA_VERSION: i64 = 4;
+pub(crate) const FLEET_SCHEMA_VERSION: i64 = 5;
 
 const NODE_HAS_CAPACITY_SQL: &str = r#"
 max_active_workspaces = 0 OR (
@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS workspaces (
     user_id TEXT NOT NULL,
     owner_user_id INTEGER,
     agent_name TEXT,
+    vm_version TEXT NOT NULL,
     vm_name TEXT NOT NULL UNIQUE,
     workspace_dir_name TEXT NOT NULL UNIQUE,
     node_id TEXT,
@@ -170,6 +171,9 @@ CREATE INDEX IF NOT EXISTS idx_service_tunnels_workspace
 ON service_tunnels (workspace_name, service);
 "#,
     )?;
+    if current == 3 || current == 4 {
+        ensure_workspace_vm_version_column(&db)?;
+    }
     if current == 3 {
         reset_auth_schema_for_password_auth(&db)?;
     }
@@ -190,6 +194,64 @@ DROP TABLE IF EXISTS users;
 "#,
     )?;
     Ok(())
+}
+
+fn ensure_workspace_vm_version_column(db: &Connection) -> Result<()> {
+    let has_column = db.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('workspaces') WHERE name = 'vm_version'",
+        [],
+        |row| row.get::<_, i64>(0),
+    )? > 0;
+    if !has_column {
+        db.execute_batch(&format!(
+            "ALTER TABLE workspaces ADD COLUMN vm_version TEXT NOT NULL DEFAULT {};",
+            sql_string_literal(env!("CARGO_PKG_VERSION"))
+        ))?;
+    }
+    backfill_workspace_vm_versions(db)
+}
+
+fn backfill_workspace_vm_versions(db: &Connection) -> Result<()> {
+    let mut stmt = db.prepare(
+        r#"
+SELECT workspace_name, metadata_json
+FROM workspace_events
+WHERE event_type IN ('workspace_created', 'vm_recreated', 'vm_upgraded')
+ORDER BY created_at DESC, id DESC
+"#,
+    )?;
+    let mut versions = HashMap::new();
+    for row in stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })? {
+        let (workspace_name, metadata_json) = row?;
+        if versions.contains_key(&workspace_name) {
+            continue;
+        }
+        if let Some(version) = metadata_version(&metadata_json) {
+            versions.insert(workspace_name, version);
+        }
+    }
+    for (workspace_name, version) in versions {
+        db.execute(
+            "UPDATE workspaces SET vm_version = ?2 WHERE name = ?1",
+            params![workspace_name, version],
+        )?;
+    }
+    Ok(())
+}
+
+fn metadata_version(metadata_json: &str) -> Option<String> {
+    let value = serde_json::from_str::<Value>(metadata_json).ok()?;
+    ["mom.version", "version", "agentmom_version"]
+        .into_iter()
+        .find_map(|key| value.get(key).and_then(Value::as_str))
+        .or_else(|| value.pointer("/labels/mom.version").and_then(Value::as_str))
+        .map(ToString::to_string)
+}
+
+fn sql_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 fn ensure_auth_schema(db: &Connection) -> Result<()> {
@@ -245,7 +307,7 @@ WHERE owner_user_id IS NOT NULL;
 
 fn ensure_supported_schema_without_mutation(db: &Connection) -> Result<i64> {
     let current = read_schema_version_without_mutation(db)?;
-    if current == 0 || current == 3 || current == FLEET_SCHEMA_VERSION {
+    if current == 0 || current == 3 || current == 4 || current == FLEET_SCHEMA_VERSION {
         return Ok(current);
     }
     if current > FLEET_SCHEMA_VERSION {
@@ -382,11 +444,11 @@ fn insert_workspace_pending(
     let changed = db.execute(
         r#"
 INSERT INTO workspaces (
-    name, workspace_id, slug, display_name, user_id, owner_user_id, agent_name, vm_name, workspace_dir_name,
+    name, workspace_id, slug, display_name, user_id, owner_user_id, agent_name, vm_version, vm_name, workspace_dir_name,
     node_id, desired_state, cpus, memory_mib,
     workspace_quota_mib, status, idle_timeout_secs, backup_interval_secs,
     last_used_at, last_backup_at, created_at, updated_at
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'running', ?11, ?12, ?13, 'creating', ?14, ?15, ?16, NULL, ?16, ?16)
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'running', ?12, ?13, ?14, 'creating', ?15, ?16, ?17, NULL, ?17, ?17)
 ON CONFLICT(name) DO NOTHING
 "#,
         params![
@@ -397,6 +459,7 @@ ON CONFLICT(name) DO NOTHING
             input.user_id,
             input.owner_user_id,
             input.agent_name,
+            env!("CARGO_PKG_VERSION"),
             input.vm_name,
             input.workspace_dir_name,
             assigned_node_id,
@@ -421,7 +484,7 @@ pub(crate) fn workspace_get(name: &str) -> Result<WorkspaceRecord> {
         r#"
 SELECT workspace_id, name, slug, display_name, user_id, vm_name, workspace_dir_name, desired_state, cpus, memory_mib,
        node_id, status, workspace_quota_mib, idle_timeout_secs, backup_interval_secs, last_used_at, last_backup_at,
-       owner_user_id, agent_name
+       owner_user_id, agent_name, vm_version
 FROM workspaces
 WHERE name = ?1
 "#,
@@ -439,7 +502,7 @@ pub(crate) fn workspace_all() -> Result<Vec<WorkspaceRecord>> {
         r#"
 SELECT workspace_id, name, slug, display_name, user_id, vm_name, workspace_dir_name, desired_state, cpus, memory_mib,
        node_id, status, workspace_quota_mib, idle_timeout_secs, backup_interval_secs, last_used_at, last_backup_at,
-       owner_user_id, agent_name
+       owner_user_id, agent_name, vm_version
 FROM workspaces
 ORDER BY name
 "#,
@@ -457,7 +520,7 @@ pub(crate) fn workspaces_for_node(node: &str) -> Result<Vec<WorkspaceRecord>> {
         r#"
 SELECT workspace_id, name, slug, display_name, user_id, vm_name, workspace_dir_name, desired_state, cpus, memory_mib,
        node_id, status, workspace_quota_mib, idle_timeout_secs, backup_interval_secs, last_used_at, last_backup_at,
-       owner_user_id, agent_name
+       owner_user_id, agent_name, vm_version
 FROM workspaces
 WHERE node_id = ?1 AND status != 'removed'
 ORDER BY name
@@ -482,6 +545,7 @@ pub(crate) fn workspace_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Wo
         user_id: row.get(4)?,
         owner_user_id: row.get(17)?,
         agent_name: row.get(18)?,
+        vm_version: row.get(19)?,
         vm_name: row.get(5)?,
         workspace_dir_name: row.get(6)?,
         desired_state: row.get(7)?,
@@ -661,6 +725,22 @@ pub(crate) fn workspace_mark_status(name: &str, status: &str) -> Result<()> {
         "UPDATE workspaces SET status = ?2, updated_at = ?3 WHERE name = ?1",
         params![name, status, now_epoch()?],
     )?;
+    Ok(())
+}
+
+pub(crate) fn workspace_mark_vm_version(name: &str, version: &str) -> Result<()> {
+    let version = version.trim();
+    if version.is_empty() {
+        bail!("workspace vm_version must not be empty");
+    }
+    let db = fleet_db()?;
+    let changed = db.execute(
+        "UPDATE workspaces SET vm_version = ?2, updated_at = ?3 WHERE name = ?1",
+        params![name, version, now_epoch()?],
+    )?;
+    if changed == 0 {
+        bail!("workspace not found: {name}");
+    }
     Ok(())
 }
 

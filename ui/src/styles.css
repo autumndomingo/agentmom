@@ -1255,13 +1255,14 @@ input:disabled {
 
 .adminInfraUserGrid {
   grid-template-columns:
-    minmax(190px, 1.35fr)
-    minmax(180px, 1.25fr)
+    minmax(170px, 1.15fr)
+    minmax(170px, 1.1fr)
     minmax(100px, 0.75fr)
     minmax(88px, 0.6fr)
     minmax(130px, 0.9fr)
     minmax(110px, 0.75fr)
-    minmax(92px, 0.65fr);
+    minmax(92px, 0.65fr)
+    minmax(300px, 1.7fr);
 }
 
 .adminJobGrid {
@@ -1293,6 +1294,30 @@ input:disabled {
 .adminTableHeader button:hover,
 .adminUserRow button:hover {
   background: var(--panel-hover);
+}
+
+.adminTableHeader button:disabled,
+.adminUserRow button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.adminWorkspaceActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.adminWorkspaceActions button {
+  width: auto;
+  min-width: 86px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 10px;
+  font-size: 12px;
 }
 
 .adminUserList {
@@ -1701,6 +1726,15 @@ input:disabled {
     grid-column: 2;
     grid-row: 3;
     width: 108px;
+  }
+
+  .adminWorkspaceActions {
+    grid-column: 1 / -1;
+    grid-row: auto;
+  }
+
+  .adminWorkspaceActions button {
+    width: auto;
   }
 }
 

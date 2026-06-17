@@ -104,7 +104,11 @@ pub(crate) fn api_routes() -> Router<Arc<ApiState>> {
         .route("/api/ui/health", get(health))
         .route("/api/tls-ask", get(tls_ask))
         .route("/api/workspaces/{name}/start", post(start_workspace))
+        .route("/api/workspaces/{name}/pause", post(pause_workspace))
+        .route("/api/workspaces/{name}/suspend", post(suspend_workspace))
+        .route("/api/workspaces/{name}/resume", post(resume_workspace))
         .route("/api/workspaces/{name}/stop", post(stop_workspace))
+        .route("/api/workspaces/{name}/upgrade", post(upgrade_workspace))
         .route("/api/workspaces/{name}/remove", post(remove_workspace))
         .route("/api/workspaces/{name}/doctor", post(doctor_workspace))
         .route("/api/workspaces/{name}/exec", post(exec_workspace))
@@ -187,6 +191,33 @@ async fn start_workspace(
     create_and_wait_for_job(&state, &name, "start", json!({})).await
 }
 
+async fn pause_workspace(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<Json<CommandResult>, UiError> {
+    crate::auth::authorize_workspace(&headers, &name)?;
+    create_and_wait_for_job(&state, &name, "pause", json!({})).await
+}
+
+async fn suspend_workspace(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<Json<CommandResult>, UiError> {
+    crate::auth::authorize_workspace(&headers, &name)?;
+    create_and_wait_for_job(&state, &name, "suspend", json!({})).await
+}
+
+async fn resume_workspace(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<Json<CommandResult>, UiError> {
+    crate::auth::authorize_workspace(&headers, &name)?;
+    create_and_wait_for_job(&state, &name, "resume", json!({})).await
+}
+
 async fn stop_workspace(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
@@ -194,6 +225,15 @@ async fn stop_workspace(
 ) -> Result<Json<CommandResult>, UiError> {
     crate::auth::authorize_workspace(&headers, &name)?;
     create_and_wait_for_job(&state, &name, "stop", json!({})).await
+}
+
+async fn upgrade_workspace(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<Json<CommandResult>, UiError> {
+    crate::auth::require_admin(&headers)?;
+    create_and_wait_for_job(&state, &name, "upgrade", json!({})).await
 }
 
 async fn remove_workspace(

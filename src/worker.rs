@@ -935,6 +935,11 @@ async fn execute_job(api: &WorkerApi, job: &JobRecord) -> Result<Value> {
             create_workspace_local(api, &workspace, &payload).await?;
             Ok(json!({ "created": true }))
         }
+        "upgrade" => {
+            let workspace = api.workspace(&job.workspace_name).await?;
+            upgrade_workspace_local(api, &workspace).await?;
+            Ok(json!({ "upgraded": true, "version": env!("CARGO_PKG_VERSION") }))
+        }
         "start" | "warm" => {
             let workspace = api.workspace(&job.workspace_name).await?;
             api.update_workspace(
@@ -1271,6 +1276,20 @@ impl WorkerApi {
         Ok(())
     }
 
+    async fn update_workspace_version(&self, name: &str, version: &str) -> Result<()> {
+        self.client
+            .post(format!("{}/worker/workspaces/{name}/state", self.api_url))
+            .with_worker_token()
+            .json(&json!({
+                "node_id": self.node,
+                "vm_version": version,
+            }))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
     async fn event(
         &self,
         name: &str,
@@ -1405,6 +1424,8 @@ async fn create_workspace_local(
         }
     }
     api.update_workspace(&workspace.name, Some("stopped"), None, false, false)
+        .await?;
+    api.update_workspace_version(&workspace.name, env!("CARGO_PKG_VERSION"))
         .await?;
     api.event(
         &workspace.name,
@@ -1614,6 +1635,8 @@ async fn ensure_workspace_running_local(
                 }),
             )
             .await?;
+            api.update_workspace_version(&workspace.name, env!("CARGO_PKG_VERSION"))
+                .await?;
             let handle = get_vm(&workspace.vm_name)
                 .await
                 .with_context(|| format!("get recreated VM '{}'", workspace.vm_name))?;
@@ -1643,6 +1666,65 @@ async fn create_workspace_vm(workspace: &WorkspaceRecord, replace: bool) -> Resu
         workspace_quota_mib: workspace.workspace_quota_mib,
     };
     create_vm(request).await
+}
+
+async fn upgrade_workspace_local(api: &WorkerApi, workspace: &WorkspaceRecord) -> Result<()> {
+    if api.runtime.is_fake() {
+        return fake_upgrade_workspace(api, workspace).await;
+    }
+    let desired_state = workspace.desired_state.clone();
+    api.update_workspace(&workspace.name, Some("upgrading"), None, false, false)
+        .await?;
+    api.event(
+        &workspace.name,
+        "vm_upgrade_started",
+        "running",
+        "workspace vm upgrade requested",
+        json!({
+            "vm": workspace.vm_name,
+            "workspace_dir": workspace.workspace_dir_name,
+            "from_version": workspace.vm_version,
+            "to_version": env!("CARGO_PKG_VERSION")
+        }),
+    )
+    .await?;
+    if let Ok(handle) = get_vm(&workspace.vm_name).await {
+        handle.stop_with_timeout(Duration::from_secs(10)).await?;
+    }
+    create_workspace_vm(workspace, true)
+        .await
+        .with_context(|| format!("upgrade VM '{}'", workspace.vm_name))?;
+    api.update_workspace_version(&workspace.name, env!("CARGO_PKG_VERSION"))
+        .await?;
+    api.event(
+        &workspace.name,
+        "vm_upgraded",
+        "succeeded",
+        "workspace vm recreated with current Agent Mom version",
+        json!({
+            "vm": workspace.vm_name,
+            "workspace_dir": workspace.workspace_dir_name,
+            "from_version": workspace.vm_version,
+            "mom.version": env!("CARGO_PKG_VERSION")
+        }),
+    )
+    .await?;
+    if desired_state == "running" {
+        let upgraded = WorkspaceRecord {
+            vm_version: env!("CARGO_PKG_VERSION").to_string(),
+            ..workspace.clone()
+        };
+        ensure_workspace_running_local(api, &upgraded).await
+    } else {
+        api.update_workspace(
+            &workspace.name,
+            Some("stopped"),
+            Some("stopped"),
+            false,
+            false,
+        )
+        .await
+    }
 }
 
 async fn workspace_running_vm_local(
@@ -1935,6 +2017,8 @@ async fn fake_create_workspace(
     )?;
     api.update_workspace(&workspace.name, Some("stopped"), None, false, false)
         .await?;
+    api.update_workspace_version(&workspace.name, env!("CARGO_PKG_VERSION"))
+        .await?;
     api.event(
         &workspace.name,
         "workspace_created",
@@ -1946,6 +2030,26 @@ async fn fake_create_workspace(
         }),
     )
     .await
+}
+
+async fn fake_upgrade_workspace(api: &WorkerApi, workspace: &WorkspaceRecord) -> Result<()> {
+    let dir = fake_workspace_dir(workspace)?;
+    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    fs::write(dir.join("version"), env!("CARGO_PKG_VERSION"))?;
+    api.update_workspace_version(&workspace.name, env!("CARGO_PKG_VERSION"))
+        .await?;
+    if workspace.desired_state == "running" {
+        fake_start_workspace(api, workspace).await
+    } else {
+        api.update_workspace(
+            &workspace.name,
+            Some("stopped"),
+            Some("stopped"),
+            false,
+            false,
+        )
+        .await
+    }
 }
 
 async fn fake_start_workspace(api: &WorkerApi, workspace: &WorkspaceRecord) -> Result<()> {

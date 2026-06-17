@@ -10,6 +10,8 @@ import {
   MessageSquare,
   Monitor,
   PanelLeft,
+  Pause,
+  Play,
   Plus,
   RefreshCcw,
   Send,
@@ -2138,6 +2140,7 @@ function AdminPage({ userSession }) {
   const [accessCodeStatus, setAccessCodeStatus] = useState('Generate code');
   const [adminError, setAdminError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [workspaceAction, setWorkspaceAction] = useState(null);
   const [loadingInfra, setLoadingInfra] = useState(false);
   const [now, setNow] = useState(() => Date.now());
 
@@ -2251,6 +2254,24 @@ function AdminPage({ userSession }) {
     }
   }
 
+  async function runWorkspaceAction(workspace, action) {
+    if (!workspace) return;
+    const key = `${workspace.name}:${action}`;
+    setWorkspaceAction(key);
+    setAdminError('');
+    try {
+      await apiRequest(`/workspaces/${encodeURIComponent(workspace.name)}/${action}`, {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      await loadInfra();
+    } catch (error) {
+      setAdminError(formatError(error));
+    } finally {
+      setWorkspaceAction(null);
+    }
+  }
+
   const infraUsers = infra?.users ?? users.map((user) => ({ ...user, workspace: null }));
   const nodes = infra?.nodes ?? [];
   const jobs = infra?.jobs ?? [];
@@ -2343,20 +2364,65 @@ function AdminPage({ userSession }) {
             <span>State</span>
             <span>Resources</span>
             <span>Last active</span>
+            <span>Actions</span>
           </div>
           <div className="adminUserList">
             {infraUsers.map((row) => {
               const user = row.user ?? row;
               const workspace = row.workspace;
+              const currentVersion = infra?.app_version ?? '';
+              const needsUpgrade = workspace && workspace.vm_version !== currentVersion;
+              const status = String(workspace?.status ?? '').toLowerCase();
+              const canPause = workspace && status === 'running';
+              const canResume = workspace && ['paused', 'suspended', 'stopped', 'idle-stopped', 'error'].includes(status);
+              const canSuspend = workspace && ['running', 'paused'].includes(status);
               return (
                 <article className="adminUserRow adminInfraUserGrid" key={user.id}>
                   <strong>{user.email}</strong>
                   <span>{workspace?.vm_name ?? 'none'}</span>
                   <span>{workspace?.node_id ?? 'unassigned'}</span>
-                  <span>{row.workspace?.vm_version ?? 'unknown'}</span>
+                  <span>{workspace?.vm_version ?? '-'}</span>
                   <span>{workspace ? `${workspace.desired_state} / ${workspace.status}` : user.role}</span>
                   <span>{workspace ? `${workspace.cpus} CPU / ${formatMib(workspace.memory_mib)}` : '-'}</span>
                   <span>{workspace ? formatRelativeEpoch(workspace.last_used_at, now) : formatRelativeEpoch(user.last_seen_at, now)}</span>
+                  <span className="adminWorkspaceActions">
+                    {workspace ? (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => runWorkspaceAction(workspace, 'upgrade')}
+                          disabled={!needsUpgrade || workspaceAction === `${workspace.name}:upgrade`}
+                          title={needsUpgrade ? `Upgrade to ${currentVersion}` : 'VM is current'}
+                        >
+                          <RefreshCcw size={14} /> Upgrade
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => runWorkspaceAction(workspace, 'pause')}
+                          disabled={!canPause || workspaceAction === `${workspace.name}:pause`}
+                          title="Pause VM without freeing memory"
+                        >
+                          <Pause size={14} /> Pause
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => runWorkspaceAction(workspace, 'resume')}
+                          disabled={!canResume || workspaceAction === `${workspace.name}:resume`}
+                          title="Resume VM"
+                        >
+                          <Play size={14} /> Resume
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => runWorkspaceAction(workspace, 'suspend')}
+                          disabled={!canSuspend || workspaceAction === `${workspace.name}:suspend`}
+                          title="Snapshot VM and free resources"
+                        >
+                          <Square size={14} /> Suspend
+                        </button>
+                      </>
+                    ) : '-'}
+                  </span>
                 </article>
               );
             })}

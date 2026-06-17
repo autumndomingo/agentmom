@@ -124,7 +124,6 @@ struct AdminInfraUser {
 struct AdminInfraWorkspace {
     #[serde(flatten)]
     workspace: WorkspaceRecord,
-    vm_version: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -351,7 +350,6 @@ async fn admin_infra(headers: HeaderMap) -> Result<Json<AdminInfraResponse>, Aut
     );
     let users = user_all()?;
     let workspaces = workspace_all()?;
-    let workspace_versions = workspace_vm_versions()?;
     let nodes = node_all()?;
 
     let mut workspaces_by_owner = workspaces
@@ -367,7 +365,6 @@ async fn admin_infra(headers: HeaderMap) -> Result<Json<AdminInfraResponse>, Aut
                     .remove(&user.id)
                     .map(|workspace| AdminInfraWorkspace {
                         workspace: workspace.clone(),
-                        vm_version: workspace_versions.get(&workspace.name).cloned(),
                     });
             AdminInfraUser { user, workspace }
         })
@@ -725,7 +722,7 @@ fn workspace_for_user(user_id: i64) -> Result<Option<WorkspaceRecord>> {
         r#"
 SELECT workspace_id, name, slug, display_name, user_id, vm_name, workspace_dir_name, desired_state, cpus, memory_mib,
        node_id, status, workspace_quota_mib, idle_timeout_secs, backup_interval_secs, last_used_at, last_backup_at,
-       owner_user_id, agent_name
+       owner_user_id, agent_name, vm_version
 FROM workspaces
 WHERE owner_user_id = ?1
 ORDER BY name
@@ -745,7 +742,7 @@ fn delete_user_and_workspace(state: &ApiState, user_id: i64) -> Result<(), AuthE
             r#"
 SELECT workspace_id, name, slug, display_name, user_id, vm_name, workspace_dir_name, desired_state, cpus, memory_mib,
        node_id, status, workspace_quota_mib, idle_timeout_secs, backup_interval_secs, last_used_at, last_backup_at,
-       owner_user_id, agent_name
+       owner_user_id, agent_name, vm_version
 FROM workspaces
 WHERE owner_user_id = ?1
 "#,
@@ -807,40 +804,6 @@ fn counts_map(counts: Vec<(String, i64)>) -> HashMap<String, i64> {
     counts.into_iter().collect()
 }
 
-fn workspace_vm_versions() -> Result<HashMap<String, String>, AuthError> {
-    let db = fleet_db()?;
-    let mut stmt = db.prepare(
-        r#"
-SELECT workspace_name, metadata_json
-FROM workspace_events
-WHERE event_type IN ('workspace_created', 'vm_recreated')
-ORDER BY created_at DESC, id DESC
-"#,
-    )?;
-    let mut versions = HashMap::new();
-    for row in stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })? {
-        let (workspace_name, metadata_json) = row?;
-        if versions.contains_key(&workspace_name) {
-            continue;
-        }
-        if let Some(version) = metadata_version(&metadata_json) {
-            versions.insert(workspace_name, version);
-        }
-    }
-    Ok(versions)
-}
-
-fn metadata_version(metadata_json: &str) -> Option<String> {
-    let value = serde_json::from_str::<Value>(metadata_json).ok()?;
-    ["mom.version", "version", "agentmom_version"]
-        .into_iter()
-        .find_map(|key| value.get(key).and_then(Value::as_str))
-        .or_else(|| value.pointer("/labels/mom.version").and_then(Value::as_str))
-        .map(ToString::to_string)
-}
-
 fn users_for_invite(invite_id: i64) -> Result<Vec<AuthUser>, AuthError> {
     let db = fleet_db()?;
     let mut stmt = db.prepare(
@@ -857,7 +820,7 @@ fn workspaces_for_invite(invite_id: i64) -> Result<Vec<WorkspaceRecord>, AuthErr
         r#"
 SELECT workspace_id, name, slug, display_name, user_id, vm_name, workspace_dir_name, desired_state, cpus, memory_mib,
        node_id, status, workspace_quota_mib, idle_timeout_secs, backup_interval_secs, last_used_at, last_backup_at,
-       owner_user_id, agent_name
+       owner_user_id, agent_name, vm_version
 FROM workspaces
 JOIN users ON users.id = workspaces.owner_user_id
 WHERE users.invite_id = ?1
