@@ -7,8 +7,8 @@ Read `~/configs/GLOBAL-AGENTS.md` (fallback: https://raw.githubusercontent.com/j
 Run the local development environment with `just dev`. Do not start the UI/API
 or worker with ad hoc `cargo run` commands unless you are intentionally
 debugging the process startup path. The `just dev` recipe builds the UI, chooses
-available localhost ports, uses `config.dev.json`, starts `mom api` and
-`mom worker`, and uses the real microvm.nix runtime.
+available localhost ports, writes `.state/config.dev.json`, starts `mom api` and
+`mom worker`, and uses the real microvm.nix runtime on Linux/KVM hosts.
 
 For UTM-backed dev, use one instance per concurrent stack:
 
