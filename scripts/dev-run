@@ -267,6 +267,7 @@ Agent Mom dev is running
   UI:    ${MOM_API_URL}
   Login: first email creates the admin user; use the returned user code after that
   Logs:  ${log_dir}
+  Tail:  just dev-logs
 
 Press Ctrl-C to stop.
 EOF
