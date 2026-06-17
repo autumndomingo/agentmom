@@ -36,6 +36,12 @@ dev-reset:
 dev-smoke:
     @./scripts/dev-smoke
 
+stage-host-dev:
+    @./scripts/stage-host-dev-run
+
+stage-host-dev-reset:
+    @./scripts/stage-host-dev-reset
+
 real-fleet-test:
     cargo test --test real_fleet real_api_health_metrics_and_worker_auth -- --ignored --test-threads=1
 

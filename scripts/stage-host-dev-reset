@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${repo_root}"
+
+state_dir="${MOM_STAGE_HOST_DEV_STATE_DIR:-${repo_root}/.state/stage-host-dev}"
+pid_file="${state_dir}/dev.pid"
+lock_dir="${state_dir}/lock"
+
+kill_pid() {
+  local pid="$1"
+  [ -n "${pid}" ] || return 0
+  local signal
+  for signal in TERM KILL; do
+    if kill -0 "${pid}" >/dev/null 2>&1; then
+      kill "-${signal}" "${pid}" >/dev/null 2>&1 || true
+    elif sudo -n kill -0 "${pid}" >/dev/null 2>&1; then
+      sudo -n kill "-${signal}" "${pid}" >/dev/null 2>&1 || true
+    else
+      return 0
+    fi
+    sleep 1
+  done
+}
+
+kill_matching() {
+  local pattern="$1"
+  pgrep -u "$(id -u)" -f "${pattern}" 2>/dev/null |
+    while read -r pid; do
+      [ "${pid}" != "$$" ] || continue
+      kill_pid "${pid}"
+    done || true
+}
+
+if [ -f "${lock_dir}/pid" ]; then
+  kill_pid "$(cat "${lock_dir}/pid")"
+fi
+
+kill_matching "bash ${repo_root}/scripts/stage-host-dev-run"
+
+if command -v lsof >/dev/null 2>&1; then
+  for port in "${MOM_STAGE_HOST_DEV_API_PORT:-18787}" "${MOM_STAGE_HOST_DEV_WORKER_PORT:-19091}"; do
+    lsof -nP -t -iTCP:"${port}" -sTCP:LISTEN 2>/dev/null |
+      while read -r pid; do
+        kill_pid "${pid}"
+      done || true
+  done
+else
+  :
+fi
+
+if [ -f "${pid_file}" ]; then
+  # shellcheck disable=SC1090
+  source "${pid_file}"
+  for pid_file_name in api_pid worker_pid dev_run_pid; do
+    kill_pid "${!pid_file_name:-}"
+  done
+fi
+
+if command -v pgrep >/dev/null 2>&1; then
+  pgrep -u "$(id -u)" -f "^just stage-host-dev$" 2>/dev/null |
+    while read -r pid; do
+      kill_pid "${pid}"
+    done || true
+fi
+
+rm -f "${pid_file}"
+rm -rf "${lock_dir}"
+
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl list-units --all --plain --no-legend 'agentmom-microvm@dev-*.service' 2>/dev/null |
+    awk '{ print $1 }' |
+    while read -r unit; do
+      [ -n "${unit}" ] || continue
+      sudo -n systemctl stop "${unit}" >/dev/null 2>&1 || true
+    done
+fi
+
+echo "stage host dev stopped"

@@ -1,0 +1,261 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${repo_root}"
+
+if [ "${AGENTMOM_STAGE_HOST_DEV_IN_NIX:-0}" != "1" ] &&
+  { ! command -v npm >/dev/null 2>&1 || ! command -v cargo >/dev/null 2>&1 || ! command -v lsof >/dev/null 2>&1; }; then
+  exec env AGENTMOM_STAGE_HOST_DEV_IN_NIX=1 nix develop --command "$0"
+fi
+
+state_dir="${MOM_STAGE_HOST_DEV_STATE_DIR:-${repo_root}/.state/stage-host-dev}"
+log_dir="${state_dir}/logs"
+pid_file="${state_dir}/dev.pid"
+lock_dir="${state_dir}/lock"
+secret_dir="${state_dir}/secrets"
+
+api_port="${MOM_STAGE_HOST_DEV_API_PORT:-18787}"
+worker_port="${MOM_STAGE_HOST_DEV_WORKER_PORT:-19091}"
+api_bind="${MOM_STAGE_HOST_DEV_API_BIND:-127.0.0.1:${api_port}}"
+api_url="${MOM_STAGE_HOST_DEV_API_URL:-http://127.0.0.1:${api_port}}"
+worker_bind="${MOM_STAGE_HOST_DEV_WORKER_BIND:-127.0.0.1:${worker_port}}"
+worker_url="${MOM_STAGE_HOST_DEV_WORKER_URL:-http://127.0.0.1:${worker_port}}"
+node_id="${MOM_STAGE_HOST_DEV_NODE_ID:-mom-stage-1-dev}"
+
+runtime_state_dir="${MOM_STAGE_HOST_DEV_MICROVM_STATE_DIR:-/data/agentmom/microvms}"
+runtime_workspace_dir="${MOM_STAGE_HOST_DEV_MICROVM_WORKSPACE_DIR:-${runtime_state_dir}/workspaces}"
+proxy_url="${MOM_STAGE_HOST_DEV_PROXY_URL:-http://192.168.83.1:1080}"
+proxy_ca="${MOM_STAGE_HOST_DEV_PROXY_CA:-/data/agentmom/iron-proxy/ca.crt}"
+service_tunnel_range="${MOM_STAGE_HOST_DEV_TUNNEL_PORT_RANGE:-42000-42999}"
+
+mkdir -p "${state_dir}" "${log_dir}" "${secret_dir}"
+
+if mkdir "${lock_dir}" 2>/dev/null; then
+  printf '%s\n' "$$" >"${lock_dir}/pid"
+else
+  existing_pid="$(cat "${lock_dir}/pid" 2>/dev/null || true)"
+  if [ -n "${existing_pid}" ] && kill -0 "${existing_pid}" >/dev/null 2>&1; then
+    echo "stage host dev is already running in this checkout (pid ${existing_pid})." >&2
+    echo "Run: just stage-host-dev-reset" >&2
+    exit 1
+  fi
+  rm -rf "${lock_dir}"
+  mkdir "${lock_dir}"
+  printf '%s\n' "$$" >"${lock_dir}/pid"
+fi
+
+api_pid=""
+worker_pid=""
+
+write_pid_file() {
+  {
+    printf 'dev_run_pid=%s\n' "$$"
+    printf 'api_pid=%s\n' "${api_pid}"
+    printf 'worker_pid=%s\n' "${worker_pid}"
+  } >"${pid_file}"
+}
+
+cleanup() {
+  status=$?
+  trap - INT TERM EXIT
+  if [ -n "${api_pid}" ] && kill -0 "${api_pid}" >/dev/null 2>&1; then
+    kill "${api_pid}" >/dev/null 2>&1 || true
+  fi
+  if [ -n "${worker_pid}" ] && kill -0 "${worker_pid}" >/dev/null 2>&1; then
+    sudo -n kill "${worker_pid}" >/dev/null 2>&1 || kill "${worker_pid}" >/dev/null 2>&1 || true
+  fi
+  wait "${api_pid:-}" "${worker_pid:-}" >/dev/null 2>&1 || true
+  rm -f "${pid_file}"
+  rm -rf "${lock_dir}"
+  exit "${status}"
+}
+trap cleanup INT TERM EXIT
+write_pid_file
+
+require_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "$1 is required; run inside nix develop if needed" >&2
+    exit 1
+  fi
+}
+
+require_free_port() {
+  local port="$1"
+  if lsof -nP -iTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "Port ${port} is already in use" >&2
+    exit 1
+  fi
+}
+
+wait_for_http() {
+  local name="$1"
+  local url="$2"
+  local log_file="$3"
+  printf '  %-24s' "${name}..."
+  for _ in $(seq 1 90); do
+    if curl -fsS "${url}" >/dev/null 2>&1; then
+      printf 'ok\n'
+      return 0
+    fi
+    sleep 1
+  done
+  printf 'failed\n\n'
+  tail -n 120 "${log_file}" || true
+  exit 1
+}
+
+run_step() {
+  local name="$1"
+  local log_file="$2"
+  shift 2
+  printf '  %-24s' "${name}..."
+  if "$@" >"${log_file}" 2>&1; then
+    printf 'ok\n'
+  else
+    printf 'failed\n\n'
+    tail -n 120 "${log_file}" || true
+    exit 1
+  fi
+}
+
+for cmd in curl lsof openssl sudo systemctl; do
+  require_cmd "${cmd}"
+done
+
+if [ "$(uname -s)" != "Linux" ]; then
+  echo "stage-host-dev-run must run on the Linux stage worker host" >&2
+  exit 1
+fi
+if [ ! -e /dev/kvm ]; then
+  echo "/dev/kvm is missing; real Cloud Hypervisor dev cannot run here" >&2
+  exit 1
+fi
+sudo -n true >/dev/null
+systemctl cat agentmom-microvm@.service >/dev/null
+systemctl is-active --quiet agentmom-microvm-bridge.service
+systemctl is-active --quiet agentmom-credential-proxy.service
+sudo -n test -r "${proxy_ca}"
+sudo -n test -d "${runtime_state_dir}/machines"
+sudo -n test -d "${runtime_workspace_dir}"
+require_free_port "${api_port}"
+require_free_port "${worker_port}"
+
+if [ ! -s "${secret_dir}/auth-secret" ]; then
+  openssl rand -hex 32 >"${secret_dir}/auth-secret"
+fi
+if [ ! -s "${secret_dir}/worker-token" ]; then
+  openssl rand -hex 32 >"${secret_dir}/worker-token"
+fi
+chmod 0600 "${secret_dir}/auth-secret" "${secret_dir}/worker-token"
+
+config_file="${state_dir}/config.json"
+cat >"${config_file}" <<EOF_CONFIG
+{
+  "schema_version": 1,
+  "credentials": {
+    "proxy_url": "${proxy_url}",
+    "proxy_ca_path": "${proxy_ca}"
+  },
+  "guest": {
+    "hermes_profile": "main",
+    "model": "${MOM_STAGE_HOST_DEV_MODEL:-openai/gpt-5.5}"
+  },
+  "auth": {
+    "secret_file": "${secret_dir}/auth-secret"
+  }
+}
+EOF_CONFIG
+
+env_file="${state_dir}/dev.env"
+cat >"${env_file}" <<EOF_ENV
+MOM_CONFIG=${config_file}
+MOM_STATE_DIR=${state_dir}/mom
+MOM_UI_DIST=${repo_root}/ui/dist
+MOM_LOG_FORMAT=text
+MOM_NODE_ID=${node_id}
+MOM_API_BIND=${api_bind}
+MOM_API_URL=${api_url}
+MOM_WORKER_BIND=${worker_bind}
+MOM_WORKER_URL=${worker_url}
+MOM_WORKER_URL_ALLOWLIST=${worker_url}
+MOM_WORKER_TOKEN_FILE=${secret_dir}/worker-token
+MOM_MICROVM_STATE_DIR=${runtime_state_dir}
+MOM_MICROVM_WORKSPACE_DIR=${runtime_workspace_dir}
+MOM_MICROVM_BRIDGE=agentmom0
+MOM_MICROVM_CIDR=192.168.83.0/24
+MOM_MICROVM_HOST_IP=192.168.83.1
+MOM_PROXY_BIND=192.168.83.1:1080
+MOM_RUNTIME_SUDO=1
+MOM_SERVICE_TUNNEL_BIND_HOST=127.0.0.1
+MOM_SERVICE_TUNNEL_PORT_RANGE=${service_tunnel_range}
+EOF_ENV
+
+export_env=(
+  "MOM_CONFIG=${config_file}"
+  "MOM_STATE_DIR=${state_dir}/mom"
+  "MOM_UI_DIST=${repo_root}/ui/dist"
+  "MOM_LOG_FORMAT=text"
+  "MOM_NODE_ID=${node_id}"
+  "MOM_API_URL=${api_url}"
+  "MOM_WORKER_BIND=${worker_bind}"
+  "MOM_WORKER_URL=${worker_url}"
+  "MOM_WORKER_URL_ALLOWLIST=${worker_url}"
+  "MOM_WORKER_TOKEN_FILE=${secret_dir}/worker-token"
+  "MOM_MICROVM_STATE_DIR=${runtime_state_dir}"
+  "MOM_MICROVM_WORKSPACE_DIR=${runtime_workspace_dir}"
+  "MOM_MICROVM_BRIDGE=agentmom0"
+  "MOM_MICROVM_CIDR=192.168.83.0/24"
+  "MOM_MICROVM_HOST_IP=192.168.83.1"
+  "MOM_PROXY_BIND=192.168.83.1:1080"
+  "MOM_RUNTIME_SUDO=1"
+  "MOM_SERVICE_TUNNEL_BIND_HOST=127.0.0.1"
+  "MOM_SERVICE_TUNNEL_PORT_RANGE=${service_tunnel_range}"
+  "PATH=${PATH}"
+)
+
+if [ ! -d ui/node_modules ]; then
+  run_step "installing UI deps" "${log_dir}/npm-ci.log" npm --prefix ui ci
+fi
+run_step "building UI" "${log_dir}/ui-build.log" npm --prefix ui run build
+run_step "building mom" "${log_dir}/cargo-build.log" cargo build --bin mom
+
+mkdir -p "${state_dir}/mom"
+env "${export_env[@]}" target/debug/mom api --bind "${api_bind}" >"${log_dir}/api.log" 2>&1 &
+api_pid=$!
+write_pid_file
+wait_for_http "starting API" "${api_url}/health/ready" "${log_dir}/api.log"
+
+sudo -n env "${export_env[@]}" "${repo_root}/target/debug/mom" worker --interval 1 >"${log_dir}/worker.log" 2>&1 &
+worker_pid=$!
+write_pid_file
+wait_for_http "starting worker" "http://${worker_bind}/worker/health" "${log_dir}/worker.log"
+
+cat <<EOF_READY
+
+Agent Mom stage-host dev is running with the real Cloud Hypervisor runtime.
+  API/UI: ${api_url}
+  Logs:   ${log_dir}
+  Env:    ${env_file}
+
+From your Mac:
+  ssh -N -L ${api_port}:127.0.0.1:${api_port} dev@mom-stage-1
+  open http://127.0.0.1:${api_port}/admin
+
+Use dev workspace names prefixed with "dev-" so cleanup is obvious.
+Press Ctrl-C to stop API/worker. MicroVM units keep their normal state.
+EOF_READY
+
+while true; do
+  if ! kill -0 "${api_pid}" >/dev/null 2>&1; then
+    echo "API exited. Last log lines from ${log_dir}/api.log:"
+    tail -n 120 "${log_dir}/api.log" || true
+    exit 1
+  fi
+  if ! sudo -n kill -0 "${worker_pid}" >/dev/null 2>&1; then
+    echo "Worker exited. Last log lines from ${log_dir}/worker.log:"
+    tail -n 120 "${log_dir}/worker.log" || true
+    exit 1
+  fi
+  sleep 2
+done
