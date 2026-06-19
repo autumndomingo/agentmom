@@ -1,6 +1,5 @@
 {
   config,
-  agentgranny2,
   agentmom,
   pkgs,
   inputs,
@@ -9,7 +8,6 @@
   imports = [
     ../common/hetzner-cloud-vps.nix
     ./disk-config.nix
-    agentgranny2.nixosModules.agentgranny2
     agentmom.nixosModules.agentmom
   ];
 
@@ -31,7 +29,7 @@
       basic_auth {
         justin $2a$14$QDfbgZiy1V7A3lIw7C0.huP8tXfFtrLWJbmbhIGNOUspOWarRsXz2
       }
-      reverse_proxy 127.0.0.1:7392
+      reverse_proxy 100.92.189.28:7392
     '';
     virtualHosts."agentmom.xyz".extraConfig = ''
       @mom1Tunnel path_regexp mom1Tunnel ^/tunnels/mom-1/(41[0-9]{3})(/.*)?$
@@ -128,15 +126,6 @@
     credentialProxy.enable = false;
   };
 
-  services.agentgranny2 = {
-    enable = true;
-    package = agentgranny2.packages.${pkgs.stdenv.hostPlatform.system}.agentgranny2;
-    stateDir = "/var/lib/agentgranny2";
-    workspaceDir = "/var/lib/agentgranny2/workspace";
-    openRouterKeyFile = config.age.secrets.agentgranny2-openrouter-api-key.path;
-    smolvm.package = agentgranny2.packages.${pkgs.stdenv.hostPlatform.system}.smolvm;
-  };
-
   systemd.tmpfiles.rules = [
     "Z /var/lib/agentmom 0750 agentmom agentmom - -"
   ];
@@ -165,12 +154,5 @@
     group = "agentmom";
     mode = "0400";
   };
-  age.secrets.agentgranny2-openrouter-api-key = {
-    file = ../../secrets/openrouter-api-key.age;
-    owner = "agentgranny2";
-    group = "agentgranny2";
-    mode = "0400";
-  };
-
   system.stateVersion = "25.05";
 }

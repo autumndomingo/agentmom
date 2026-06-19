@@ -30,11 +30,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1781831314,
-        "narHash": "sha256-aVtdI036LlFG3qXQquhBj35Jcx8mV8ztzNXtgJu2Md0=",
+        "lastModified": 1781832454,
+        "narHash": "sha256-VMTaUCrHC1PP8aTXBmIvQYbZYn8eVmrGO40hodQaXvw=",
         "ref": "master",
-        "rev": "23b2ba0b230967abf0daa101b186f317c11d8b98",
-        "revCount": 5,
+        "rev": "5d09cc19df09be8694293e67b0cc8ac5fc81cf80",
+        "revCount": 6,
         "type": "git",
         "url": "ssh://git@github.com/justinmoon/agentgranny2.git"
       },
