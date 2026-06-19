@@ -12,6 +12,7 @@ let
   specialArgs = {
     inherit inputs microvm;
     agentmom = self;
+    agentgranny2 = inputs.agentgranny2;
   };
   mkNodeModules = node: [
     disko.nixosModules.disko

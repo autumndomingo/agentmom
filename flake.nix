@@ -28,6 +28,10 @@
       url = "github:NousResearch/hermes-agent";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    agentgranny2 = {
+      url = "git+ssh://git@github.com/justinmoon/agentgranny2.git?ref=master";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs = { self, nixpkgs, crane, rust-overlay, microvm, disko, colmena, hermes-agent, ... } @ inputs:

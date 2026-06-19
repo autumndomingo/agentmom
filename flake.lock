@@ -23,6 +23,27 @@
         "type": "github"
       }
     },
+    "agentgranny2": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1781831066,
+        "narHash": "sha256-jDH9U321vfHG4v1xI2Xr/7keg8riDrvlKV5M51kqfbg=",
+        "ref": "master",
+        "rev": "1acb5b922a58603c024e735da634065014caf78c",
+        "revCount": 4,
+        "type": "git",
+        "url": "ssh://git@github.com/justinmoon/agentgranny2.git"
+      },
+      "original": {
+        "ref": "master",
+        "type": "git",
+        "url": "ssh://git@github.com/justinmoon/agentgranny2.git"
+      }
+    },
     "colmena": {
       "inputs": {
         "flake-compat": "flake-compat",
@@ -372,6 +393,7 @@
     "root": {
       "inputs": {
         "agenix": "agenix",
+        "agentgranny2": "agentgranny2",
         "colmena": "colmena",
         "crane": "crane",
         "disko": "disko",
