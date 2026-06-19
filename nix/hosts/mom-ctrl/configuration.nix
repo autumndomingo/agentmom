@@ -26,9 +26,6 @@
   services.caddy = {
     enable = true;
     virtualHosts."granny.agentmom.xyz".extraConfig = ''
-      basic_auth {
-        justin $2a$14$QDfbgZiy1V7A3lIw7C0.huP8tXfFtrLWJbmbhIGNOUspOWarRsXz2
-      }
       reverse_proxy 100.92.189.28:7392
     '';
     virtualHosts."agentmom.xyz".extraConfig = ''
