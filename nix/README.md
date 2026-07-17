@@ -15,7 +15,7 @@ check against the local service on the host.
 The equivalent direct NixOS switch is:
 
 ```bash
-nixos-rebuild switch --flake .#mom-1 --target-host mom-1
+nixos-rebuild switch --flake .#mom-1 --target-host justin@mom-1.quokka-fir.ts.net
 ```
 
 If another repo owns the surrounding host config, it should only import one of
@@ -67,4 +67,5 @@ RULES=nix/secrets/secrets.nix agenix -e nix/secrets/secrets.age -i ~/configs/yub
 ```
 
 The stage and prod host modules assume Caddy runs on the same host as the app.
-For prod, `agentmom.xyz` and `*.agentmom.xyz` should point at `mom-1`.
+For prod, `agentmom.xyz` and `*.agentmom.xyz` should point at
+`mom-1.quokka-fir.ts.net`.

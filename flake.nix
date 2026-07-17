@@ -103,7 +103,7 @@
 
         mom-1 = mkColmenaNode {
           module = ./nix/hosts/mom-1/configuration.nix;
-          targetHost = "mom-1";
+          targetHost = "mom-1.quokka-fir.ts.net";
           tags = [ "agentmom" "prod" ];
         };
 

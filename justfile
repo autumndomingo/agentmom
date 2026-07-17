@@ -1,5 +1,6 @@
 set dotenv-load := false
 
+prod_host := "justin@mom-1.quokka-fir.ts.net"
 stage_host := "justin@100.92.189.28"
 
 dev:
@@ -60,7 +61,7 @@ check-prod:
     #!/usr/bin/env bash
     set -euo pipefail
 
-    ssh mom-1 'bash -se' <<'REMOTE'
+    ssh {{prod_host}} 'bash -se' <<'REMOTE'
     set -euo pipefail
 
     for attempt in $(seq 1 60); do
