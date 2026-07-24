@@ -220,7 +220,7 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
     deploymentDir: resolve(process.env.AGENTMOM_DEPLOYMENT_DIR ?? `${stateDir}/deployments`),
     deploymentBaseDomain: domainFromEnv("AGENTMOM_DEPLOYMENT_BASE_DOMAIN"),
     previewBasePath: process.env.AGENTMOM_PREVIEW_BASE_PATH ?? "/preview",
-    openRouterModel: process.env.AGENTMOM_OPENROUTER_MODEL ?? "anthropic/claude-sonnet-4.6",
+    openRouterModel: process.env.AGENTMOM_OPENROUTER_MODEL ?? "openai/gpt-5.6-luna",
     thinkingLevel: thinkingLevelFromEnv("AGENTMOM_THINKING_LEVEL", "low"),
     appEnvFile,
     openRouterApiKey,

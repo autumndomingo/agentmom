@@ -2,10 +2,8 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, watch, type FSWatcher } from "node:fs";
 import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
 import { basename, extname, isAbsolute, join, relative, resolve } from "node:path";
-import { getModel } from "@earendil-works/pi-ai";
-import type { AssistantMessage, ImageContent, Model, TextContent, UserMessage } from "@earendil-works/pi-ai";
+import type { AssistantMessage, ImageContent, TextContent, UserMessage } from "@earendil-works/pi-ai";
 import {
-  AuthStorage,
   createAgentSession,
   createBashToolDefinition,
   createEditToolDefinition,
@@ -13,7 +11,7 @@ import {
   createReadToolDefinition,
   createWriteToolDefinition,
   DefaultResourceLoader,
-  ModelRegistry,
+  ModelRuntime,
   SessionManager,
   type AgentSession,
   type AgentSessionEvent,
@@ -137,15 +135,15 @@ export class PiBridge {
     ensureSkillRoots(this.config);
     const previewCli = this.previews.cliInstall();
 
-    const authStorage = AuthStorage.create(join(this.config.agentDir, "auth.json"));
+    const modelRuntime = await ModelRuntime.create({
+      authPath: join(this.config.agentDir, "auth.json"),
+      modelsPath: join(this.config.agentDir, "models.json")
+    });
     if (this.config.openRouterApiKey) {
-      authStorage.setRuntimeApiKey("openrouter", this.config.openRouterApiKey);
+      await modelRuntime.setRuntimeApiKey("openrouter", this.config.openRouterApiKey);
     }
 
-    const modelRegistry = ModelRegistry.create(authStorage, join(this.config.agentDir, "models.json"));
-    const model =
-      modelRegistry.find("openrouter", this.config.openRouterModel) ??
-      (getModel("openrouter", this.config.openRouterModel as never) as Model<any> | undefined);
+    const model = modelRuntime.getModel("openrouter", this.config.openRouterModel);
     if (!model) {
       throw new Error(`OpenRouter model not found: ${this.config.openRouterModel}`);
     }
@@ -200,8 +198,7 @@ export class PiBridge {
     const { session, modelFallbackMessage } = await createAgentSession({
       cwd: this.config.agentCwd,
       agentDir: this.config.agentDir,
-      authStorage,
-      modelRegistry,
+      modelRuntime,
       model,
       thinkingLevel: this.config.thinkingLevel,
       sessionManager,
