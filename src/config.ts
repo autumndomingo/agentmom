@@ -221,7 +221,7 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
     deploymentBaseDomain: domainFromEnv("AGENTMOM_DEPLOYMENT_BASE_DOMAIN"),
     previewBasePath: process.env.AGENTMOM_PREVIEW_BASE_PATH ?? "/preview",
     openRouterModel: process.env.AGENTMOM_OPENROUTER_MODEL ?? "openai/gpt-5.6-luna",
-    thinkingLevel: thinkingLevelFromEnv("AGENTMOM_THINKING_LEVEL", "low"),
+    thinkingLevel: thinkingLevelFromEnv("AGENTMOM_THINKING_LEVEL", "medium"),
     appEnvFile,
     openRouterApiKey,
     braveApiKey,
