@@ -1,8 +1,7 @@
 import { teachingTokenCount, teachingTokens } from "./tokenizer.js";
 
-const OUTBOUND_HOLD_MS = 10_000;
 const OUTBOUND_TRAVEL_MS = 3_000;
-const OUTBOUND_ARRIVAL_MS = 1_000;
+const OUTBOUND_ARRIVAL_MS = 600;
 const INBOUND_TRAVEL_MS = 2_400;
 
 const transcriptEl = document.querySelector("#transcript");
@@ -62,6 +61,7 @@ const state = {
   },
   comparisonBusy: false,
   thinkingBusy: false,
+  awaitingModelStart: false,
 };
 
 function textPart(text) {
@@ -519,14 +519,23 @@ async function animateWirePacket(payload, direction) {
   const explanation = document.querySelector("#wire-explanation");
   const explanationTitle = document.querySelector("#wire-explanation-title");
   const explanationCopy = document.querySelector("#wire-explanation-copy");
-  if (!packet || !caption || !track || !explanation || !explanationTitle || !explanationCopy) return;
+  const continueButton = document.querySelector("#wire-continue");
+  if (
+    !packet ||
+    !caption ||
+    !track ||
+    !explanation ||
+    !explanationTitle ||
+    !explanationCopy ||
+    !continueButton
+  ) return;
 
   packet.replaceChildren();
   if (direction === "outbound") {
     packet.append(makeSnapshotPayload(payload, "Sent to model"));
     explanationTitle.textContent = "Every new prompt resends the entire conversation";
     explanationCopy.textContent =
-      "This is the complete model input: the system prompt, your new message, and the entire conversation transcript so far. It will hover here for 10 seconds so you can inspect it before the agent sends it all to the model again.";
+      "This is the complete model input: the system prompt, your new message, and the entire conversation transcript so far. Watch the agent send all of it to the model again.";
   } else {
     const token = document.createElement("span");
     token.className = "wire-token";
@@ -538,11 +547,12 @@ async function animateWirePacket(payload, direction) {
   }
   explanation.hidden = false;
   explanation.className = `wire-explanation ${direction}`;
+  continueButton.hidden = true;
   packet.hidden = false;
   packet.className = `moving-packet ${direction}`;
   caption.textContent =
     direction === "outbound"
-      ? "The complete transcript is pausing for 10 seconds before it travels to the model."
+      ? "The complete transcript is traveling from the agent to the model."
       : "Response tokens are now traveling from the model back to the agent.";
 
   const trackHeight = Math.max(220, packet.scrollHeight + 48);
@@ -554,8 +564,7 @@ async function animateWirePacket(payload, direction) {
     direction === "outbound"
       ? [
           { transform: "translateX(0)", offset: 0 },
-          { transform: "translateX(0)", offset: OUTBOUND_HOLD_MS / (OUTBOUND_HOLD_MS + OUTBOUND_TRAVEL_MS + OUTBOUND_ARRIVAL_MS) },
-          { transform: `translateX(${distance}px)`, offset: (OUTBOUND_HOLD_MS + OUTBOUND_TRAVEL_MS) / (OUTBOUND_HOLD_MS + OUTBOUND_TRAVEL_MS + OUTBOUND_ARRIVAL_MS) },
+          { transform: `translateX(${distance}px)`, offset: OUTBOUND_TRAVEL_MS / (OUTBOUND_TRAVEL_MS + OUTBOUND_ARRIVAL_MS) },
           { transform: `translateX(${distance}px)`, offset: 1 },
         ]
       : [
@@ -568,13 +577,29 @@ async function animateWirePacket(payload, direction) {
       duration: reducedMotion
         ? 1
         : direction === "outbound"
-          ? OUTBOUND_HOLD_MS + OUTBOUND_TRAVEL_MS + OUTBOUND_ARRIVAL_MS
+          ? OUTBOUND_TRAVEL_MS + OUTBOUND_ARRIVAL_MS
           : INBOUND_TRAVEL_MS,
       easing: direction === "outbound" ? "ease-in-out" : "ease-out",
       fill: "forwards",
     },
   );
   await animation.finished;
+
+  if (direction === "outbound") {
+    caption.textContent = "The full transcript is now at the model. Continue when you are ready.";
+    explanationTitle.textContent = "The model has the full conversation—but has not answered yet";
+    explanationCopy.textContent =
+      "The request is paused at the model. Click the button when you are ready to let the model process this transcript and stream response tokens back to the agent.";
+    continueButton.hidden = false;
+    state.awaitingModelStart = true;
+    for (const tab of tabs) tab.disabled = true;
+    continueButton.focus();
+    await new Promise((resolve) => continueButton.addEventListener("click", resolve, { once: true }));
+    state.awaitingModelStart = false;
+    for (const tab of tabs) tab.disabled = false;
+    caption.textContent = "The model is starting its response.";
+  }
+
   animation.cancel();
   packet.hidden = true;
   packet.className = "moving-packet";
@@ -1043,6 +1068,7 @@ thinkingFormEl.addEventListener("submit", async (event) => {
 
 for (const tab of tabs) {
   tab.addEventListener("click", () => {
+    if (state.awaitingModelStart) return;
     state.view = tab.dataset.view;
     workspaceEl.dataset.view = state.view;
     const comparing = state.view === "compare";

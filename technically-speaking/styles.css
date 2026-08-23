@@ -633,6 +633,10 @@ h2 {
 }
 
 .wire-explanation {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
   max-width: 680px;
   margin: 14px auto 0;
   padding: 14px 16px;
@@ -649,18 +653,34 @@ h2 {
   border-left-color: var(--model);
 }
 
-.wire-explanation strong {
+.wire-explanation-text strong {
   display: block;
   margin-bottom: 5px;
   color: var(--ink);
   font-size: 0.9rem;
 }
 
-.wire-explanation p {
+.wire-explanation-text p {
   margin: 0;
   color: var(--muted);
   font-size: 0.82rem;
   line-height: 1.5;
+}
+
+.wire-continue {
+  padding: 9px 12px;
+  border-color: var(--model);
+  background: var(--model);
+  color: var(--surface);
+  white-space: nowrap;
+}
+
+.wire-continue:hover {
+  filter: brightness(1.08);
+}
+
+.wire-continue:focus-visible {
+  outline-color: var(--model);
 }
 
 @keyframes explanation-in {
@@ -678,6 +698,16 @@ h2 {
 @media (prefers-reduced-motion: reduce) {
   .wire-explanation {
     animation: none;
+  }
+}
+
+@media (max-width: 560px) {
+  .wire-explanation {
+    grid-template-columns: 1fr;
+  }
+
+  .wire-continue {
+    justify-self: start;
   }
 }
 
