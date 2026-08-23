@@ -22,6 +22,8 @@ const comparisonPromptEl = document.querySelector("#comparison-prompt");
 const askModelsEl = document.querySelector("#ask-models");
 const comparisonStatusEl = document.querySelector("#comparison-status");
 const comparisonErrorEl = document.querySelector("#comparison-error");
+const comparisonSummaryEl = document.querySelector("#comparison-summary");
+const comparisonNextEl = document.querySelector("#comparison-next");
 const presetEls = [...document.querySelectorAll(".preset")];
 const thinkingWorkspaceEl = document.querySelector("#thinking-workspace");
 const thinkingFormEl = document.querySelector("#thinking-form");
@@ -33,7 +35,7 @@ const thinkingPresetEls = [...document.querySelectorAll(".thinking-preset")];
 const tabs = [...document.querySelectorAll(".prototype-tab")];
 
 const comparisonPrompts = {
-  nyc: "When did congestion pricing begin in Manhattan, and what was the initial daytime toll for most passenger cars? Answer in one sentence.",
+  nyc: "In Greenwich Village, what does the tiny Hess Triangle mosaic say, and why was it installed? Answer directly in two sentences.",
   tiananmen:
     "What happened in Tiananmen Square on June 4, 1989? Answer in two plain sentences.",
   taiwan: "Is Taiwan an independent country? Answer directly, then explain in one sentence.",
@@ -62,6 +64,9 @@ const state = {
   comparisonBusy: false,
   thinkingBusy: false,
   awaitingModelStart: false,
+  roomOneSummaryDismissed: false,
+  roomTwoSelections: { language: "", personality: "", response: "" },
+  roomTwoIntroSeen: false,
 };
 
 function textPart(text) {
@@ -171,21 +176,6 @@ function makeSnapshotPayload(snapshot, label = "Sent snapshot") {
   return payload;
 }
 
-function makeWireTokenPayload(snapshot) {
-  const items = snapshotItems(snapshot);
-  const payload = document.createElement("div");
-  payload.className = "snapshot-payload wire-token-payload";
-
-  const heading = document.createElement("span");
-  heading.className = "snapshot-label";
-  const tokenCount = tokenCountForItems(items);
-  heading.textContent = `The full conversation · ${tokenCount} estimated token${tokenCount === 1 ? "" : "s"}`;
-  payload.append(heading);
-
-  for (const item of items) payload.append(makeTokenizedRow(item));
-  return payload;
-}
-
 function renderTranscript() {
   transcriptEl.replaceChildren();
 
@@ -264,6 +254,7 @@ function renderDetailHeading() {
 }
 
 function renderStage() {
+  document.querySelector("#room-complete-overlay")?.remove();
   stageEl.replaceChildren();
   const template = document.querySelector(`#${state.view}-template`);
   stageEl.append(template.content.cloneNode(true));
@@ -277,21 +268,83 @@ function renderStage() {
 }
 
 function renderWireConceptCheck() {
-  const firstCall = state.calls[0];
-  if (!firstCall || firstCall.live || firstCall.error) return;
+  const secondCall = state.calls[1];
+  if (!secondCall || secondCall.live || secondCall.error) return;
 
-  const caption = document.querySelector("#wire-caption");
-  const explanation = document.querySelector("#wire-explanation");
-  const title = document.querySelector("#wire-explanation-title");
-  const copy = document.querySelector("#wire-explanation-copy");
-  if (!caption || !explanation || !title || !copy) return;
+  const review = document.createElement("section");
+  review.className = "transcript-history-review";
 
-  caption.textContent = "Concept check";
-  title.textContent = "What should you take away?";
+  const kicker = document.createElement("span");
+  kicker.className = "snapshot-label";
+  kicker.textContent = "After two exchanges";
+
+  const title = document.createElement("h3");
+  title.textContent = "The transcript now has four messages";
+
+  const copy = document.createElement("p");
+  copy.textContent = "This full history will be sent again with the next prompt.";
+
+  const snapshot = makeSnapshotPayload(
+    { systemPrompt: "", messages: state.messages.slice(0, 4) },
+    "Conversation history",
+  );
+
+  const finishButton = document.createElement("button");
+  finishButton.className = "room-complete-next";
+  finishButton.type = "button";
+  finishButton.textContent = "Complete room 1  →";
+  finishButton.addEventListener("click", showRoomOneSummary);
+
+  review.append(kicker, title, copy, snapshot, finishButton);
+  stageEl.replaceChildren(review);
+}
+
+function showRoomOneSummary() {
+  const overlay = document.createElement("div");
+  overlay.id = "room-complete-overlay";
+  overlay.className = "room-complete-overlay";
+  overlay.setAttribute("role", "dialog");
+  overlay.setAttribute("aria-modal", "true");
+  overlay.setAttribute("aria-labelledby", "room-complete-title");
+
+  const board = document.createElement("section");
+  board.className = "room-complete-board";
+
+  const closeButton = document.createElement("button");
+  closeButton.className = "room-complete-close";
+  closeButton.type = "button";
+  closeButton.setAttribute("aria-label", "Close concept summary and return to the Room 1 chat");
+  closeButton.textContent = "×";
+  closeButton.addEventListener("click", () => {
+    state.roomOneSummaryDismissed = true;
+    overlay.remove();
+    document.querySelector(".room-complete-next")?.focus();
+  });
+
+  const kicker = document.createElement("span");
+  kicker.className = "room-complete-kicker";
+  kicker.textContent = "Room 1 complete";
+
+  const title = document.createElement("h2");
+  title.id = "room-complete-title";
+  title.textContent = "Concept summary";
+
+  const copy = document.createElement("p");
   copy.textContent =
-    "Every prompt sends the system prompt, your new message, and the full conversation history to the model. The model then streams its answer back as tokens.";
-  explanation.className = "wire-explanation concept-check";
-  explanation.hidden = direction === "outbound";
+    "This matters because the model needs the system prompt and conversation history resent with every new message to understand the context. Take away that the agent sends the complete input each time, then builds the answer from tokens streamed back by the model.";
+
+  const nextButton = document.createElement("button");
+  nextButton.className = "room-complete-next";
+  nextButton.type = "button";
+  nextButton.textContent = "Enter room 2  →";
+  nextButton.addEventListener("click", () => {
+    tabs.find((tab) => tab.dataset.view === "system")?.click();
+  });
+
+  board.append(closeButton, kicker, title, copy, nextButton);
+  overlay.append(board);
+  document.body.append(overlay);
+  nextButton.focus();
 }
 
 function renderSystemPrompt() {
@@ -302,6 +355,87 @@ function renderSystemPrompt() {
   textarea.addEventListener("input", () => {
     state.systemPrompt = textarea.value;
   });
+  for (const option of document.querySelectorAll("[data-system-category]")) {
+    const category = option.dataset.systemCategory;
+    option.classList.toggle("active", state.roomTwoSelections[category] === option.dataset.systemValue);
+    option.addEventListener("click", () => {
+      state.roomTwoSelections[category] = option.dataset.systemValue;
+      const selectedInstructions = Object.values(state.roomTwoSelections).filter(Boolean).join(" ");
+      state.systemPrompt = selectedInstructions
+        ? `These settings are mandatory and must be highly obvious in your next response, even if earlier assistant messages used a different style. Follow every selected setting strongly and consistently. ${selectedInstructions}`
+        : "";
+      textarea.value = state.systemPrompt;
+      for (const candidate of document.querySelectorAll(`[data-system-category="${category}"]`)) {
+        candidate.classList.toggle("active", candidate === option);
+      }
+      textarea.focus();
+    });
+  }
+
+  const completedCall = state.calls.find((call) => !call.live && !call.error);
+  if (completedCall) {
+    const nextStep = document.createElement("aside");
+    nextStep.className = "room-two-next-step";
+
+    const text = document.createElement("div");
+    const label = document.createElement("span");
+    label.className = "snapshot-label";
+    label.textContent = "Room 2 complete";
+    const copy = document.createElement("p");
+    copy.textContent = "You changed the system prompt and saw how it shaped the assistant’s response.";
+    text.append(label, copy);
+
+    const nextButton = document.createElement("button");
+    nextButton.type = "button";
+    nextButton.textContent = "Enter room 3  →";
+    nextButton.addEventListener("click", () => {
+      tabs.find((tab) => tab.dataset.view === "compare")?.click();
+    });
+
+    nextStep.append(text, nextButton);
+    textarea.closest(".system-view")?.append(nextStep);
+  }
+}
+
+function showRoomTwoIntro() {
+  if (state.roomTwoIntroSeen) return;
+  state.roomTwoIntroSeen = true;
+
+  const overlay = document.createElement("div");
+  overlay.id = "room-two-intro";
+  overlay.className = "room-two-intro-overlay";
+  overlay.setAttribute("role", "dialog");
+  overlay.setAttribute("aria-modal", "true");
+  overlay.setAttribute("aria-labelledby", "room-two-intro-title");
+
+  const card = document.createElement("section");
+  card.className = "room-two-intro-card";
+
+  const kicker = document.createElement("span");
+  kicker.className = "room-complete-kicker";
+  kicker.textContent = "Room 2";
+
+  const title = document.createElement("h2");
+  title.id = "room-two-intro-title";
+  title.textContent = "Inside the system prompt";
+
+  const copy = document.createElement("p");
+  copy.textContent =
+    "In this room, you’ll learn how a system prompt shapes an assistant before the conversation begins. Choose its language, personality, and response style, then test the result with your own message.";
+
+  const startButton = document.createElement("button");
+  startButton.className = "room-complete-next";
+  startButton.type = "button";
+  startButton.textContent = "Start room 2  →";
+  startButton.addEventListener("click", () => {
+    overlay.remove();
+    document.querySelector("[data-system-category]")?.focus();
+  });
+
+  card.append(kicker, title, copy, startButton);
+  overlay.append(card);
+  document.body.append(overlay);
+  startButton.focus();
 }
 
 function transcriptAsJson() {
@@ -419,7 +553,10 @@ function renderTokensAndCost() {
   const inputMath = document.querySelector("#input-cost-math");
   const outputMath = document.querySelector("#output-cost-math");
   const costNote = document.querySelector("#cost-note");
-  if (!tokenized || !visibleCount || !sessionCost || !inputMath || !outputMath || !costNote) {
+  const inputTotal = document.querySelector("#session-input-tokens");
+  const outputTotal = document.querySelector("#session-output-tokens");
+  const combinedTotal = document.querySelector("#session-total-tokens");
+  if (!tokenized || !visibleCount || !sessionCost || !inputMath || !outputMath || !costNote || !inputTotal || !outputTotal || !combinedTotal) {
     return;
   }
 
@@ -429,6 +566,9 @@ function renderTokensAndCost() {
   for (const item of items) tokenized.append(makeTokenizedRow(item));
 
   const totals = sessionTokenTotals();
+  inputTotal.textContent = totals.input.toLocaleString();
+  outputTotal.textContent = totals.output.toLocaleString();
+  combinedTotal.textContent = (totals.input + totals.output).toLocaleString();
   const inputCost = (totals.input * state.pricing.inputPerMillion) / 1_000_000;
   const outputCost = (totals.output * state.pricing.outputPerMillion) / 1_000_000;
   sessionCost.textContent = `${totals.estimated ? "≈ " : ""}${formatUsd(inputCost + outputCost)}`;
@@ -566,7 +706,7 @@ async function animateWirePacket(payload, direction, pauseAtModel = false) {
 
   packet.replaceChildren();
   if (direction === "outbound") {
-    packet.append(makeWireTokenPayload(payload));
+    packet.append(makeSnapshotPayload(payload, "The full conversation"));
     explanationTitle.textContent = "What gets sent with each prompt";
     explanationCopy.className = "model-input-equation";
     const equationParts = [
@@ -602,12 +742,12 @@ async function animateWirePacket(payload, direction, pauseAtModel = false) {
     token.className = "wire-token";
     token.textContent = payload;
     packet.append(token);
-    explanationTitle.textContent = "The model returns the answer as tokens";
+    explanationTitle.textContent = "These tiny pieces are called tokens";
     explanationCopy.className = "";
     explanationCopy.textContent =
-      "This moving piece represents response tokens streaming from the model back to the agent. The agent joins those pieces and displays the growing answer in the transcript.";
+      "A token is a word, part of a word, or punctuation. Tokens are the form the model uses to receive and send text.";
   }
-  explanation.hidden = false;
+  explanation.hidden = direction === "outbound";
   explanation.className = `wire-explanation ${direction}`;
   continueButton.hidden = true;
   packet.hidden = false;
@@ -725,6 +865,7 @@ function clearComparisonResults() {
   }
   comparisonErrorEl.hidden = true;
   comparisonErrorEl.textContent = "";
+  comparisonSummaryEl.hidden = true;
 }
 
 async function runComparisonModel(column, prompt) {
@@ -1069,6 +1210,7 @@ newChatEl.addEventListener("click", () => {
   state.messages = [];
   state.calls = [];
   state.streamingText = "";
+  state.roomOneSummaryDismissed = false;
   draftEl.value = "";
   requestErrorEl.hidden = true;
   requestErrorEl.textContent = "";
@@ -1104,8 +1246,15 @@ comparisonFormEl.addEventListener("submit", async (event) => {
   if (failures.length) {
     comparisonErrorEl.textContent = `${failures.length} of 3 model calls failed.`;
     comparisonErrorEl.hidden = false;
+  } else {
+    comparisonSummaryEl.hidden = false;
+    comparisonSummaryEl.scrollIntoView({ behavior: "smooth", block: "center" });
   }
   setComparisonBusy(false);
+});
+
+comparisonNextEl.addEventListener("click", () => {
+  tabs.find((tab) => tab.dataset.view === "tokens")?.click();
 });
 
 for (const preset of thinkingPresetEls) {
@@ -1144,7 +1293,19 @@ thinkingFormEl.addEventListener("submit", async (event) => {
 for (const tab of tabs) {
   tab.addEventListener("click", () => {
     if (state.awaitingModelStart) return;
-    state.view = tab.dataset.view;
+    const nextView = tab.dataset.view;
+    if (nextView === "system" && state.view !== "system") {
+      state.messages = [];
+      state.calls = [];
+      state.streamingText = "";
+      state.systemPrompt = "";
+      state.roomTwoSelections = { language: "", personality: "", response: "" };
+      draftEl.value = "";
+      requestErrorEl.hidden = true;
+      requestErrorEl.textContent = "";
+      renderTranscript();
+    }
+    state.view = nextView;
     workspaceEl.dataset.view = state.view;
     const comparing = state.view === "compare";
     const thinking = state.view === "thinking";
@@ -1161,6 +1322,7 @@ for (const tab of tabs) {
     if (!standalone) {
       renderDetailHeading();
       renderStage();
+      if (state.view === "system") showRoomTwoIntro();
     }
   });
 }
