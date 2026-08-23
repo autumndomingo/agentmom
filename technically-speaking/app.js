@@ -2,7 +2,7 @@ import { teachingTokenCount, teachingTokens } from "./tokenizer.js";
 
 const OUTBOUND_TRAVEL_MS = 3_000;
 const OUTBOUND_ARRIVAL_MS = 600;
-const INBOUND_TRAVEL_MS = 2_400;
+const INBOUND_TRAVEL_MS = 900;
 
 const transcriptEl = document.querySelector("#transcript");
 const draftEl = document.querySelector("#draft");
@@ -535,7 +535,7 @@ async function animateWirePacket(payload, direction) {
     packet.append(makeSnapshotPayload(payload, "Sent to model"));
     explanationTitle.textContent = "Every new prompt resends the entire conversation";
     explanationCopy.textContent =
-      "This is the complete model input: the system prompt, your new message, and the entire conversation transcript so far. Watch the agent send all of it to the model again.";
+      "This is the complete model input: the system prompt, your new message, and the entire conversation transcript so far. Take as long as you need to inspect it, then send all of it to the model again.";
   } else {
     const token = document.createElement("span");
     token.className = "wire-token";
@@ -552,13 +552,25 @@ async function animateWirePacket(payload, direction) {
   packet.className = `moving-packet ${direction}`;
   caption.textContent =
     direction === "outbound"
-      ? "The complete transcript is traveling from the agent to the model."
+      ? "Review the complete transcript, then continue when you are ready."
       : "Response tokens are now traveling from the model back to the agent.";
 
   const trackHeight = Math.max(220, packet.scrollHeight + 48);
   track.style.height = `${trackHeight}px`;
   packet.style.top = `${Math.max(0, (trackHeight - packet.offsetHeight) / 2)}px`;
   const distance = Math.max(0, track.clientWidth - packet.offsetWidth);
+
+  if (direction === "outbound") {
+    state.awaitingModelStart = true;
+    for (const tab of tabs) tab.disabled = true;
+    continueButton.textContent = "Send transcript to model →";
+    continueButton.hidden = false;
+    continueButton.focus();
+    await new Promise((resolve) => continueButton.addEventListener("click", resolve, { once: true }));
+    continueButton.hidden = true;
+    caption.textContent = "The complete transcript is traveling from the agent to the model.";
+  }
+
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   const animation = packet.animate(
     direction === "outbound"
@@ -590,9 +602,8 @@ async function animateWirePacket(payload, direction) {
     explanationTitle.textContent = "The model has the full conversation—but has not answered yet";
     explanationCopy.textContent =
       "The request is paused at the model. Click the button when you are ready to let the model process this transcript and stream response tokens back to the agent.";
+    continueButton.textContent = "Start model response →";
     continueButton.hidden = false;
-    state.awaitingModelStart = true;
-    for (const tab of tabs) tab.disabled = true;
     continueButton.focus();
     await new Promise((resolve) => continueButton.addEventListener("click", resolve, { once: true }));
     state.awaitingModelStart = false;
@@ -615,6 +626,7 @@ function addCall(snapshot) {
     live: true,
     usage: null,
     error: null,
+    animatedInboundPiece: false,
   };
   state.calls.push(call);
   return call;
@@ -873,7 +885,12 @@ async function runThinkingLevel(column, prompt) {
 
 async function applyStreamEvent(call, event) {
   if (event.type === "delta" && typeof event.text === "string") {
-    await animateWirePacket(event.text, "inbound");
+    // One animated piece is enough to demonstrate streaming. Animating every
+    // delta serially makes long answers take seconds per chunk to display.
+    if (!call.animatedInboundPiece) {
+      call.animatedInboundPiece = true;
+      await animateWirePacket(event.text, "inbound");
+    }
     call.tokens.push(event.text);
     state.streamingText += event.text;
     renderTranscript();
