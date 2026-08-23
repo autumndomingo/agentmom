@@ -1,5 +1,10 @@
 import { teachingTokenCount, teachingTokens } from "./tokenizer.js";
 
+const OUTBOUND_HOLD_MS = 10_000;
+const OUTBOUND_TRAVEL_MS = 3_000;
+const OUTBOUND_ARRIVAL_MS = 1_000;
+const INBOUND_TRAVEL_MS = 2_400;
+
 const transcriptEl = document.querySelector("#transcript");
 const draftEl = document.querySelector("#draft");
 const composerEl = document.querySelector("#composer");
@@ -519,9 +524,9 @@ async function animateWirePacket(payload, direction) {
   packet.replaceChildren();
   if (direction === "outbound") {
     packet.append(makeSnapshotPayload(payload, "Sent to model"));
-    explanationTitle.textContent = "The whole conversation goes back to the model";
+    explanationTitle.textContent = "Every new prompt resends the entire conversation";
     explanationCopy.textContent =
-      "Each new prompt creates a new model call. The agent sends the system prompt, your new message, and the transcript so far together so the model has the context it needs to answer.";
+      "This is the complete model input: the system prompt, your new message, and the entire conversation transcript so far. It will hover here for 10 seconds so you can inspect it before the agent sends it all to the model again.";
   } else {
     const token = document.createElement("span");
     token.className = "wire-token";
@@ -537,7 +542,7 @@ async function animateWirePacket(payload, direction) {
   packet.className = `moving-packet ${direction}`;
   caption.textContent =
     direction === "outbound"
-      ? "The transcript pauses here, then travels from the agent to the model."
+      ? "The complete transcript is pausing for 10 seconds before it travels to the model."
       : "Response tokens are now traveling from the model back to the agent.";
 
   const trackHeight = Math.max(220, packet.scrollHeight + 48);
@@ -549,8 +554,8 @@ async function animateWirePacket(payload, direction) {
     direction === "outbound"
       ? [
           { transform: "translateX(0)", offset: 0 },
-          { transform: "translateX(0)", offset: 0.34 },
-          { transform: `translateX(${distance}px)`, offset: 0.9 },
+          { transform: "translateX(0)", offset: OUTBOUND_HOLD_MS / (OUTBOUND_HOLD_MS + OUTBOUND_TRAVEL_MS + OUTBOUND_ARRIVAL_MS) },
+          { transform: `translateX(${distance}px)`, offset: (OUTBOUND_HOLD_MS + OUTBOUND_TRAVEL_MS) / (OUTBOUND_HOLD_MS + OUTBOUND_TRAVEL_MS + OUTBOUND_ARRIVAL_MS) },
           { transform: `translateX(${distance}px)`, offset: 1 },
         ]
       : [
@@ -560,7 +565,11 @@ async function animateWirePacket(payload, direction) {
           { transform: "translateX(0)", opacity: 0.7, offset: 1 },
         ],
     {
-      duration: reducedMotion ? 1 : direction === "outbound" ? 5200 : 1400,
+      duration: reducedMotion
+        ? 1
+        : direction === "outbound"
+          ? OUTBOUND_HOLD_MS + OUTBOUND_TRAVEL_MS + OUTBOUND_ARRIVAL_MS
+          : INBOUND_TRAVEL_MS,
       easing: direction === "outbound" ? "ease-in-out" : "ease-out",
       fill: "forwards",
     },
