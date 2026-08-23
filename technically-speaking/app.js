@@ -1,8 +1,8 @@
 import { teachingTokenCount, teachingTokens } from "./tokenizer.js";
 
-const OUTBOUND_TRAVEL_MS = 3_000;
-const OUTBOUND_ARRIVAL_MS = 600;
-const INBOUND_TRAVEL_MS = 900;
+const OUTBOUND_TRAVEL_MS = 1_500;
+const OUTBOUND_ARRIVAL_MS = 300;
+const INBOUND_TRAVEL_MS = 180;
 
 const transcriptEl = document.querySelector("#transcript");
 const draftEl = document.querySelector("#draft");
@@ -227,20 +227,20 @@ function setThinkingBusy(busy) {
 
 function renderDetailHeading() {
   if (state.view === "system") {
-    detailKickerEl.textContent = "Agent";
+    detailKickerEl.textContent = "Clue station · Agent";
     modelTitleEl.textContent = "System prompt";
     modelStatusEl.textContent = state.busy ? "Locked" : "Editable";
   } else if (state.view === "json") {
-    detailKickerEl.textContent = "Agent";
+    detailKickerEl.textContent = "Clue station · Agent";
     modelTitleEl.textContent = "Transcript as JSON";
     modelStatusEl.textContent = state.busy ? "Streaming" : "Live";
   } else if (state.view === "tokens") {
     const allReported = state.calls.length > 0 && state.calls.every((call) => call.usage);
-    detailKickerEl.textContent = `Model pricing · ${modelName()}`;
+    detailKickerEl.textContent = `Cost room · ${modelName()}`;
     modelTitleEl.textContent = "Transcript tokens & session cost";
     modelStatusEl.textContent = state.busy ? "Estimating" : allReported ? "Reported" : "Estimate";
   } else {
-    detailKickerEl.textContent = `Model · ${modelName()}`;
+    detailKickerEl.textContent = `Discovery station · ${modelName()}`;
     modelTitleEl.textContent = state.busy ? "Using one snapshot" : "No transcript stored";
     modelStatusEl.textContent = state.busy ? "Working" : "Idle";
   }
@@ -533,15 +533,43 @@ async function animateWirePacket(payload, direction) {
   packet.replaceChildren();
   if (direction === "outbound") {
     packet.append(makeSnapshotPayload(payload, "Sent to model"));
-    explanationTitle.textContent = "Every new prompt resends the entire conversation";
-    explanationCopy.textContent =
-      "This is the complete model input: the system prompt, your new message, and the entire conversation transcript so far. Take as long as you need to inspect it, then send all of it to the model again.";
+    explanationTitle.textContent = "What gets sent with each prompt";
+    explanationCopy.className = "model-input-equation";
+    const equationParts = [
+      [
+        "the system prompt",
+        "",
+        "A system prompt is a set of high-priority instructions that tells an AI assistant how to behave, what role to play, and what tools it can use.",
+      ],
+      ["your new message", "+"],
+      ["the entire conversation transcript so far", "+"],
+      ["complete model input", "="],
+    ];
+    explanationCopy.replaceChildren(
+      ...equationParts.flatMap(([label, operator, definition], index) => {
+        const term = document.createElement("span");
+        term.className = index === equationParts.length - 1 ? "equation-term result" : "equation-term";
+        term.textContent = label;
+        if (definition) {
+          term.classList.add("has-definition");
+          term.tabIndex = 0;
+          term.dataset.definition = definition;
+          term.setAttribute("aria-label", `${label}: ${definition}`);
+        }
+        if (!operator) return [term];
+        const symbol = document.createElement("span");
+        symbol.className = "equation-operator";
+        symbol.textContent = operator;
+        return [symbol, term];
+      }),
+    );
   } else {
     const token = document.createElement("span");
     token.className = "wire-token";
     token.textContent = payload;
     packet.append(token);
     explanationTitle.textContent = "The model returns the answer as tokens";
+    explanationCopy.className = "";
     explanationCopy.textContent =
       "This moving piece represents response tokens streaming from the model back to the agent. The agent joins those pieces and displays the growing answer in the transcript.";
   }
@@ -599,9 +627,7 @@ async function animateWirePacket(payload, direction) {
 
   if (direction === "outbound") {
     caption.textContent = "The full transcript is now at the model. Continue when you are ready.";
-    explanationTitle.textContent = "The model has the full conversation—but has not answered yet";
-    explanationCopy.textContent =
-      "The request is paused at the model. Click the button when you are ready to let the model process this transcript and stream response tokens back to the agent.";
+    explanationTitle.textContent = "Ready for the model";
     continueButton.textContent = "Start model response →";
     continueButton.hidden = false;
     continueButton.focus();
@@ -885,9 +911,11 @@ async function runThinkingLevel(column, prompt) {
 
 async function applyStreamEvent(call, event) {
   if (event.type === "delta" && typeof event.text === "string") {
-    // One animated piece is enough to demonstrate streaming. Animating every
-    // delta serially makes long answers take seconds per chunk to display.
-    if (!call.animatedInboundPiece) {
+    if (call.number === 1) {
+      for (const piece of teachingTokens(event.text)) {
+        await animateWirePacket(piece.text, "inbound");
+      }
+    } else if (!call.animatedInboundPiece) {
       call.animatedInboundPiece = true;
       await animateWirePacket(event.text, "inbound");
     }
@@ -1094,7 +1122,7 @@ for (const tab of tabs) {
     workspaceEl.hidden = standalone;
     comparisonWorkspaceEl.hidden = !comparing;
     thinkingWorkspaceEl.hidden = !thinking;
-    newChatEl.textContent = standalone ? "Clear results" : "New chat";
+    newChatEl.textContent = "Reset room";
     for (const candidate of tabs) {
       const active = candidate === tab;
       candidate.classList.toggle("active", active);

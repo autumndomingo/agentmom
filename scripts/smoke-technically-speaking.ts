@@ -105,7 +105,7 @@ try {
 
   const page = await fetch(`${baseUrl}/technically-speaking/`, { headers });
   assert.equal(page.status, 200);
-  assert.match(await page.text(), /How a chat agent works/);
+  assert.match(await page.text(), /The Agent Escape Room/);
 
   const config = await fetch(`${baseUrl}/technically-speaking/api/config`, { headers });
   assert.equal(config.status, 200);

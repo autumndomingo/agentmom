@@ -7,43 +7,52 @@
       name="description"
       content="Interactive views of how an agent, transcript, and language models work together."
     />
-    <title>Agent transcript prototypes</title>
+    <title>The Agent Escape Room</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <main class="shell">
       <header class="topbar">
-        <div>
-          <p class="eyebrow">Prototype</p>
-          <h1>How a chat agent works</h1>
+        <div class="topbar-copy">
+          <p class="eyebrow">An interactive course for curious humans</p>
+          <h1>The Agent Escape Room</h1>
+          <p class="topbar-intro">
+            Explore one room at a time. Each room reveals a clue about what happens
+            after you press Send—no technical background required.
+          </p>
         </div>
-        <button id="new-chat" class="button secondary" type="button">New chat</button>
+        <div class="mission-stamp" aria-hidden="true"><span>8 rooms</span><b>Start here</b></div>
+        <button id="new-chat" class="button secondary" type="button">Reset room</button>
       </header>
 
-      <nav class="prototype-picker" aria-label="Choose a prototype">
+      <div class="room-map-heading">
+        <div><span>ESCAPE MAP</span><h2>Choose a room to investigate</h2></div>
+        <p>There is no wrong order. Start with Room 1 for the full story.</p>
+      </div>
+      <nav class="prototype-picker" aria-label="Choose an escape room">
         <button class="prototype-tab active" data-view="wire" type="button">
-          1. Live wire
+          <small>Room 01</small><span>The Message Journey</span>
         </button>
         <button class="prototype-tab" data-view="traffic" type="button">
-          2. Traffic log
+          <small>Room 02</small><span>What Crossed?</span>
         </button>
         <button class="prototype-tab" data-view="calls" type="button">
-          3. Call cards
+          <small>Room 03</small><span>One Model Call</span>
         </button>
         <button class="prototype-tab" data-view="json" type="button">
-          4. JSON transcript
+          <small>Room 04</small><span>Conversation Memory</span>
         </button>
         <button class="prototype-tab" data-view="system" type="button">
-          5. System prompt
+          <small>Room 05</small><span>Hidden Instructions</span>
         </button>
         <button class="prototype-tab" data-view="compare" type="button">
-          6. Compare models
+          <small>Room 06</small><span>Model Showdown</span>
         </button>
         <button class="prototype-tab" data-view="tokens" type="button">
-          7. Tokens &amp; cost
+          <small>Room 07</small><span>Tokens &amp; Cost</span>
         </button>
         <button class="prototype-tab" data-view="thinking" type="button">
-          8. Thinking
+          <small>Room 08</small><span>Thinking Levels</span>
         </button>
       </nav>
 
@@ -51,8 +60,8 @@
         <section class="agent-area" aria-labelledby="agent-title">
           <div class="section-heading">
             <div>
-              <p class="eyebrow">Agent</p>
-              <h2 id="agent-title">Transcript</h2>
+              <p class="eyebrow">Clue station · Agent</p>
+              <h2 id="agent-title">The conversation so far</h2>
             </div>
             <span id="message-count" class="count">0 messages</span>
           </div>
@@ -78,7 +87,7 @@
         <section class="model-area" aria-labelledby="model-title">
           <div class="section-heading model-heading">
             <div>
-              <p id="detail-kicker" class="eyebrow">Model</p>
+              <p id="detail-kicker" class="eyebrow">Discovery station · Model</p>
               <h2 id="model-title">No transcript stored</h2>
             </div>
             <span id="model-status" class="status idle">Idle</span>
