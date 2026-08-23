@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Interactive views of how an agent, transcript, and language models work together."
+    />
+    <title>Agent transcript prototypes</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Prototype</p>
+          <h1>How a chat agent works</h1>
+        </div>
+        <button id="new-chat" class="button secondary" type="button">New chat</button>
+      </header>
+
+      <nav class="prototype-picker" aria-label="Choose a prototype">
+        <button class="prototype-tab active" data-view="wire" type="button">
+          1. Live wire
+        </button>
+        <button class="prototype-tab" data-view="traffic" type="button">
+          2. Traffic log
+        </button>
+        <button class="prototype-tab" data-view="calls" type="button">
+          3. Call cards
+        </button>
+        <button class="prototype-tab" data-view="json" type="button">
+          4. JSON transcript
+        </button>
+        <button class="prototype-tab" data-view="system" type="button">
+          5. System prompt
+        </button>
+        <button class="prototype-tab" data-view="compare" type="button">
+          6. Compare models
+        </button>
+        <button class="prototype-tab" data-view="tokens" type="button">
+          7. Tokens &amp; cost
+        </button>
+        <button class="prototype-tab" data-view="thinking" type="button">
+          8. Thinking
+        </button>
+      </nav>
+
+      <section class="workspace" data-view="wire">
+        <section class="agent-area" aria-labelledby="agent-title">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Agent</p>
+              <h2 id="agent-title">Transcript</h2>
+            </div>
+            <span id="message-count" class="count">0 messages</span>
+          </div>
+
+          <ol id="transcript" class="transcript" aria-live="polite"></ol>
+
+          <form id="composer" class="composer">
+            <div class="draft-message">
+              <span class="role user">user</span>
+              <label class="sr-only" for="draft">Draft message</label>
+              <textarea
+                id="draft"
+                rows="2"
+                placeholder="Try “My name is Sam.”"
+                autocomplete="off"
+              ></textarea>
+              <span class="draft-label">draft · not sent</span>
+            </div>
+            <button id="send" class="button primary" type="submit">Send</button>
+          </form>
+        </section>
+
+        <section class="model-area" aria-labelledby="model-title">
+          <div class="section-heading model-heading">
+            <div>
+              <p id="detail-kicker" class="eyebrow">Model</p>
+              <h2 id="model-title">No transcript stored</h2>
+            </div>
+            <span id="model-status" class="status idle">Idle</span>
+          </div>
+
+          <div id="prototype-stage" class="prototype-stage" aria-live="polite"></div>
+          <p id="request-error" class="request-error" role="alert" hidden></p>
+        </section>
+      </section>
+
+      <section id="comparison-workspace" class="comparison-workspace" hidden>
+        <header class="comparison-heading">
+          <div>
+            <p class="eyebrow">Three model calls</p>
+            <h2>One prompt, three answers</h2>
+          </div>
+          <span id="comparison-status" class="status idle">Ready</span>
+        </header>
+
+        <form id="comparison-form" class="comparison-form">
+          <div class="preset-row" aria-label="Example questions">
+            <button class="preset active" type="button" data-preset="nyc">NYC knowledge</button>
+            <button class="preset" type="button" data-preset="tiananmen">Tiananmen Square</button>
+            <button class="preset" type="button" data-preset="taiwan">Taiwan</button>
+          </div>
+          <label for="comparison-prompt">Prompt sent to every model</label>
+          <div class="comparison-composer">
+            <textarea id="comparison-prompt" rows="3" spellcheck="true"></textarea>
+            <button id="ask-models" class="button primary" type="submit">Ask all 3</button>
+          </div>
+        </form>
+
+        <div class="model-grid" aria-live="polite">
+          <article
+            class="model-column"
+            data-model="meta-llama/llama-3.2-1b-instruct"
+            data-input-price="0.027"
+            data-output-price="0.201"
+          >
+            <header class="model-card-head">
+              <div>
+                <p class="eyebrow">Small · open weights</p>
+                <h3>Llama 3.2 1B</h3>
+              </div>
+              <span class="model-run-status">Not asked</span>
+            </header>
+            <p class="model-facts">Meta · United States · 1B parameters</p>
+            <p class="model-pricing">Price · input $0.027 / 1M tokens · output $0.201 / 1M tokens</p>
+            <p class="model-route">OpenRouter ID · meta-llama/llama-3.2-1b-instruct</p>
+            <div class="model-answer empty">Its answer will appear here.</div>
+            <p class="model-usage">—</p>
+          </article>
+
+          <article
+            class="model-column"
+            data-model="deepseek/deepseek-v3.2"
+            data-input-price="0.26"
+            data-output-price="0.38"
+          >
+            <header class="model-card-head">
+              <div>
+                <p class="eyebrow">Large · open weights</p>
+                <h3>DeepSeek V3.2</h3>
+              </div>
+              <span class="model-run-status">Not asked</span>
+            </header>
+            <p class="model-facts">DeepSeek · China</p>
+            <p class="model-pricing">Price · input $0.26 / 1M tokens · output $0.38 / 1M tokens</p>
+            <p class="model-route">OpenRouter ID · deepseek/deepseek-v3.2</p>
+            <div class="model-answer empty">Its answer will appear here.</div>
+            <p class="model-usage">—</p>
+          </article>
+
+          <article
+            class="model-column"
+            data-model="openai/gpt-5.6-luna"
+            data-input-price="0.20"
+            data-output-price="1.20"
+          >
+            <header class="model-card-head">
+              <div>
+                <p class="eyebrow">Large · closed weights</p>
+                <h3>GPT-5.6 Luna</h3>
+              </div>
+              <span class="model-run-status">Not asked</span>
+            </header>
+            <p class="model-facts">OpenAI · United States</p>
+            <p class="model-pricing">Price · input $0.20 / 1M tokens · output $1.20 / 1M tokens</p>
+            <p class="model-route">OpenRouter ID · openai/gpt-5.6-luna</p>
+            <div class="model-answer empty">Its answer will appear here.</div>
+            <p class="model-usage">—</p>
+          </article>
+        </div>
+        <p id="comparison-error" class="request-error" role="alert" hidden></p>
+      </section>
+
+      <section id="thinking-workspace" class="comparison-workspace thinking-workspace" hidden>
+        <header class="comparison-heading">
+          <div>
+            <p class="eyebrow">Three calls to GPT-5.6 Luna</p>
+            <h2>One model, three thinking levels</h2>
+          </div>
+          <span id="thinking-status" class="status idle">Ready</span>
+        </header>
+
+        <form id="thinking-form" class="comparison-form">
+          <div class="preset-row" aria-label="Example questions">
+            <button class="thinking-preset" type="button" data-thinking-preset="schedule">
+              Meetup schedule
+            </button>
+            <button class="thinking-preset active" type="button" data-thinking-preset="numbers">
+              Number puzzle
+            </button>
+            <button class="thinking-preset" type="button" data-thinking-preset="bug">
+              Bug fix
+            </button>
+          </div>
+          <label for="thinking-prompt">Prompt sent with each thinking level</label>
+          <div class="comparison-composer">
+            <textarea id="thinking-prompt" rows="4" spellcheck="true"></textarea>
+            <button id="run-thinking" class="button primary" type="submit">Run all 3</button>
+          </div>
+        </form>
+
+        <div class="model-grid thinking-grid" aria-live="polite">
+          <article class="model-column thinking-column" data-effort="none">
+            <header class="model-card-head">
+              <div>
+                <p class="eyebrow">Reasoning effort · none</p>
+                <h3>Thinking off</h3>
+              </div>
+              <span class="thinking-run-status">Not asked</span>
+            </header>
+            <p class="thinking-model">GPT-5.6 Luna · same prompt</p>
+            <div class="thinking-section-head">
+              <span>Thinking summary</span>
+              <strong class="thinking-token-count">—</strong>
+            </div>
+            <div class="thinking-trace empty">No thinking was requested.</div>
+            <p class="thinking-section-label">Final answer</p>
+            <div class="model-answer thinking-answer empty">Its answer will appear here.</div>
+            <p class="model-usage thinking-usage">—</p>
+          </article>
+
+          <article class="model-column thinking-column" data-effort="low">
+            <header class="model-card-head">
+              <div>
+                <p class="eyebrow">Reasoning effort · low</p>
+                <h3>Thinking low</h3>
+              </div>
+              <span class="thinking-run-status">Not asked</span>
+            </header>
+            <p class="thinking-model">GPT-5.6 Luna · same prompt</p>
+            <div class="thinking-section-head">
+              <span>Thinking summary</span>
+              <strong class="thinking-token-count">—</strong>
+            </div>
+            <div class="thinking-trace empty">Its thinking summary will appear here.</div>
+            <p class="thinking-section-label">Final answer</p>
+            <div class="model-answer thinking-answer empty">Its answer will appear here.</div>
+            <p class="model-usage thinking-usage">—</p>
+          </article>
+
+          <article class="model-column thinking-column" data-effort="high">
+            <header class="model-card-head">
+              <div>
+                <p class="eyebrow">Reasoning effort · high</p>
+                <h3>Thinking high</h3>
+              </div>
+              <span class="thinking-run-status">Not asked</span>
+            </header>
+            <p class="thinking-model">GPT-5.6 Luna · same prompt</p>
+            <div class="thinking-section-head">
+              <span>Thinking summary</span>
+              <strong class="thinking-token-count">—</strong>
+            </div>
+            <div class="thinking-trace empty">Its thinking summary will appear here.</div>
+            <p class="thinking-section-label">Final answer</p>
+            <div class="model-answer thinking-answer empty">Its answer will appear here.</div>
+            <p class="model-usage thinking-usage">—</p>
+          </article>
+        </div>
+        <p id="thinking-error" class="request-error" role="alert" hidden></p>
+      </section>
+    </main>
+
+    <template id="wire-template">
+      <div class="wire-view">
+        <div class="wire-labels" aria-hidden="true">
+          <span>agent</span>
+          <span>model</span>
+        </div>
+        <div class="wire-track" aria-label="Live connection between agent and model">
+          <span class="wire-end agent-end"></span>
+          <span class="wire-line"></span>
+          <span class="wire-end model-end"></span>
+          <div id="moving-packet" class="moving-packet" hidden></div>
+        </div>
+        <p id="wire-caption" class="stage-caption">Nothing is crossing the wire.</p>
+      </div>
+    </template>
+
+    <template id="traffic-template">
+      <div class="traffic-view">
+        <div class="lane-headings" aria-hidden="true">
+          <span>Agent</span>
+          <span>Model</span>
+        </div>
+        <ol id="traffic-list" class="traffic-list"></ol>
+        <p id="empty-traffic" class="empty-state">Send a message to start the log.</p>
+      </div>
+    </template>
+
+    <template id="calls-template">
+      <div class="calls-view">
+        <div id="call-list" class="call-list"></div>
+        <p id="empty-calls" class="empty-state">Each model call will appear here.</p>
+      </div>
+    </template>
+
+    <template id="json-template">
+      <div class="json-view">
+        <div class="json-note">
+          <span>Current transcript</span>
+          <span>Draft excluded until Send</span>
+        </div>
+        <pre class="json-code" aria-label="Current transcript as JSON"><code id="json-output"></code></pre>
+      </div>
+    </template>
+
+    <template id="system-template">
+      <div class="system-view">
+        <label class="system-label" for="system-prompt">System prompt</label>
+        <textarea id="system-prompt" rows="12" spellcheck="true"></textarea>
+        <p class="system-note">Sent with every model call. Changes affect the next call.</p>
+      </div>
+    </template>
+
+    <template id="tokens-template">
+      <div class="token-cost-view">
+        <div class="token-view-heading">
+          <div>
+            <span class="snapshot-label">Current model input</span>
+            <strong id="visible-token-count">0 estimated tokens</strong>
+          </div>
+          <span class="tokenizer-label">js-tiktoken · o200k_base estimate</span>
+        </div>
+
+        <div
+          id="tokenized-transcript"
+          class="tokenized-transcript"
+          aria-label="System prompt and transcript split into estimated tokens"
+        ></div>
+
+        <section class="cost-math" aria-labelledby="cost-heading">
+          <div class="cost-heading-row">
+            <div>
+              <span class="snapshot-label">All calls this session</span>
+              <h3 id="cost-heading">Token cost</h3>
+            </div>
+            <strong id="session-cost">$0.000000</strong>
+          </div>
+
+          <div class="cost-row">
+            <span>Input</span>
+            <code id="input-cost-math">0 tokens × $0.20 / 1M = $0.000000</code>
+          </div>
+          <div class="cost-row">
+            <span>Output</span>
+            <code id="output-cost-math">0 tokens × $1.20 / 1M = $0.000000</code>
+          </div>
+          <p id="cost-note" class="cost-note">
+            Live calls use an estimate. OpenRouter supplies the final token counts.
+          </p>
+        </section>
+      </div>
+    </template>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

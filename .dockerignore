@@ -1,0 +1,13 @@
+.git
+.direnv
+.env
+.env.*
+.agentmom
+.agentmom-auth
+dist
+node_modules
+projects
+result
+workspaces
+worktrees
+npm-debug.log

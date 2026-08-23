@@ -30,6 +30,9 @@ smoke-session-switch:
 smoke-skills:
     nix develop -c npm run smoke:skills
 
+smoke-technically-speaking:
+    nix develop -c npm run smoke:technically-speaking
+
 smoke-local:
     nix develop -c npm run smoke:local
 
@@ -51,6 +54,10 @@ check-prod:
     [[ "$health" == *'"ok":true'* ]]
     me_status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 https://agentmom.xyz/api/me)"
     [[ "$me_status" == "401" ]]
+    tutorial_status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 https://agentmom.xyz/technically-speaking/)"
+    [[ "$tutorial_status" == "302" ]]
+    tutorial_api_status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 https://agentmom.xyz/technically-speaking/api/config)"
+    [[ "$tutorial_api_status" == "401" ]]
     echo "prod check ok"
 
 logs-prod:

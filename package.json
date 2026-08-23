@@ -13,6 +13,7 @@
     "smoke:web-search": "tsx scripts/smoke-web-search.ts",
     "smoke:session-switch": "tsx scripts/smoke-session-switch.ts",
     "smoke:skills": "AGENTMOM_EXECUTOR=local tsx scripts/smoke-skills.ts",
+    "smoke:technically-speaking": "node technically-speaking/tokenizer-smoke.mjs && tsx scripts/smoke-technically-speaking.ts",
     "smoke:fly": "tsx scripts/smoke-fly.ts",
     "smoke:local": "AGENTMOM_EXECUTOR=local tsx scripts/smoke-local.ts",
     "smoke:deploy": "AGENTMOM_EXECUTOR=local tsx scripts/smoke-deploy.ts"
@@ -31,6 +32,7 @@
     "@fontsource-variable/fraunces": "^5.2.9",
     "@uiw/react-codemirror": "^4.25.11",
     "@vitejs/plugin-react": "^5.1.2",
+    "js-tiktoken": "1.0.21",
     "grammy": "^1.43.0",
     "lucide-react": "^0.468.0",
     "react": "^19.2.3",

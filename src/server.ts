@@ -30,6 +30,7 @@ import {
 import { startSandboxReaper } from "./sandbox-reaper.js";
 import { ensureWorkspaceProjectPath, workspaceApiPath, workspacePreviewPath } from "./server-paths.js";
 import { createSkill, deleteSkill, listSkillFiles, readSkillFile, writeSkillFile } from "./skills.js";
+import { handleTechnicallySpeakingApi } from "./technically-speaking.js";
 import { TelegramChannel } from "./telegram-channel.js";
 import {
   MAX_MESSAGE_ATTACHMENT_BYTES,
@@ -108,6 +109,26 @@ const server = createServer(async (req, res) => {
         body: body.length > 0 ? body : undefined
       });
       return sendProxyResponse(res, response.status, response.headers, req.method === "HEAD" ? undefined : response.body);
+    }
+
+    const tutorialApi = url.pathname.startsWith("/technically-speaking/api/");
+    const tutorialPage =
+      url.pathname === "/technically-speaking" || url.pathname.startsWith("/technically-speaking/");
+    if (tutorialPage) {
+      if (!currentUser(req)) {
+        if (tutorialApi) return sendError(res, new Error("unauthorized"), 401);
+        res.writeHead(302, { Location: "/" });
+        res.end();
+        return;
+      }
+      if (url.pathname === "/technically-speaking") {
+        res.writeHead(302, { Location: `/technically-speaking/${url.search}` });
+        res.end();
+        return;
+      }
+      if (tutorialApi) {
+        return await handleTechnicallySpeakingApi(url.pathname, req, res, config);
+      }
     }
 
     const preview = workspacePreviewPath(url.pathname);

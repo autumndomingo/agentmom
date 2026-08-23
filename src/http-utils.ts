@@ -113,8 +113,11 @@ export function serveStatic(rootDir: string, pathname: string, res: ServerRespon
   const clientDir = join(rootDir, "dist/client");
   const relativePath = pathname === "/" ? "/index.html" : pathname;
   const requestedFile = join(clientDir, relativePath);
+  const directoryIndex = join(requestedFile, "index.html");
   const filePath = isFile(requestedFile)
     ? requestedFile
+    : isFile(directoryIndex)
+      ? directoryIndex
     : extname(pathname) === ""
       ? join(clientDir, "index.html")
       : undefined;

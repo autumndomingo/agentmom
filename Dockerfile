@@ -12,6 +12,7 @@ RUN npm ci --ignore-scripts && npm rebuild esbuild
 COPY tsconfig.json vite.config.ts index.html ./
 COPY src ./src
 COPY web ./web
+COPY technically-speaking ./technically-speaking
 RUN npx vite build
 
 FROM node:24-bookworm-slim
