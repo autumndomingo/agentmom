@@ -511,21 +511,34 @@ async function animateWirePacket(payload, direction) {
   const packet = document.querySelector("#moving-packet");
   const caption = document.querySelector("#wire-caption");
   const track = document.querySelector(".wire-track");
-  if (!packet || !caption || !track) return;
+  const explanation = document.querySelector("#wire-explanation");
+  const explanationTitle = document.querySelector("#wire-explanation-title");
+  const explanationCopy = document.querySelector("#wire-explanation-copy");
+  if (!packet || !caption || !track || !explanation || !explanationTitle || !explanationCopy) return;
 
   packet.replaceChildren();
   if (direction === "outbound") {
     packet.append(makeSnapshotPayload(payload, "Sent to model"));
+    explanationTitle.textContent = "The whole conversation goes back to the model";
+    explanationCopy.textContent =
+      "Each new prompt creates a new model call. The agent sends the system prompt, your new message, and the transcript so far together so the model has the context it needs to answer.";
   } else {
     const token = document.createElement("span");
     token.className = "wire-token";
     token.textContent = payload;
     packet.append(token);
+    explanationTitle.textContent = "The model returns the answer as tokens";
+    explanationCopy.textContent =
+      "This moving piece represents response tokens streaming from the model back to the agent. The agent joins those pieces and displays the growing answer in the transcript.";
   }
+  explanation.hidden = false;
+  explanation.className = `wire-explanation ${direction}`;
   packet.hidden = false;
   packet.className = `moving-packet ${direction}`;
   caption.textContent =
-    direction === "outbound" ? "Full snapshot sent to model." : "One streamed piece returned.";
+    direction === "outbound"
+      ? "The transcript pauses here, then travels from the agent to the model."
+      : "Response tokens are now traveling from the model back to the agent.";
 
   const trackHeight = Math.max(220, packet.scrollHeight + 48);
   track.style.height = `${trackHeight}px`;
@@ -534,10 +547,20 @@ async function animateWirePacket(payload, direction) {
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   const animation = packet.animate(
     direction === "outbound"
-      ? [{ transform: "translateX(0)" }, { transform: `translateX(${distance}px)` }]
-      : [{ transform: `translateX(${distance}px)` }, { transform: "translateX(0)" }],
+      ? [
+          { transform: "translateX(0)", offset: 0 },
+          { transform: "translateX(0)", offset: 0.34 },
+          { transform: `translateX(${distance}px)`, offset: 0.9 },
+          { transform: `translateX(${distance}px)`, offset: 1 },
+        ]
+      : [
+          { transform: `translateX(${distance}px)`, opacity: 0.45, offset: 0 },
+          { transform: `translateX(${distance}px)`, opacity: 1, offset: 0.12 },
+          { transform: "translateX(0)", opacity: 1, offset: 0.88 },
+          { transform: "translateX(0)", opacity: 0.7, offset: 1 },
+        ],
     {
-      duration: reducedMotion ? 1 : direction === "outbound" ? 900 : 420,
+      duration: reducedMotion ? 1 : direction === "outbound" ? 5200 : 1400,
       easing: direction === "outbound" ? "ease-in-out" : "ease-out",
       fill: "forwards",
     },

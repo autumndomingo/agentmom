@@ -188,10 +188,35 @@ function App() {
   }, [state.messages, toolActions]);
 
   const viewportRef = useRef<HTMLDivElement>(null);
+  const streamRef = useRef<HTMLDivElement>(null);
+  const shouldFollowOutput = useRef(true);
+
+  const handleThreadScroll = useCallback(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    shouldFollowOutput.current = distanceFromBottom <= 48;
+  }, []);
+
   useEffect(() => {
+    const viewport = viewportRef.current;
+    const stream = streamRef.current;
+    if (!viewport || !stream) return;
+
+    const followOutput = () => {
+      if (shouldFollowOutput.current) viewport.scrollTop = viewport.scrollHeight;
+    };
+    const observer = new ResizeObserver(followOutput);
+    observer.observe(stream);
+    followOutput();
+    return () => observer.disconnect();
+  }, [state.session?.path, selectedWorkspace?.id]);
+
+  useEffect(() => {
+    shouldFollowOutput.current = true;
     const el = viewportRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [timeline.length, state.isRunning]);
+  }, [state.session?.path, selectedWorkspace?.id]);
 
   // Auto-open the preview panel only once a live preview/website becomes available.
   const previewCount = state.previews.length;
@@ -351,8 +376,8 @@ function App() {
           <div className={rightPanelOpen ? "content-grid" : "content-grid right-panel-closed"}>
             <section className="thread-panel">
               <ThreadPrimitive.Root className="thread-root">
-                <div className="thread-viewport" ref={viewportRef}>
-                  <div className="thread-stream">
+                <div className="thread-viewport" ref={viewportRef} onScroll={handleThreadScroll}>
+                  <div className="thread-stream" ref={streamRef}>
                     {timeline.length === 0 ? (
                       <div className="empty-thread">
                         <h2>Ask Pi to work in this workspace.</h2>
@@ -489,7 +514,14 @@ function MessageRow({ message }: { message: ChatMessage }) {
   return (
     <div className="msg-row assistant">
       <div className="assistant-body">
-        <Markdown remarkPlugins={[remarkGfm]}>{message.content}</Markdown>
+        <Markdown
+          remarkPlugins={[remarkGfm]}
+          components={{
+            a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noreferrer" />
+          }}
+        >
+          {message.content}
+        </Markdown>
         <MessageAttachments attachments={message.attachments ?? []} />
       </div>
     </div>

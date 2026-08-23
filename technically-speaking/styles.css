@@ -632,6 +632,55 @@ h2 {
   min-height: 24px;
 }
 
+.wire-explanation {
+  max-width: 680px;
+  margin: 14px auto 0;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--agent);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  text-align: left;
+  animation: explanation-in 320ms ease-out both;
+}
+
+.wire-explanation.inbound {
+  border-left-color: var(--model);
+}
+
+.wire-explanation strong {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--ink);
+  font-size: 0.9rem;
+}
+
+.wire-explanation p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+@keyframes explanation-in {
+  from {
+    opacity: 0;
+    transform: translateY(7px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wire-explanation {
+    animation: none;
+  }
+}
+
 .traffic-view {
   min-height: 440px;
 }
