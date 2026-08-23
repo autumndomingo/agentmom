@@ -42,8 +42,6 @@ const comparisonPrompts = {
 };
 
 const thinkingPrompts = {
-  schedule:
-    "Schedule four 20-minute talks (A–D) and one 10-minute break from 6:30 to 8:00 PM. A must be before B; C must start right after the break; D cannot be first; B must be last. Give exact times in five plain-text lines. Do not use Markdown.",
   numbers:
     "Use 2, 3, 7, 8, 25, and 50 exactly once to make 950. You may use +, −, ×, and ÷; you may repeat an operator and do not need to use every operator. Parentheses are allowed. Give one equation, then check its arithmetic. If you cannot find one, say so. Use plain text; do not use Markdown.",
   bug: 'A form should save only when all three are true: the title is not blank, the email contains @, and the user checked the consent box. The current code is: if (title || email.includes("@") && consent) save(); A blank title with a valid email and checked consent still saves. Write the corrected one-line condition and explain the bug in one plain-text sentence. Do not use Markdown or code fences.',
@@ -67,6 +65,7 @@ const state = {
   roomOneSummaryDismissed: false,
   roomTwoSelections: { language: "", personality: "", response: "" },
   roomTwoIntroSeen: false,
+  roomFiveIntroSeen: false,
 };
 
 function textPart(text) {
@@ -436,6 +435,66 @@ function showRoomTwoIntro() {
   overlay.append(card);
   document.body.append(overlay);
   startButton.focus();
+}
+
+function makeConceptOverlay({ id, room, title, copy, buttonLabel, onClose }) {
+  const overlay = document.createElement("div");
+  overlay.id = id;
+  overlay.className = "room-two-intro-overlay";
+  overlay.setAttribute("role", "dialog");
+  overlay.setAttribute("aria-modal", "true");
+  overlay.setAttribute("aria-labelledby", `${id}-title`);
+
+  const card = document.createElement("section");
+  card.className = "room-two-intro-card";
+  const kicker = document.createElement("span");
+  kicker.className = "room-complete-kicker";
+  kicker.textContent = room;
+  const heading = document.createElement("h2");
+  heading.id = `${id}-title`;
+  heading.textContent = title;
+  const body = document.createElement("p");
+  body.textContent = copy;
+  const button = document.createElement("button");
+  button.className = "room-complete-next";
+  button.type = "button";
+  button.textContent = buttonLabel;
+  button.addEventListener("click", () => {
+    overlay.remove();
+    onClose?.();
+  });
+
+  card.append(kicker, heading, body, button);
+  overlay.append(card);
+  document.body.append(overlay);
+  button.focus();
+}
+
+function showRoomFiveIntro() {
+  if (state.roomFiveIntroSeen) return;
+  state.roomFiveIntroSeen = true;
+  makeConceptOverlay({
+    id: "room-five-intro",
+    room: "Room 5 overview",
+    title: "How much should a model think?",
+    copy:
+      "You’ll send the same problem to the same model three times using low, medium, and high thinking levels. Compare answer quality, reasoning tokens, response time, and cost to see what extra thinking changes.",
+    buttonLabel: "Start room 5  →",
+    onClose: () => thinkingPromptEl.focus(),
+  });
+}
+
+function showRoomFiveSummary() {
+  if (document.querySelector("#room-five-summary")) return;
+  makeConceptOverlay({
+    id: "room-five-summary",
+    room: "Room 5 complete",
+    title: "More thinking is a tradeoff",
+    copy:
+      "Higher thinking can help with difficult problems, but it usually takes more time and tokens and may cost more. The takeaway is to use deeper thinking when the task needs it—not automatically for every question.",
+    buttonLabel: "Review the results",
+    onClose: () => runThinkingEl.focus(),
+  });
 }
 
 function transcriptAsJson() {
@@ -948,6 +1007,7 @@ async function runComparisonModel(column, prompt) {
 }
 
 function clearThinkingResults() {
+  document.querySelector("#room-five-summary")?.remove();
   for (const column of document.querySelectorAll(".thinking-column")) {
     const status = column.querySelector(".thinking-run-status");
     const count = column.querySelector(".thinking-token-count");
@@ -1288,6 +1348,7 @@ thinkingFormEl.addEventListener("submit", async (event) => {
     thinkingErrorEl.hidden = false;
   }
   setThinkingBusy(false);
+  if (results.some((result) => result.status === "fulfilled")) showRoomFiveSummary();
 });
 
 for (const tab of tabs) {
@@ -1324,6 +1385,7 @@ for (const tab of tabs) {
       renderStage();
       if (state.view === "system") showRoomTwoIntro();
     }
+    if (state.view === "thinking") showRoomFiveIntro();
   });
 }
 
