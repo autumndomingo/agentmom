@@ -171,6 +171,21 @@ function makeSnapshotPayload(snapshot, label = "Sent snapshot") {
   return payload;
 }
 
+function makeWireTokenPayload(snapshot) {
+  const items = snapshotItems(snapshot);
+  const payload = document.createElement("div");
+  payload.className = "snapshot-payload wire-token-payload";
+
+  const heading = document.createElement("span");
+  heading.className = "snapshot-label";
+  const tokenCount = tokenCountForItems(items);
+  heading.textContent = `The full conversation · ${tokenCount} estimated token${tokenCount === 1 ? "" : "s"}`;
+  payload.append(heading);
+
+  for (const item of items) payload.append(makeTokenizedRow(item));
+  return payload;
+}
+
 function renderTranscript() {
   transcriptEl.replaceChildren();
 
@@ -253,11 +268,30 @@ function renderStage() {
   const template = document.querySelector(`#${state.view}-template`);
   stageEl.append(template.content.cloneNode(true));
 
+  if (state.view === "wire") renderWireConceptCheck();
   if (state.view === "traffic") renderTraffic();
   if (state.view === "calls") renderCalls();
   if (state.view === "json") renderJson();
   if (state.view === "system") renderSystemPrompt();
   if (state.view === "tokens") renderTokensAndCost();
+}
+
+function renderWireConceptCheck() {
+  const firstCall = state.calls[0];
+  if (!firstCall || firstCall.live || firstCall.error) return;
+
+  const caption = document.querySelector("#wire-caption");
+  const explanation = document.querySelector("#wire-explanation");
+  const title = document.querySelector("#wire-explanation-title");
+  const copy = document.querySelector("#wire-explanation-copy");
+  if (!caption || !explanation || !title || !copy) return;
+
+  caption.textContent = "Concept check";
+  title.textContent = "What should you take away?";
+  copy.textContent =
+    "Every prompt sends the system prompt, your new message, and the full conversation history to the model. The model then streams its answer back as tokens.";
+  explanation.className = "wire-explanation concept-check";
+  explanation.hidden = direction === "outbound";
 }
 
 function renderSystemPrompt() {
@@ -511,7 +545,7 @@ function renderCalls() {
   }
 }
 
-async function animateWirePacket(payload, direction) {
+async function animateWirePacket(payload, direction, pauseAtModel = false) {
   if (state.view !== "wire") return;
   const packet = document.querySelector("#moving-packet");
   const caption = document.querySelector("#wire-caption");
@@ -532,7 +566,7 @@ async function animateWirePacket(payload, direction) {
 
   packet.replaceChildren();
   if (direction === "outbound") {
-    packet.append(makeSnapshotPayload(payload, "Sent to model"));
+    packet.append(makeWireTokenPayload(payload));
     explanationTitle.textContent = "What gets sent with each prompt";
     explanationCopy.className = "model-input-equation";
     const equationParts = [
@@ -580,7 +614,7 @@ async function animateWirePacket(payload, direction) {
   packet.className = `moving-packet ${direction}`;
   caption.textContent =
     direction === "outbound"
-      ? "Review the complete transcript, then continue when you are ready."
+      ? "The complete transcript is traveling from the agent to the model."
       : "Response tokens are now traveling from the model back to the agent.";
 
   const trackHeight = Math.max(220, packet.scrollHeight + 48);
@@ -588,15 +622,9 @@ async function animateWirePacket(payload, direction) {
   packet.style.top = `${Math.max(0, (trackHeight - packet.offsetHeight) / 2)}px`;
   const distance = Math.max(0, track.clientWidth - packet.offsetWidth);
 
-  if (direction === "outbound") {
+  if (direction === "outbound" && pauseAtModel) {
     state.awaitingModelStart = true;
     for (const tab of tabs) tab.disabled = true;
-    continueButton.textContent = "Send transcript to model →";
-    continueButton.hidden = false;
-    continueButton.focus();
-    await new Promise((resolve) => continueButton.addEventListener("click", resolve, { once: true }));
-    continueButton.hidden = true;
-    caption.textContent = "The complete transcript is traveling from the agent to the model.";
   }
 
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -625,7 +653,9 @@ async function animateWirePacket(payload, direction) {
   );
   await animation.finished;
 
-  if (direction === "outbound") {
+  if (direction === "outbound") explanation.hidden = false;
+
+  if (direction === "outbound" && pauseAtModel) {
     caption.textContent = "The full transcript is now at the model. Continue when you are ready.";
     explanationTitle.textContent = "Ready for the model";
     continueButton.textContent = "Start model response →";
@@ -941,7 +971,7 @@ async function applyStreamEvent(call, event) {
 }
 
 async function runOpenRouter(call) {
-  await animateWirePacket(call.snapshot, "outbound");
+  await animateWirePacket(call.snapshot, "outbound", call.number === 1);
 
   const response = await fetch("./api/chat", {
     method: "POST",

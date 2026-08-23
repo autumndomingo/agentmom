@@ -622,6 +622,59 @@ h2 {
   color: var(--surface);
 }
 
+.moving-packet.outbound {
+  width: min(88%, 720px);
+  max-width: none;
+  padding: 14px 16px;
+}
+
+.wire-token-payload {
+  gap: 10px;
+}
+
+.wire-token-payload .snapshot-label {
+  margin-bottom: 2px;
+  color: var(--ink);
+  font-weight: 900;
+  letter-spacing: 0.11em;
+}
+
+.wire-token-payload .tokenized-row {
+  grid-template-columns: 58px minmax(0, 1fr);
+  gap: 7px;
+}
+
+.wire-token-payload .payload-part-type {
+  display: none;
+}
+
+.wire-token-payload .token-pieces {
+  gap: 4px;
+  margin-top: 0;
+}
+
+.wire-token-payload .teaching-token {
+  padding: 3px 6px;
+  border: 1px solid color-mix(in srgb, var(--agent) 45%, transparent);
+  border-radius: 6px;
+  background: #e4f1e9;
+  color: var(--ink);
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 0.76rem;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.wire-token-payload .token-pieces.assistant .teaching-token {
+  border-color: color-mix(in srgb, var(--model) 42%, transparent);
+  background: #f2ded5;
+}
+
+.wire-token-payload .token-pieces.system .teaching-token {
+  border-color: #c7ae66;
+  background: #f4e7bf;
+}
+
 .stage-caption,
 .empty-state {
   color: var(--muted);
@@ -650,6 +703,10 @@ h2 {
 }
 
 .wire-explanation.inbound {
+  border-left-color: var(--model);
+}
+
+.wire-explanation.concept-check {
   border-left-color: var(--model);
 }
 
